@@ -1709,6 +1709,152 @@ block("S2.6.3", "GPU-resident PCG scalar ops (div/copy/axpy from device array)")
 
 
 # =============================================================================
+# S2.6.6 — Per-tile variants of the PCG hot kernels (B4.2). One thread per
+#          cell of an active 8³ block. Inactive blocks are not iterated.
+# =============================================================================
+
+@wp.func
+def _tile_to_ijk(tid: int, active_coords: wp.array(dtype=wp.vec3i),
+                 block_size: int) -> wp.vec3i:
+    """Map a per-tile thread id to a global (i,j,k) cell coord. Returned
+    coord may be out-of-grid; the caller bounds-checks against x.shape."""
+    cells_per_block = block_size * block_size * block_size
+    blk = tid // cells_per_block
+    rem = tid - blk * cells_per_block
+    di = rem // (block_size * block_size)
+    rem2 = rem - di * (block_size * block_size)
+    dj = rem2 // block_size
+    dk = rem2 - dj * block_size
+    c = active_coords[blk]
+    return wp.vec3i(c[0] * block_size + di,
+                     c[1] * block_size + dj,
+                     c[2] * block_size + dk)
+
+
+@wp.kernel
+def k3_apply_A_per_tile(
+    x: wp.array3d(dtype=float),
+    y: wp.array3d(dtype=float),
+    marker: wp.array3d(dtype=int),
+    active_coords: wp.array(dtype=wp.vec3i),
+    block_size: int,
+):
+    """[BLK S2.6.6] Apply Laplacian A·x on active tiles only."""
+    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    i = ijk[0]; j = ijk[1]; k = ijk[2]
+    nx = x.shape[0]; ny = x.shape[1]; nz = x.shape[2]
+    if i >= nx or j >= ny or k >= nz:
+        return
+    if marker[i, j, k] != 1:
+        return  # leave y alone; per-iter caller zero-fills before use
+    diag = float(0.0); sum_nb = float(0.0)
+    if i > 0:
+        m = marker[i - 1, j, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += x[i - 1, j, k]
+    if i < nx - 1:
+        m = marker[i + 1, j, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += x[i + 1, j, k]
+    if j > 0:
+        m = marker[i, j - 1, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += x[i, j - 1, k]
+    if j < ny - 1:
+        m = marker[i, j + 1, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += x[i, j + 1, k]
+    if k > 0:
+        m = marker[i, j, k - 1]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += x[i, j, k - 1]
+    if k < nz - 1:
+        m = marker[i, j, k + 1]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += x[i, j, k + 1]
+    y[i, j, k] = diag * x[i, j, k] - sum_nb
+
+
+block("S2.6.6", "Per-tile PCG: apply A on active blocks")(k3_apply_A_per_tile)
+
+
+@wp.kernel
+def k3_apply_invM_per_tile(
+    r: wp.array3d(dtype=float),
+    diag: wp.array3d(dtype=float),
+    z: wp.array3d(dtype=float),
+    marker: wp.array3d(dtype=int),
+    active_coords: wp.array(dtype=wp.vec3i),
+    block_size: int,
+):
+    """[BLK S2.6.6] z = M⁻¹ r on active tiles. Non-fluid cells of an active
+    tile get zeroed (matches the dense kernel's contract); cells outside
+    the active set keep their previous (zero-init) value."""
+    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    i = ijk[0]; j = ijk[1]; k = ijk[2]
+    if i >= r.shape[0] or j >= r.shape[1] or k >= r.shape[2]:
+        return
+    if marker[i, j, k] != 1:
+        z[i, j, k] = 0.0
+    else:
+        z[i, j, k] = r[i, j, k] / diag[i, j, k]
+
+
+block("S2.6.6", "Per-tile PCG: apply M⁻¹ on active blocks")(k3_apply_invM_per_tile)
+
+
+@wp.kernel
+def k3_dot_fluid_per_tile(
+    a: wp.array3d(dtype=float),
+    b: wp.array3d(dtype=float),
+    out: wp.array(dtype=float),
+    marker: wp.array3d(dtype=int),
+    active_coords: wp.array(dtype=wp.vec3i),
+    block_size: int,
+):
+    """[BLK S2.6.6] Inner product over fluid cells, per-tile dispatched.
+    Caller zeroes `out[0]` before launch."""
+    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    i = ijk[0]; j = ijk[1]; k = ijk[2]
+    if i >= a.shape[0] or j >= a.shape[1] or k >= a.shape[2]:
+        return
+    if marker[i, j, k] == 1:
+        wp.atomic_add(out, 0, a[i, j, k] * b[i, j, k])
+
+
+block("S2.6.6", "Per-tile PCG: fluid-cell dot product on active blocks")(k3_dot_fluid_per_tile)
+
+
+@wp.kernel
+def k3_axpy_devscalar_per_tile(
+    a_dev: wp.array(dtype=float), sign: float,
+    x: wp.array3d(dtype=float), y_in: wp.array3d(dtype=float),
+    y_out: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
+    active_coords: wp.array(dtype=wp.vec3i),
+    block_size: int,
+):
+    """[BLK S2.6.6] y_out = y_in + sign · a_dev[0] · x on active tiles."""
+    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    i = ijk[0]; j = ijk[1]; k = ijk[2]
+    if i >= x.shape[0] or j >= x.shape[1] or k >= x.shape[2]:
+        return
+    if marker[i, j, k] != 1:
+        y_out[i, j, k] = 0.0
+        return
+    a = a_dev[0] * sign
+    y_out[i, j, k] = y_in[i, j, k] + a * x[i, j, k]
+
+
+block("S2.6.6", "Per-tile PCG: AXPY with device-side scalar on active blocks")(k3_axpy_devscalar_per_tile)
+
+
+# =============================================================================
 # S2.10 — CFL helper: compute v_max on host (small reduction)
 # =============================================================================
 
@@ -2339,6 +2485,120 @@ class FlipSolver3D:
                       inputs=[self._pcg_rz_new, self._pcg_rz_old], device=dev)
         return max_iter
 
+    # ---------- internal: per-tile (block-sparse) PCG (S2.6.6 / B4.2) -------
+    def _build_active_blocks(self):
+        """Compact the active-block list into (n_active, coords). Shared by
+        sparse Jacobi / GS-RB / PCG. Returns the host-int count + the
+        device-side coord array."""
+        import warp.utils as wputils
+        nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
+        nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
+        nby = (ny + BLOCK_SIZE - 1) // BLOCK_SIZE
+        nbz = (nz + BLOCK_SIZE - 1) // BLOCK_SIZE
+        n_blocks = nbx * nby * nbz
+        if (self._block_active is None
+                or self._block_active.shape != (nbx, nby, nbz)):
+            self._block_active = zeros_int((nbx, nby, nbz), dev=dev)
+            self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
+            self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
+            self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
+        self._block_active.zero_()
+        wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
+                  inputs=[self.marker, self._block_active, BLOCK_SIZE], device=dev)
+        self._block_active_flat = self._block_active.flatten()
+        wputils.array_scan(self._block_active_flat, self._block_prefix,
+                           inclusive=True)
+        n_active = int(self._block_prefix[n_blocks - 1: n_blocks].numpy()[0])
+        if n_active > 0:
+            wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
+                      inputs=[self._block_active, self._block_prefix,
+                              self._block_coords], device=dev)
+        return n_active, self._block_coords
+
+    def _pressure_pcg_sparse(self, max_iter: int, tol: float = 1e-4,
+                              check_every: int = 10) -> int:
+        """Block-sparse PCG: identical algorithm to `_pressure_pcg`, but each
+        per-cell kernel (apply A, axpy, dot, invM) launches only on cells
+        of active 8³ blocks. The active list is built ONCE per call, then
+        reused across all PCG iterations.
+        """
+        nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
+        if not hasattr(self, "_pcg_r"):
+            self._pcg_r = zeros((nx, ny, nz), dev=dev)
+            self._pcg_z = zeros((nx, ny, nz), dev=dev)
+            self._pcg_p = zeros((nx, ny, nz), dev=dev)
+            self._pcg_Ap = zeros((nx, ny, nz), dev=dev)
+            self._pcg_diag = zeros((nx, ny, nz), dev=dev)
+            self._pcg_alpha = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_beta = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_rz_old = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_rz_new = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
+
+        # Diag: still cheap, launch dense. (One-shot per step.)
+        wp.launch(k3_compute_diag, dim=(nx, ny, nz),
+                  inputs=[self.marker, self._pcg_diag], device=dev)
+
+        n_active, coords = self._build_active_blocks()
+        if n_active == 0:
+            self.p.zero_()
+            return 0
+        bs = BLOCK_SIZE
+        tile_dim = n_active * bs * bs * bs
+
+        self.p.zero_()
+        wp.copy(self._pcg_r, self.div)
+        wp.launch(k3_apply_invM_per_tile, dim=tile_dim,
+                  inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker,
+                          coords, bs], device=dev)
+        wp.copy(self._pcg_p, self._pcg_z)
+
+        def dev_dot(a, b, out):
+            wp.launch(k3_zero_scalar, dim=1, inputs=[out], device=dev)
+            wp.launch(k3_dot_fluid_per_tile, dim=tile_dim,
+                      inputs=[a, b, out, self.marker, coords, bs], device=dev)
+
+        dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_old)
+        dev_dot(self._pcg_r, self._pcg_r, self._pcg_r0_norm2)
+        r0_norm2_host = float(self._pcg_r0_norm2.numpy()[0])
+        if r0_norm2_host < 1e-30:
+            return 0
+        tol_sq = (tol ** 2) * r0_norm2_host
+
+        for it in range(max_iter):
+            wp.launch(k3_apply_A_per_tile, dim=tile_dim,
+                      inputs=[self._pcg_p, self._pcg_Ap, self.marker,
+                              coords, bs], device=dev)
+            dev_dot(self._pcg_p, self._pcg_Ap, self._pcg_pAp)
+            wp.launch(k3_div_scalar, dim=1,
+                      inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha],
+                      device=dev)
+            wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
+                      inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p,
+                              self.marker, coords, bs], device=dev)
+            wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
+                      inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r,
+                              self._pcg_r, self.marker, coords, bs], device=dev)
+            if (it + 1) % check_every == 0 or it == max_iter - 1:
+                dev_dot(self._pcg_r, self._pcg_r, self._pcg_r_norm2)
+                if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
+                    return it + 1
+            wp.launch(k3_apply_invM_per_tile, dim=tile_dim,
+                      inputs=[self._pcg_r, self._pcg_diag, self._pcg_z,
+                              self.marker, coords, bs], device=dev)
+            dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_new)
+            wp.launch(k3_div_scalar, dim=1,
+                      inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta],
+                      device=dev)
+            wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
+                      inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z,
+                              self._pcg_p, self.marker, coords, bs], device=dev)
+            wp.launch(k3_copy_scalar, dim=1,
+                      inputs=[self._pcg_rz_new, self._pcg_rz_old], device=dev)
+        return max_iter
+
     # ----------------------------------------------------------- S2.14 CSF
     @block("S2.14", "Surface tension: build χ̃, normal, curvature; apply CSF impulse")
     def _apply_surface_tension(self, dt: float):
@@ -2529,7 +2789,12 @@ class FlipSolver3D:
                       inputs=[self.u, self.v, self.w, self.div, self.marker, dx, dt, self.rho], device=dev)
         with prof.section("pressure"):
             if pressure_solver == "pcg":
-                self.last_pressure_iters = self._pressure_pcg(max_iter=pressure_iters)
+                if pressure_block_sparse:
+                    self.last_pressure_iters = self._pressure_pcg_sparse(
+                        max_iter=pressure_iters)
+                else:
+                    self.last_pressure_iters = self._pressure_pcg(
+                        max_iter=pressure_iters)
             elif pressure_solver == "jacobi":
                 self.p.zero_(); self.p_tmp.zero_()
                 if pressure_block_sparse:

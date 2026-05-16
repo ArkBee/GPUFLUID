@@ -19,6 +19,7 @@ passing pytest; **plan** = declared but not yet written.
 | G1.8     | Cell-centre grid (host)                    | G1    | `gpufluid/domain/sdf.py`                     | impl,test |
 | G1.9     | Step profiler (per-section ScopedTimer)    | G1    | `gpufluid/primitives/profiling.py`           | impl,test |
 | S2.6.5   | Per-tile GS-RB (B4.1 spike, 2.1× @128³)    | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
+| S2.6.6   | Per-tile PCG kernels (B4.2, 1.1× @128³)    | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.18.1  | P2G scatter of per-particle scalar         | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.18.2  | Normalize grid scalar by weight            | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.18.3  | G2P gather grid scalar to particle (B11)   | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |

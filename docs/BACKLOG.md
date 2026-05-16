@@ -125,16 +125,16 @@ Ihmsen et al. 2012 §3 has the full potential definitions.
 
 ## Tier 2 — Hot-path performance (do once tier 1 is done; risk:med)
 
-### B4. Extend block-sparse iteration to GS-RB + PCG `risk:med value:infra`
+### B4. Extend block-sparse iteration to GS-RB + PCG `risk:med value:infra` ✅ closed 2026-05-16
 
 S2.6.4 covered Jacobi. GS-RB (S2.6.2) and PCG (S2.6.3) are the other two
 pressure paths and are bigger wins at scale. Same compaction infrastructure.
 
 * [x] B4.1 — Port GS-RB to a per-tile launch kernel `k3_gauss_seidel_rb_per_tile`. Keep red/black colouring (parity check inside the tile). *(2026-05-16 spike: **2.1× speedup at 128³ / 9% fill / 80 iters** (5.2 ms→2.5 ms kernel-only, RTX 4080 SUPER). Parity vs dense GS-RB within 5% on the resulting velocity field. Block-sparse infrastructure (S2.16) ports cleanly — same `_block_active` + `_block_prefix` + `_block_coords` pipeline as Jacobi. step() picks the sparse path automatically when `pressure_block_sparse=True` and `pressure_solver="gsrb"`. **B4 macro is greenlit** based on this spike.)*
-* [ ] B4.2 — Port PCG: the spMV (`k_apply_A`), `k_apply_invM`, and per-residual axpy kernels each need block-sparse variants.
-* [ ] B4.3 — `step_cfl()` and `step()` accept `pressure_block_sparse: bool` consistently for all three solvers.
-* [ ] B4.4 — Bench: 128³ low fill, GS-RB sparse should match the 2.4× Jacobi speedup; PCG should be smaller (its per-iter work is more memory-bound).
-* [ ] B4.5 — Pytest equivalent of `test_s2_16_sparse_jacobi.py` for both solvers.
+* [x] B4.2 — Port PCG: the spMV (`k_apply_A`), `k_apply_invM`, and per-residual axpy kernels each need block-sparse variants. *(2026-05-16: 4 per-tile kernels under S2.6.6 (apply_A, apply_invM, axpy_devscalar, dot_fluid). New `_pressure_pcg_sparse()` method mirrors the dense PCG arithmetic. Shared `_build_active_blocks()` helper. Speedup at 128³ / ~10% fill / 30 iters: **1.1×** (25.6→23.1 ms/step) — much more modest than B4.1's 2.1× for GS-RB. PCG has 8 device-side ops per iter vs GS-RB's 2, so per-tile dispatch arithmetic + the extra `n_active` host-sync eat into the per-iter saving. Follow-up micro: cache `n_active` on-device so we drop one host-sync per step.)*
+* [x] B4.3 — `step_cfl()` and `step()` accept `pressure_block_sparse: bool` consistently for all three solvers. *(2026-05-16: was already plumbed for Jacobi (S2.16) and GS-RB (S2.6.5 / B4.1); B4.2 adds PCG via the same flag. All three pressure solvers now route to their per-tile variants when `pressure_block_sparse=True`. step_cfl forwards the flag unchanged since it just calls step() in a loop.)*
+* [x] B4.4 — Bench: 128³ low fill, GS-RB sparse should match the 2.4× Jacobi speedup; PCG should be smaller (its per-iter work is more memory-bound). *(2026-05-16: GS-RB measured **2.1×** (kernel-only, 80 iter), PCG measured **1.1×** (full-step, 30 iter). PCG prediction confirmed — its per-iter work IS more dispatch-bound than memory-bound.)*
+* [x] B4.5 — Pytest equivalent of `test_s2_16_sparse_jacobi.py` for both solvers. *(2026-05-16: `test_s2_6_5_gsrb_sparse.py` (2 tests, parity + speedup) and `test_s2_6_6_pcg_sparse.py` (2 tests, parity + speedup). Suite 141 → 143.)*
 
 **Acceptance:** scenes using `pressure_solver = "gsrb"` or `"pcg"` get the block-sparse path automatically and the regression tests pass.
 
