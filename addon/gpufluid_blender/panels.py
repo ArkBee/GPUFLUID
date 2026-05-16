@@ -227,3 +227,7 @@ class GPUFLUID_PT_bake(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("gpufluid.clear_cache", icon="TRASH")
         row.operator("gpufluid.open_cache_dir", icon="FILE_FOLDER")
+        layout.label(text="Cache (manual attach):")
+        layout.operator("gpufluid.attach_cache", text="Attach Surface", icon="LINKED")
+        layout.operator("gpufluid.attach_ww_cache", text="Attach Whitewater", icon="STICKY_UVS_DISABLE")
+        layout.operator("gpufluid.detach_cache", text="Detach", icon="UNLINKED")

@@ -72,34 +72,113 @@ def _rebuild_mesh(obj, verts, faces, origin):
 
 
 # ---------------------------------------------------------------------------
+# Whitewater point-cloud loader
+# ---------------------------------------------------------------------------
+
+def _rebuild_ww_points(obj, positions, kinds, origin, visible_kinds):
+    """Replace `obj.data` with a vertex-only mesh of whitewater positions.
+
+    `kinds` is an int32 array (foam=0, spray=1, bubble=2) of length N, or None.
+    `visible_kinds` is a tuple of three booleans (show_foam, show_spray,
+    show_bubble) consumed at filter time. Vertices for hidden classes are
+    dropped completely so downstream Geometry Nodes / particle instancing
+    doesn't see them.
+
+    A per-vertex integer attribute ``gpufluid_kind`` is written when
+    `kinds` is provided — Geometry Nodes / shaders can branch on it to
+    instance foam vs spray vs bubble assets.
+    """
+    me = obj.data
+    me.clear_geometry()
+    if positions is None or positions.shape[0] == 0:
+        return
+    if kinds is not None:
+        keep = np.ones(positions.shape[0], dtype=bool)
+        if not visible_kinds[0]:
+            keep &= kinds != 0
+        if not visible_kinds[1]:
+            keep &= kinds != 1
+        if not visible_kinds[2]:
+            keep &= kinds != 2
+        positions = positions[keep]
+        kinds = kinds[keep]
+    if positions.shape[0] == 0:
+        return
+    pts = (positions + np.asarray(origin, dtype=np.float32)).astype(np.float32)
+    me.vertices.add(pts.shape[0])
+    me.vertices.foreach_set("co", pts.ravel())
+    if kinds is not None and kinds.size > 0:
+        attr = me.attributes.get("gpufluid_kind")
+        if attr is None or attr.domain != "POINT" or attr.data_type != "INT":
+            if attr is not None:
+                me.attributes.remove(attr)
+            attr = me.attributes.new(name="gpufluid_kind", type="INT", domain="POINT")
+        attr.data.foreach_set("value", kinds.astype(np.int32))
+    me.update()
+
+
+# ---------------------------------------------------------------------------
 # Per-frame handler
 # ---------------------------------------------------------------------------
 
+def _domain_whitewater_visibility(scene):
+    """Return (show_foam, show_spray, show_bubble) from the Domain object,
+    defaulting to all-visible if there is no Domain in the scene."""
+    for o in scene.objects:
+        try:
+            dom = o.gpufluid_domain
+        except AttributeError:
+            continue
+        if dom.is_domain:
+            try:
+                ww = dom.whitewater_group
+                return (bool(ww.show_foam), bool(ww.show_spray), bool(ww.show_bubble))
+            except AttributeError:
+                break
+    return (True, True, True)
+
+
 def _frame_change_handler(scene, depsgraph=None):
     f = scene.frame_current
+    visible_kinds = _domain_whitewater_visibility(scene)
     for obj in scene.objects:
         # Cache loading only applies to mesh objects. The Domain Empty also
         # carries a `gpufluid_cache_dir` custom prop (for the bake operator's
         # own bookkeeping) but is not a render target.
         if obj.type != "MESH":
             continue
+        # Surface mesh path
         cache_dir = obj.get("gpufluid_cache_dir")
-        if not cache_dir:
-            continue
-        pattern = obj.get("gpufluid_cache_pattern", "mesh/frame_{:04d}.ply")
-        offset = int(obj.get("gpufluid_cache_frame_offset", 0))
-        origin = list(obj.get("gpufluid_cache_origin", [0.0, 0.0, 0.0]))
-        idx = f - offset
-        if idx < 0:
-            continue
-        path = os.path.join(cache_dir, pattern.format(idx))
-        if not os.path.exists(path):
-            continue
-        try:
-            verts, faces = _read_ply_minimal(path)
-            _rebuild_mesh(obj, verts, faces, origin)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[gpufluid cache] error at frame {f} for '{obj.name}': {exc}")
+        if cache_dir:
+            pattern = obj.get("gpufluid_cache_pattern", "mesh/frame_{:04d}.ply")
+            offset = int(obj.get("gpufluid_cache_frame_offset", 0))
+            origin = list(obj.get("gpufluid_cache_origin", [0.0, 0.0, 0.0]))
+            idx = f - offset
+            if idx >= 0:
+                path = os.path.join(cache_dir, pattern.format(idx))
+                if os.path.exists(path):
+                    try:
+                        verts, faces = _read_ply_minimal(path)
+                        _rebuild_mesh(obj, verts, faces, origin)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[gpufluid cache] error at frame {f} for '{obj.name}': {exc}")
+        # Whitewater point-cloud path
+        ww_dir = obj.get("gpufluid_ww_cache_dir")
+        if ww_dir:
+            offset = int(obj.get("gpufluid_ww_cache_frame_offset", 0))
+            origin = list(obj.get("gpufluid_ww_cache_origin", [0.0, 0.0, 0.0]))
+            idx = f - offset
+            if idx >= 0:
+                pos_path = os.path.join(ww_dir, "whitewater", f"frame_{idx:04d}.npy")
+                kind_path = os.path.join(ww_dir, "whitewater_kinds", f"frame_{idx:04d}.npy")
+                if os.path.exists(pos_path):
+                    try:
+                        pos = np.load(pos_path).astype(np.float32)
+                        kinds = (np.load(kind_path).astype(np.int32)
+                                 if os.path.exists(kind_path) else None)
+                        _rebuild_ww_points(obj, pos, kinds, origin, visible_kinds)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[gpufluid ww] error at frame {f} for '{obj.name}': {exc}")
 
 
 def register_handler():
@@ -151,6 +230,41 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
+    bl_idname = "gpufluid.attach_ww_cache"
+    bl_label = "Attach gpufluid Whitewater Cache"
+    bl_description = ("Bind a whitewater point cache (cache_dir/whitewater/*.npy + "
+                      "whitewater_kinds/*.npy) to an object. Verts get a per-vertex "
+                      "INT attribute 'gpufluid_kind' (0=foam, 1=spray, 2=bubble) for "
+                      "Geometry Nodes branching")
+    bl_options = {"REGISTER", "UNDO"}
+
+    cache_dir: bpy.props.StringProperty(name="Cache Dir", subtype="DIR_PATH")
+    target_name: bpy.props.StringProperty(name="Target object")
+    origin_x: bpy.props.FloatProperty(name="Origin X", default=0.0)
+    origin_y: bpy.props.FloatProperty(name="Origin Y", default=0.0)
+    origin_z: bpy.props.FloatProperty(name="Origin Z", default=0.0)
+    frame_offset: bpy.props.IntProperty(name="Cache starts at scene frame", default=1)
+
+    def execute(self, context):
+        cache_dir = bpy.path.abspath(self.cache_dir)
+        if not os.path.isdir(os.path.join(cache_dir, "whitewater")):
+            self.report({"ERROR"},
+                        f"no 'whitewater' subdir in {cache_dir} — bake whitewater first")
+            return {"CANCELLED"}
+        target = context.scene.objects.get(self.target_name) if self.target_name else None
+        if target is None:
+            mesh = bpy.data.meshes.new("gpufluid_ww_mesh")
+            target = bpy.data.objects.new("gpufluid_whitewater", mesh)
+            context.scene.collection.objects.link(target)
+        target["gpufluid_ww_cache_dir"] = cache_dir
+        target["gpufluid_ww_cache_frame_offset"] = self.frame_offset
+        target["gpufluid_ww_cache_origin"] = [self.origin_x, self.origin_y, self.origin_z]
+        _frame_change_handler(context.scene)
+        self.report({"INFO"}, f"whitewater cache attached to '{target.name}'")
+        return {"FINISHED"}
+
+
 class GPUFLUID_OT_detach_cache(bpy.types.Operator):
     bl_idname = "gpufluid.detach_cache"
     bl_label = "Detach gpufluid Cache"
@@ -158,13 +272,18 @@ class GPUFLUID_OT_detach_cache(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.active_object is not None and \
-               context.active_object.get("gpufluid_cache_dir") is not None
+        o = context.active_object
+        return o is not None and (
+            o.get("gpufluid_cache_dir") is not None
+            or o.get("gpufluid_ww_cache_dir") is not None
+        )
 
     def execute(self, context):
         obj = context.active_object
         for k in ("gpufluid_cache_dir", "gpufluid_cache_pattern",
-                  "gpufluid_cache_frame_offset", "gpufluid_cache_origin"):
+                  "gpufluid_cache_frame_offset", "gpufluid_cache_origin",
+                  "gpufluid_ww_cache_dir", "gpufluid_ww_cache_frame_offset",
+                  "gpufluid_ww_cache_origin"):
             if k in obj.keys():
                 del obj[k]
         return {"FINISHED"}

@@ -97,6 +97,7 @@ passing pytest; **plan** = declared but not yet written.
 | A8.4     | Obstacle source                            | A8    | `addon/gpufluid_blender/properties.py`       | impl |
 | A8.5     | Bake operator                              | A8    | `addon/gpufluid_blender/operators/bake.py`   | impl,test (config_builder) |
 | A8.6     | Cache import (per-frame PLY swap)          | A8    | `addon/gpufluid_blender/cache_loader.py`     | impl |
+| A8.6.1   | Whitewater point-cloud import              | A8    | `addon/gpufluid_blender/cache_loader.py`     | impl |
 | A8.7     | UI panels                                  | A8    | `addon/gpufluid_blender/panels.py`           | impl |
 | A8.8     | Helper operators                           | A8    | `addon/gpufluid_blender/operators/helpers.py`| impl |
 | A8.2.1   | Surface tension property group (B1.1)      | A8    | `addon/gpufluid_blender/properties.py`       | impl |

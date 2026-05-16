@@ -49,6 +49,7 @@ _CLASSES = (
     op_helpers.GPUFLUID_OT_clear_cache,
     op_helpers.GPUFLUID_OT_open_cache_dir,
     cache_loader.GPUFLUID_OT_attach_cache,
+    cache_loader.GPUFLUID_OT_attach_ww_cache,
     cache_loader.GPUFLUID_OT_detach_cache,
     panels.GPUFLUID_PT_main,
     panels.GPUFLUID_PT_domain,

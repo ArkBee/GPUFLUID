@@ -347,5 +347,18 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                     )
                 except Exception as e:
                     self.report({"WARNING"}, f"bake ok, but auto-attach failed: {e}")
+                # Auto-attach whitewater cache when the bake produced one.
+                ww_dir = os.path.join(str(cache_dir), "whitewater")
+                if os.path.isdir(ww_dir):
+                    try:
+                        bpy.ops.gpufluid.attach_ww_cache(
+                            cache_dir=str(cache_dir),
+                            target_name="",   # always make a new mesh
+                            origin_x=float(origin[0]),
+                            origin_y=float(origin[1]),
+                            origin_z=float(origin[2]),
+                        )
+                    except Exception as e:
+                        self.report({"WARNING"}, f"bake ok, but ww auto-attach failed: {e}")
         self.report({"INFO"}, "gpufluid bake complete")
         return {"FINISHED"}
