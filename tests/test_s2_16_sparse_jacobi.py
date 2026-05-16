@@ -82,6 +82,9 @@ def test_sparse_jacobi_matches_dense_numerically():
     nbx = block_active.shape[0]
     wp.launch(k_compact_active_blocks, dim=(nbx, nbx, nbx),
               inputs=[block_active, prefix, coords], device=s.device)
+    # B (post Option B): per-tile kernels require an `n_active_dev` cap.
+    # Build a 1-element device array holding the host n_active value.
+    n_active_dev = wp.array([n_active], dtype=int, device=s.device)
     # Dense pressure
     s.p.zero_(); s.p_tmp.zero_()
     for _ in range(80):
@@ -89,11 +92,15 @@ def test_sparse_jacobi_matches_dense_numerically():
                   inputs=[s.p, s.p_tmp, s.div, s.marker], device=s.device)
         s.p, s.p_tmp = s.p_tmp, s.p
     p_dense = s.p.numpy().copy()
-    # Sparse pressure (reset, same div)
+    # Sparse pressure (reset, same div). Worst-case launch dim is the same
+    # value as n_active * 512 here because the test already pre-computed
+    # n_active — but kernels would also work with `nbx**3 * 512` since the
+    # in-kernel cap fires.
     s.p.zero_(); s.p_tmp.zero_()
     for _ in range(80):
         wp.launch(k3_jacobi_pressure_per_tile, dim=n_active * 512,
-                  inputs=[s.p, s.p_tmp, s.div, s.marker, coords, BLOCK_SIZE],
+                  inputs=[s.p, s.p_tmp, s.div, s.marker, coords, BLOCK_SIZE,
+                          n_active_dev],
                   device=s.device)
         s.p, s.p_tmp = s.p_tmp, s.p
     p_sparse = s.p.numpy()
@@ -122,6 +129,7 @@ def test_sparse_jacobi_speedup_at_128():
     n_active = int(prefix[n_blocks - 1 : n_blocks].numpy()[0])
     wp.launch(k_compact_active_blocks, dim=(nbx, nbx, nbx),
               inputs=[block_active, prefix, coords], device=s.device)
+    n_active_dev = wp.array([n_active], dtype=int, device=s.device)
     iters = 80
 
     def bench_dense():
@@ -135,7 +143,8 @@ def test_sparse_jacobi_speedup_at_128():
         s.p.zero_(); s.p_tmp.zero_()
         for _ in range(iters):
             wp.launch(k3_jacobi_pressure_per_tile, dim=n_active * 512,
-                      inputs=[s.p, s.p_tmp, s.div, s.marker, coords, BLOCK_SIZE],
+                      inputs=[s.p, s.p_tmp, s.div, s.marker, coords, BLOCK_SIZE,
+                              n_active_dev],
                       device=s.device)
             s.p, s.p_tmp = s.p_tmp, s.p
 

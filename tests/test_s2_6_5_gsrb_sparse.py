@@ -87,6 +87,7 @@ def test_b4_1_sparse_gsrb_kernel_speedup_at_128():
     n_active = int(prefix[n_blocks - 1: n_blocks].numpy()[0])
     wp.launch(k_compact_active_blocks, dim=(nbx, nbx, nbx),
               inputs=[block_active, prefix, coords], device=s.device)
+    n_active_dev = wp.array([n_active], dtype=int, device=s.device)
     iters = 80
     cells_per_block = BLOCK_SIZE ** 3
 
@@ -102,10 +103,12 @@ def test_b4_1_sparse_gsrb_kernel_speedup_at_128():
         s.p.zero_()
         for _ in range(iters):
             wp.launch(k3_gauss_seidel_rb_per_tile, dim=n_active * cells_per_block,
-                      inputs=[s.p, s.div, s.marker, coords, BLOCK_SIZE, 0],
+                      inputs=[s.p, s.div, s.marker, coords, BLOCK_SIZE, 0,
+                              n_active_dev],
                       device=s.device)
             wp.launch(k3_gauss_seidel_rb_per_tile, dim=n_active * cells_per_block,
-                      inputs=[s.p, s.div, s.marker, coords, BLOCK_SIZE, 1],
+                      inputs=[s.p, s.div, s.marker, coords, BLOCK_SIZE, 1,
+                              n_active_dev],
                       device=s.device)
 
     # warm both paths

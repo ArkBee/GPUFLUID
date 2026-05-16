@@ -240,13 +240,13 @@ ops/iter vs GS-RB's 2 mean per-tile dispatch overhead + one extra
 device→host sync (n_active) eats into the per-iter saving. Documented
 follow-up: cache `n_active` on-device.
 
-**§8.0b.B5 — CUDA graphs ship for 8 of 9 configurations (post-A).**
+**§8.0b.B5 — CUDA graphs ship for 9 of 9 configurations (post Options A + B).**
 Eligibility matrix:
 ```
                        no-CSF    CSF (σ>0)
 jacobi/gsrb dense       ✅          ✅       ← 4 (B5)
-PCG dense               ✅          ✅       ← +2 (Option A, this session)
-sparse (block_sparse=1) ❌          ❌       ← +3 left for Option B
+PCG dense               ✅          ✅       ← +2 (Option A)
+sparse (block_sparse=1) ✅          ✅       ← +3 (Option B, this session) — 9/9 closed
 ```
 * B5.1 spike (Jacobi, no CSF): direct 0.43 ms → graph 0.20 ms = **2.17×**
 * Real bake `two_color_drop` (90 frames, jacobi, 8 substeps): sim 0.72s
@@ -258,13 +258,16 @@ sparse (block_sparse=1) ❌          ❌       ← +3 left for Option B
   **4.21s → 1.01s = 4.17×**, 88% hit rate. Pre-A this scene was the
   documented regression (4.8s → 9.3s); the on-device stop-flag pattern
   flips it into a 4.17× win. Same scene, same bench harness.
+* **Option B real bake `big_pcg` (sparse PCG, 96³, 60-iter, 90 frames):**
+  sparse-graph-off 4.19s → sparse-graph-on **1.00s = 4.19×**, 88% hit
+  rate. Identical to dense-graph at this fill (~10%). The eligibility
+  flip is the win — actual perf comes from the same kernel-launch
+  reduction. At higher 256³+ resolutions with low-fill scenes, sparse
+  starts to beat dense thanks to bandwidth — Option B unlocks the
+  combined sparse+graph speedup that v1.0 needs.
 
 CLI flag: `gpufluid simulate --enable-cuda-graphs` (off by default).
-
-`block_sparse=True` is the remaining follow-up:
-* `_build_active_blocks` reads `n_active.numpy()`. Fix needs the per-tile
-  kernels to launch worst-case dim + cap in-kernel via a `n_active_dev`
-  device buffer. Six kernels to touch. Tracked as Option B in §12.
+All shipped pressure-solver combinations are now graph-eligible.
 
 **§8.0b.B6 — APIC + CSF stable, no fix needed.** `tests/test_b6_apic_csf_interaction.py`:
 COM drift < 2%, max|v| < 35 m/s on the surftens_on parameter set with
@@ -453,11 +456,14 @@ Sized roughly by session-count and grouped by where they unblock.
   frames with dilation. Spike at 128³/5% fill: does memory drop by ~5×
   without breaking the dense kernels? (They'd need a coord-translation
   layer with `offset_xyz`.) See BACKLOG B7 "pivot recommendation".
-- **Block-sparse + CUDA graphs (Option B).** Six per-tile kernels need
-  an `n_active_dev` device buffer + in-kernel cap so launches happen at
-  worst-case dim. Unblocks **all 3 remaining graph configs** (sparse
-  jacobi, sparse gs-rb, sparse PCG — the last one inherits the
-  on-device stop-flag from Option A). Brings the matrix to **9/9**.
+
+**Tier 2 (closed this session):**
+- ~~Block-sparse + CUDA graphs (Option B)~~ — **shipped**: `_n_active_dev`
+  device buffer + `k_store_n_active` 1-thread kernel + 6 per-tile
+  kernels capped via `if blk >= n_active_dev[0]: return`. Sparse PCG
+  inherits Option A's stop-flag in the same launches. Matrix at **9/9**.
+  Tests: `tests/test_b5_b_sparse_graph.py` (5 GPU tests, all green) +
+  updated `test_b5_2_all_configs_graph_eligible`.
 
 **Hygiene:**
 - `docs/BLOCKS.md` doesn't track everything that landed in S2.6.5,

@@ -1039,6 +1039,16 @@ def k_compact_active_blocks(
     active_coords[dst] = wp.vec3i(bi, bj, bk)
 
 
+# B — store the device-side n_active (last element of the inclusive
+# prefix scan over the active-block bitmask). 1-thread launch. Replaces
+# the `n_active = prefix[n_blocks - 1].numpy()[0]` host read in
+# `_build_active_blocks`, which used to abort CUDA-graph capture.
+@wp.kernel
+def k_store_n_active(prefix: wp.array(dtype=int), n_blocks: int,
+                     n_active_dev: wp.array(dtype=int)):
+    n_active_dev[0] = prefix[n_blocks - 1]
+
+
 @wp.kernel
 def k3_jacobi_pressure_per_tile(
     p_in: wp.array3d(dtype=float),
@@ -1047,12 +1057,18 @@ def k3_jacobi_pressure_per_tile(
     marker: wp.array3d(dtype=int),
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
+    n_active_dev: wp.array(dtype=int),
 ):
-    """Launched with dim = n_active * block_size³. Each thread covers one
-    cell within an active block. Inactive blocks are *not iterated over*."""
+    """Launched at worst-case `dim = n_blocks * block_size³` (constant for
+    a given resolution — needed for CUDA-graph capture). Each thread
+    covers one cell within an active block. Threads whose `blk` index
+    lies beyond the live `n_active_dev[0]` early-return so the cost of
+    the worst-case launch is bounded to one device read + a branch."""
     tid = wp.tid()
     cells_per_block = block_size * block_size * block_size
     blk = tid // cells_per_block
+    if blk >= n_active_dev[0]:
+        return
     rem = tid - blk * cells_per_block
     di = rem // (block_size * block_size)
     rem2 = rem - di * (block_size * block_size)
@@ -1184,10 +1200,10 @@ def k3_gauss_seidel_rb_per_tile(
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
     color: int,                          # 0=red, 1=black
+    n_active_dev: wp.array(dtype=int),
 ):
-    """Launched with dim = n_active * block_size³. Each thread maps a
-    (block_index, cell_in_block) pair to a global (i,j,k). Cells where
-    (i+j+k)%2 != color are skipped.
+    """Launched at worst-case `dim = n_blocks * block_size³`. Threads
+    whose `blk` index is beyond `n_active_dev[0]` early-return.
 
     Updates p in place — same red/black ordering as `k3_gauss_seidel_rb`.
     Outside-active-set cells are not touched; they keep whatever value
@@ -1196,6 +1212,8 @@ def k3_gauss_seidel_rb_per_tile(
     tid = wp.tid()
     cells_per_block = block_size * block_size * block_size
     blk = tid // cells_per_block
+    if blk >= n_active_dev[0]:
+        return
     rem = tid - blk * cells_per_block
     di = rem // (block_size * block_size)
     rem2 = rem - di * (block_size * block_size)
@@ -1869,9 +1887,19 @@ def k3_apply_A_per_tile(
     marker: wp.array3d(dtype=int),
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
+    n_active_dev: wp.array(dtype=int),
+    done: wp.array(dtype=int),
 ):
-    """[BLK S2.6.6] Apply Laplacian A·x on active tiles only."""
-    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    """[BLK S2.6.6] Apply Laplacian A·x on active tiles only. Capped at
+    worst-case launch via `n_active_dev`; also gated by the PCG stop
+    flag `done` so the captured graph can short-circuit on convergence."""
+    if done[0] != 0:
+        return
+    tid = wp.tid()
+    cells_per_block = block_size * block_size * block_size
+    if tid // cells_per_block >= n_active_dev[0]:
+        return
+    ijk = _tile_to_ijk(tid, active_coords, block_size)
     i = ijk[0]; j = ijk[1]; k = ijk[2]
     nx = x.shape[0]; ny = x.shape[1]; nz = x.shape[2]
     if i >= nx or j >= ny or k >= nz:
@@ -1923,11 +1951,19 @@ def k3_apply_invM_per_tile(
     marker: wp.array3d(dtype=int),
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
+    n_active_dev: wp.array(dtype=int),
+    done: wp.array(dtype=int),
 ):
     """[BLK S2.6.6] z = M⁻¹ r on active tiles. Non-fluid cells of an active
     tile get zeroed (matches the dense kernel's contract); cells outside
     the active set keep their previous (zero-init) value."""
-    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    if done[0] != 0:
+        return
+    tid = wp.tid()
+    cells_per_block = block_size * block_size * block_size
+    if tid // cells_per_block >= n_active_dev[0]:
+        return
+    ijk = _tile_to_ijk(tid, active_coords, block_size)
     i = ijk[0]; j = ijk[1]; k = ijk[2]
     if i >= r.shape[0] or j >= r.shape[1] or k >= r.shape[2]:
         return
@@ -1948,10 +1984,18 @@ def k3_dot_fluid_per_tile(
     marker: wp.array3d(dtype=int),
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
+    n_active_dev: wp.array(dtype=int),
+    done: wp.array(dtype=int),
 ):
     """[BLK S2.6.6] Inner product over fluid cells, per-tile dispatched.
     Caller zeroes `out[0]` before launch."""
-    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    if done[0] != 0:
+        return
+    tid = wp.tid()
+    cells_per_block = block_size * block_size * block_size
+    if tid // cells_per_block >= n_active_dev[0]:
+        return
+    ijk = _tile_to_ijk(tid, active_coords, block_size)
     i = ijk[0]; j = ijk[1]; k = ijk[2]
     if i >= a.shape[0] or j >= a.shape[1] or k >= a.shape[2]:
         return
@@ -1969,9 +2013,17 @@ def k3_axpy_devscalar_per_tile(
     y_out: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
+    n_active_dev: wp.array(dtype=int),
+    done: wp.array(dtype=int),
 ):
     """[BLK S2.6.6] y_out = y_in + sign · a_dev[0] · x on active tiles."""
-    ijk = _tile_to_ijk(wp.tid(), active_coords, block_size)
+    if done[0] != 0:
+        return
+    tid = wp.tid()
+    cells_per_block = block_size * block_size * block_size
+    if tid // cells_per_block >= n_active_dev[0]:
+        return
+    ijk = _tile_to_ijk(tid, active_coords, block_size)
     i = ijk[0]; j = ijk[1]; k = ijk[2]
     if i >= x.shape[0] or j >= x.shape[1] or k >= x.shape[2]:
         return
@@ -2154,6 +2206,10 @@ class FlipSolver3D:
         # S2.16 active-block bitmask (8³ blocks). Lazy: allocated on first
         # pressure_block_sparse=True call.
         self._block_active = None
+        # B (this session) — device-side `n_active` mirror for sparse
+        # CUDA-graph eligibility. Per-tile kernels read `n_active_dev[0]`
+        # to cap their thread space; the host never touches it.
+        self._n_active_dev = None
         # S2.14 CSF scratch (allocated lazily on first surface_tension>0 step)
         self._csf_chi = None     # smoothed indicator
         self._csf_tmp = None     # ping-pong for blur passes
@@ -2678,10 +2734,20 @@ class FlipSolver3D:
         return max_iter
 
     # ---------- internal: per-tile (block-sparse) PCG (S2.6.6 / B4.2) -------
-    def _build_active_blocks(self):
+    def _build_active_blocks(self, _no_host_sync: bool = False):
         """Compact the active-block list into (n_active, coords). Shared by
-        sparse Jacobi / GS-RB / PCG. Returns the host-int count + the
-        device-side coord array."""
+        sparse Jacobi / GS-RB / PCG.
+
+        Always writes `self._n_active_dev[0]` so per-tile kernels can cap
+        their thread space against the device-side value (needed for
+        CUDA-graph capture, since per-tile launches happen at worst-case
+        `n_blocks * cells_per_block` dim).
+
+        When `_no_host_sync=True` (graph-capture path), skips the
+        `prefix[-1].numpy()` host read and returns `n_active=-1`. Callers
+        on that path MUST launch per-tile kernels at the worst-case dim
+        and rely on the in-kernel `blk >= n_active_dev[0]` early-return.
+        """
         import warp.utils as wputils
         nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
         nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -2694,25 +2760,41 @@ class FlipSolver3D:
             self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
             self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
             self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
+        if self._n_active_dev is None:
+            self._n_active_dev = wp.zeros(1, dtype=int, device=dev)
         self._block_active.zero_()
         wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
                   inputs=[self.marker, self._block_active, BLOCK_SIZE], device=dev)
         self._block_active_flat = self._block_active.flatten()
         wputils.array_scan(self._block_active_flat, self._block_prefix,
                            inclusive=True)
+        # Mirror n_active onto the device so per-tile kernels can cap
+        # in-kernel without a host sync (graph-eligible path).
+        wp.launch(k_store_n_active, dim=1,
+                  inputs=[self._block_prefix, n_blocks, self._n_active_dev],
+                  device=dev)
+        # Compact the active coords. Worst-case launch is fine — inactive
+        # block threads early-return on `block_active[bi,bj,bk] == 0`.
+        wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
+                  inputs=[self._block_active, self._block_prefix,
+                          self._block_coords], device=dev)
+        if _no_host_sync:
+            return -1, self._block_coords
         n_active = int(self._block_prefix[n_blocks - 1: n_blocks].numpy()[0])
-        if n_active > 0:
-            wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
-                      inputs=[self._block_active, self._block_prefix,
-                              self._block_coords], device=dev)
         return n_active, self._block_coords
 
     def _pressure_pcg_sparse(self, max_iter: int, tol: float = 1e-4,
-                              check_every: int = 10) -> int:
+                              check_every: int = 10,
+                              _no_host_sync: bool = False) -> int:
         """Block-sparse PCG: identical algorithm to `_pressure_pcg`, but each
-        per-cell kernel (apply A, axpy, dot, invM) launches only on cells
-        of active 8³ blocks. The active list is built ONCE per call, then
-        reused across all PCG iterations.
+        per-cell kernel (apply A, axpy, dot, invM) launches at worst-case
+        `n_blocks * cells_per_block` and caps in-kernel via `n_active_dev`.
+        Combined with the Option A `done` stop-flag this makes the kernel
+        SEQUENCE constant — CUDA-graph eligible.
+
+        When `_no_host_sync=True`, skips the residual host reads (same
+        idiom as the dense path). On-device convergence detection sets
+        `_pcg_done = 1`; subsequent iter kernels early-return.
         """
         nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
         if not hasattr(self, "_pcg_r"):
@@ -2731,10 +2813,7 @@ class FlipSolver3D:
             self._pcg_done = wp.zeros(1, dtype=int, device=dev)
             self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
 
-        # Sparse PCG keeps host-sync convergence — graph capture is not
-        # enabled for the sparse path until Option B (n_active_dev) lands.
-        # Still pass the always-zero `done` buffer to the shared 1-thread
-        # scalar kernels (their signature now requires it).
+        # Reset per-call stop flag (mirrors dense `_pressure_pcg`).
         wp.launch(k3_zero_int_scalar, dim=1, inputs=[self._pcg_done], device=dev)
         done = self._pcg_done
 
@@ -2742,60 +2821,82 @@ class FlipSolver3D:
         wp.launch(k3_compute_diag, dim=(nx, ny, nz),
                   inputs=[self.marker, self._pcg_diag], device=dev)
 
-        n_active, coords = self._build_active_blocks()
-        if n_active == 0:
+        # `coords` device array + `_n_active_dev` are populated here.
+        n_active, coords = self._build_active_blocks(_no_host_sync=_no_host_sync)
+        if not _no_host_sync and n_active == 0:
             self.p.zero_()
             return 0
         bs = BLOCK_SIZE
-        tile_dim = n_active * bs * bs * bs
+        nbx = (nx + bs - 1) // bs
+        nby = (ny + bs - 1) // bs
+        nbz = (nz + bs - 1) // bs
+        n_blocks = nbx * nby * nbz
+        # Worst-case launch dim — constant for the lifetime of this solver.
+        # Threads with `blk >= n_active_dev[0]` early-return inside the kernel.
+        tile_dim = n_blocks * bs * bs * bs
+        n_active_dev = self._n_active_dev
 
         self.p.zero_()
         wp.copy(self._pcg_r, self.div)
         wp.launch(k3_apply_invM_per_tile, dim=tile_dim,
                   inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker,
-                          coords, bs], device=dev)
+                          coords, bs, n_active_dev, done], device=dev)
         wp.copy(self._pcg_p, self._pcg_z)
 
         def dev_dot(a, b, out):
             wp.launch(k3_zero_scalar, dim=1, inputs=[out, done], device=dev)
             wp.launch(k3_dot_fluid_per_tile, dim=tile_dim,
-                      inputs=[a, b, out, self.marker, coords, bs], device=dev)
+                      inputs=[a, b, out, self.marker, coords, bs, n_active_dev, done],
+                      device=dev)
 
         dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_old)
         dev_dot(self._pcg_r, self._pcg_r, self._pcg_r0_norm2)
-        r0_norm2_host = float(self._pcg_r0_norm2.numpy()[0])
-        if r0_norm2_host < 1e-30:
-            return 0
-        tol_sq = (tol ** 2) * r0_norm2_host
+        wp.launch(k3_set_tol_sq, dim=1,
+                  inputs=[self._pcg_r0_norm2, float(tol), self._pcg_tol_sq],
+                  device=dev)
+
+        tol_sq = 0.0
+        if not _no_host_sync:
+            r0_norm2_host = float(self._pcg_r0_norm2.numpy()[0])
+            if r0_norm2_host < 1e-30:
+                return 0
+            tol_sq = (tol ** 2) * r0_norm2_host
 
         for it in range(max_iter):
             wp.launch(k3_apply_A_per_tile, dim=tile_dim,
                       inputs=[self._pcg_p, self._pcg_Ap, self.marker,
-                              coords, bs], device=dev)
+                              coords, bs, n_active_dev, done], device=dev)
             dev_dot(self._pcg_p, self._pcg_Ap, self._pcg_pAp)
             wp.launch(k3_div_scalar, dim=1,
                       inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha, done],
                       device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p,
-                              self.marker, coords, bs], device=dev)
+                              self.marker, coords, bs, n_active_dev, done], device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r,
-                              self._pcg_r, self.marker, coords, bs], device=dev)
+                              self._pcg_r, self.marker, coords, bs, n_active_dev, done],
+                      device=dev)
             if (it + 1) % check_every == 0 or it == max_iter - 1:
                 dev_dot(self._pcg_r, self._pcg_r, self._pcg_r_norm2)
-                if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
-                    return it + 1
+                if _no_host_sync:
+                    wp.launch(k3_check_converged, dim=1,
+                              inputs=[self._pcg_r_norm2, self._pcg_tol_sq, done],
+                              device=dev)
+                else:
+                    if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
+                        return it + 1
             wp.launch(k3_apply_invM_per_tile, dim=tile_dim,
                       inputs=[self._pcg_r, self._pcg_diag, self._pcg_z,
-                              self.marker, coords, bs], device=dev)
+                              self.marker, coords, bs, n_active_dev, done], device=dev)
             dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_new)
             wp.launch(k3_div_scalar, dim=1,
                       inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta, done],
                       device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z,
-                              self._pcg_p, self.marker, coords, bs], device=dev)
+                              self._pcg_p, self.marker, coords, bs, n_active_dev, done],
+                      device=dev)
             wp.launch(k3_copy_scalar, dim=1,
                       inputs=[self._pcg_rz_new, self._pcg_rz_old, done], device=dev)
         return max_iter
@@ -2920,30 +3021,27 @@ class FlipSolver3D:
     # ----------------------------------------------------------- B5.2 graph cache
     def _cuda_graph_eligible(self, pressure_solver: str,
                               pressure_block_sparse: bool) -> bool:
-        """Which solver configurations can be captured into a CUDA graph
-        today. Anything that reads device→host inside step() is excluded.
+        """Which solver configurations can be captured into a CUDA graph.
 
-        B5 follow-up: S2.14.6 force-balance was moved device-side, so
-        `surface_tension > 0` (CSF) is now allowed — that's the biggest
-        v0.8 user-facing win since most demo scenes use σ.
+        After Options A + B every solver path is in: dense jacobi/gs-rb/PCG
+        AND their `pressure_block_sparse=True` siblings, with or without
+        CSF (σ>0). Matrix is **9/9**.
 
-        A (this session): **PCG** is now eligible via the on-device
-        stop-flag pattern. After each per-iter `r·r`, `k3_check_converged`
-        sets `_pcg_done = 1` on device; subsequent iter kernels early-
-        return on `done[0] != 0`. The kernel *sequence* stays constant
-        (good for graph capture) while behaviour still respects `tol`.
-        Past-convergence kernels still launch (paying ~3-5 µs each) but
-        do zero work, so net per-step time matches or beats the host-
-        sync path on scenes that converge early.
+        How the two ingredients work together:
+          * Option A — on-device PCG stop flag (`_pcg_done` + `k3_check_converged`).
+            All 7 PCG iter kernels gate on `done[0]`; once convergence
+            is detected they no-op for the rest of the captured loop.
+          * Option B — `n_active_dev` device buffer + worst-case launch.
+            `_build_active_blocks` writes `n_active` to `_n_active_dev[0]`
+            (1-thread kernel `k_store_n_active`) instead of host-reading
+            it. Per-tile kernels launch at `n_blocks * cells_per_block`
+            (constant for given resolution) and cap threads in-kernel
+            via `if blk >= n_active_dev[0]: return`.
 
-        Still excluded:
-          * **`pressure_block_sparse=True`** — `_build_active_blocks`
-            reads `n_active.numpy()`. Fixing this needs the per-tile
-            kernels to launch at worst-case dim and cap in-kernel
-            (Option B / `n_active_dev` device buffer).
+        Sparse PCG inherits BOTH: each per-tile kernel takes BOTH
+        `n_active_dev` (Option B cap) AND `done` (Option A stop-flag).
         """
-        if pressure_block_sparse:
-            return False
+        # All shipped combinations are now graph-eligible.
         return pressure_solver in ("jacobi", "gsrb", "pcg")
 
     def _cuda_graph_make_key(self, dt: float, pressure_iters: int,
@@ -3088,7 +3186,8 @@ class FlipSolver3D:
             if pressure_solver == "pcg":
                 if pressure_block_sparse:
                     self.last_pressure_iters = self._pressure_pcg_sparse(
-                        max_iter=pressure_iters)
+                        max_iter=pressure_iters,
+                        _no_host_sync=_no_host_sync)
                 else:
                     self.last_pressure_iters = self._pressure_pcg(
                         max_iter=pressure_iters,
@@ -3096,44 +3195,26 @@ class FlipSolver3D:
             elif pressure_solver == "jacobi":
                 self.p.zero_(); self.p_tmp.zero_()
                 if pressure_block_sparse:
-                    # S2.16 — rebuild the 8³ active-block bitmask + compact list.
-                    import warp.utils as wputils
+                    # B (this session) — uses the shared `_build_active_blocks`
+                    # helper that also writes `self._n_active_dev[0]`. Per-tile
+                    # kernels launch at worst-case `n_blocks * 512` dim and
+                    # cap threads in-kernel against `n_active_dev[0]`. This
+                    # makes the kernel sequence CONSTANT for a given resolution
+                    # → CUDA-graph eligible (Option B).
                     nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
                     nby = (ny + BLOCK_SIZE - 1) // BLOCK_SIZE
                     nbz = (nz + BLOCK_SIZE - 1) // BLOCK_SIZE
                     n_blocks = nbx * nby * nbz
-                    if (self._block_active is None
-                            or self._block_active.shape != (nbx, nby, nbz)):
-                        self._block_active = zeros_int((nbx, nby, nbz), dev=dev)
-                        self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
-                        self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
-                        self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
-                    self._block_active.zero_()
-                    wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
-                              inputs=[self.marker, self._block_active, BLOCK_SIZE],
-                              device=dev)
-                    # Flatten bitmask (alias view) and prefix-sum to compact coords.
-                    # array_scan needs a 1D input — alias self._block_active.
-                    self._block_active_flat = self._block_active.flatten()
-                    wputils.array_scan(self._block_active_flat, self._block_prefix,
-                                       inclusive=True)
-                    n_active = int(self._block_prefix[n_blocks - 1:n_blocks].numpy()[0])
-                    if n_active == 0:
-                        # No fluid → pressure stays zero
-                        pass
-                    else:
-                        wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
-                                  inputs=[self._block_active, self._block_prefix,
-                                          self._block_coords], device=dev)
-                        # S2.6.4 per-tile launch (n_active × 512 threads per sweep)
-                        cells_per_block = BLOCK_SIZE ** 3
-                        for _ in range(pressure_iters):
-                            wp.launch(k3_jacobi_pressure_per_tile,
-                                      dim=n_active * cells_per_block,
-                                      inputs=[self.p, self.p_tmp, self.div, self.marker,
-                                              self._block_coords, BLOCK_SIZE],
-                                      device=dev)
-                            self.p, self.p_tmp = self.p_tmp, self.p
+                    _, coords = self._build_active_blocks(_no_host_sync=_no_host_sync)
+                    cells_per_block = BLOCK_SIZE ** 3
+                    worst_dim = n_blocks * cells_per_block
+                    for _ in range(pressure_iters):
+                        wp.launch(k3_jacobi_pressure_per_tile,
+                                  dim=worst_dim,
+                                  inputs=[self.p, self.p_tmp, self.div, self.marker,
+                                          coords, BLOCK_SIZE, self._n_active_dev],
+                                  device=dev)
+                        self.p, self.p_tmp = self.p_tmp, self.p
                 else:
                     for _ in range(pressure_iters):
                         wp.launch(k3_jacobi_pressure, dim=(nx, ny, nz),
@@ -3143,43 +3224,24 @@ class FlipSolver3D:
             elif pressure_solver == "gsrb":
                 self.p.zero_()
                 if pressure_block_sparse:
-                    # B4.1 — per-tile GS-RB. Build the active-block list the
-                    # same way the per-tile Jacobi branch does.
-                    import warp.utils as wputils
                     nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
                     nby = (ny + BLOCK_SIZE - 1) // BLOCK_SIZE
                     nbz = (nz + BLOCK_SIZE - 1) // BLOCK_SIZE
                     n_blocks = nbx * nby * nbz
-                    if (self._block_active is None
-                            or self._block_active.shape != (nbx, nby, nbz)):
-                        self._block_active = zeros_int((nbx, nby, nbz), dev=dev)
-                        self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
-                        self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
-                        self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
-                    self._block_active.zero_()
-                    wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
-                              inputs=[self.marker, self._block_active, BLOCK_SIZE],
-                              device=dev)
-                    self._block_active_flat = self._block_active.flatten()
-                    wputils.array_scan(self._block_active_flat, self._block_prefix,
-                                       inclusive=True)
-                    n_active = int(self._block_prefix[n_blocks - 1:n_blocks].numpy()[0])
-                    if n_active > 0:
-                        wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
-                                  inputs=[self._block_active, self._block_prefix,
-                                          self._block_coords], device=dev)
-                        cells_per_block = BLOCK_SIZE ** 3
-                        for _ in range(pressure_iters):
-                            wp.launch(k3_gauss_seidel_rb_per_tile,
-                                      dim=n_active * cells_per_block,
-                                      inputs=[self.p, self.div, self.marker,
-                                              self._block_coords, BLOCK_SIZE, 0],
-                                      device=dev)
-                            wp.launch(k3_gauss_seidel_rb_per_tile,
-                                      dim=n_active * cells_per_block,
-                                      inputs=[self.p, self.div, self.marker,
-                                              self._block_coords, BLOCK_SIZE, 1],
-                                      device=dev)
+                    _, coords = self._build_active_blocks(_no_host_sync=_no_host_sync)
+                    cells_per_block = BLOCK_SIZE ** 3
+                    worst_dim = n_blocks * cells_per_block
+                    for _ in range(pressure_iters):
+                        wp.launch(k3_gauss_seidel_rb_per_tile,
+                                  dim=worst_dim,
+                                  inputs=[self.p, self.div, self.marker,
+                                          coords, BLOCK_SIZE, 0, self._n_active_dev],
+                                  device=dev)
+                        wp.launch(k3_gauss_seidel_rb_per_tile,
+                                  dim=worst_dim,
+                                  inputs=[self.p, self.div, self.marker,
+                                          coords, BLOCK_SIZE, 1, self._n_active_dev],
+                                  device=dev)
                 else:
                     for _ in range(pressure_iters):
                         wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),

@@ -74,34 +74,48 @@ def test_b5_2_changed_args_force_recapture():
     assert s._cuda_graph_hits == 1    # only the 3rd step matched its predecessor
 
 
-def test_b5_2_ineligible_config_falls_through():
-    """Jacobi/GS-RB are graph-eligible, with or without CSF. PCG dense
-    is now ALSO eligible (Option A — on-device stop-flag pattern).
-    `pressure_block_sparse=True` is still excluded — `_build_active_blocks`
-    reads `n_active.numpy()`; fixing this is Option B."""
-    # PCG (dense): eligible after the on-device convergence-check landed.
-    # The `_no_host_sync` path now sets `_pcg_done` on device when
-    # `r·r < tol_sq·r0_norm²`; subsequent iter kernels early-return.
+def test_b5_2_all_configs_graph_eligible():
+    """After Options A + B every shipped solver path is graph-eligible:
+    dense jacobi/gs-rb/PCG and their `pressure_block_sparse=True`
+    siblings, with or without CSF. The eligibility matrix is 9/9.
+
+    Test name (legacy: `test_b5_2_ineligible_config_falls_through`)
+    flipped to `all_configs_eligible` since there's no ineligible config
+    on the shipped path anymore. If a future refactor reintroduces a
+    host sync, this test will start failing — that's the trip-wire we
+    want."""
+    # PCG dense (Option A — on-device stop flag).
     s_pcg = _seeded(enable_cuda_graphs=True)
     s_pcg.step(0.005, pressure_iters=5, pressure_solver="pcg")
     assert s_pcg._cuda_graph is not None, \
-        "PCG dense should be graph-eligible after the stop-flag refactor"
+        "PCG dense should be graph-eligible after Option A"
 
-    # CSF: eligible after k3_csf_subtract_bias_*_dev refactor.
+    # CSF (B5 follow-up — k3_csf_subtract_bias_*_dev).
     s_csf = _seeded(enable_cuda_graphs=True, surface_tension=0.1)
     s_csf.step(0.001, pressure_iters=10, pressure_solver="jacobi")
     assert s_csf._cuda_graph is not None, \
-        "CSF should be graph-eligible after the S2.14.6 device-side refactor"
+        "CSF should be graph-eligible after S2.14.6 device-side refactor"
 
-    # Block-sparse: still INELIGIBLE — `_build_active_blocks` reads
-    # `n_active.numpy()` inside step(). Fixing this needs a deeper change
-    # (launch the per-tile kernels at worst-case dim + cap in-kernel).
-    # Tracked as Option B in §12 of HANDOFF.
-    s_sparse = _seeded(enable_cuda_graphs=True)
-    s_sparse.step(0.005, pressure_iters=10, pressure_solver="jacobi",
-                   pressure_block_sparse=True)
-    assert s_sparse._cuda_graph is None, \
-        "block-sparse pressure should still fall through to the direct path"
+    # Sparse jacobi (Option B — n_active_dev + worst-case dim).
+    s_sj = _seeded(enable_cuda_graphs=True)
+    s_sj.step(0.005, pressure_iters=10, pressure_solver="jacobi",
+              pressure_block_sparse=True)
+    assert s_sj._cuda_graph is not None, \
+        "sparse jacobi should be graph-eligible after Option B"
+
+    # Sparse gs-rb (Option B).
+    s_sg = _seeded(enable_cuda_graphs=True)
+    s_sg.step(0.005, pressure_iters=10, pressure_solver="gsrb",
+              pressure_block_sparse=True)
+    assert s_sg._cuda_graph is not None, \
+        "sparse gs-rb should be graph-eligible after Option B"
+
+    # Sparse PCG (inherits both Options).
+    s_sp = _seeded(enable_cuda_graphs=True)
+    s_sp.step(0.005, pressure_iters=10, pressure_solver="pcg",
+              pressure_block_sparse=True)
+    assert s_sp._cuda_graph is not None, \
+        "sparse PCG should be graph-eligible after Options A + B together"
 
 
 def test_b5_2_replay_matches_direct_to_fp_precision():
