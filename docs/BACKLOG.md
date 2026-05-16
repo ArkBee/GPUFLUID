@@ -152,18 +152,18 @@ and replay each step, eliminating launch overhead. Warp supports
 
 **Acceptance:** an `--enable-cuda-graphs` flag on `gpufluid simulate` (default off until proven robust).
 
-### B6. APIC + CSF interaction QA `risk:low value:infra`
+### B6. APIC + CSF interaction QA `risk:low value:infra` ✅ closed 2026-05-16
 
 We verified APIC near obstacles in S2.12 QA. We did NOT verify APIC + surface
 tension. The affine reconstruction interacts with CSF impulses in a way that
 might break the parasitic-current bound (HANDOFF trap #11).
 
-* [ ] B6.1 — Build a scene: APIC mode, σ=1, zero gravity, cube → sphere (same as surftens_on.toml but `transfer_mode = "apic"`).
-* [ ] B6.2 — Diagnostic: COM drift, max parasitic velocity, kinetic energy vs FLIP-CSF baseline.
-* [ ] B6.3 — If drift > 2%, add a damping rule (zero `affine_C` near surface cells, where `|∇χ̃| > threshold`).
-* [ ] B6.4 — Pytest analogous to `test_csf_step_cfl_centre_of_mass_does_not_drift` but for APIC.
+* [x] B6.1 — Build a scene: APIC mode, σ=1, zero gravity, cube → sphere (same as surftens_on.toml but `transfer_mode = "apic"`). *(2026-05-16: in-process via `tests/test_b6_apic_csf_interaction.py` — same physics knobs as surftens_on.toml, 60 frames @ 48³.)*
+* [x] B6.2 — Diagnostic: COM drift, max parasitic velocity, kinetic energy vs FLIP-CSF baseline. *(2026-05-16: measured + asserted. COM drift < 2% of domain, max|v| < 35 m/s (~5× capillary-wave speed estimate), KE change bounded.)*
+* [x] B6.3 — If drift > 2%, add a damping rule (zero `affine_C` near surface cells, where `|∇χ̃| > threshold`). *(2026-05-16: **not triggered** — APIC+CSF passes the baseline tolerance without any damping intervention. Code path stays as-is.)*
+* [x] B6.4 — Pytest analogous to `test_csf_step_cfl_centre_of_mass_does_not_drift` but for APIC. *(2026-05-16: `test_b6_apic_csf_com_drift_within_tolerance` + `test_b6_apic_csf_does_not_blow_up_kinetic_energy`.)*
 
-**Acceptance:** known-stable APIC+CSF configuration documented, regression test guards it.
+**Acceptance:** known-stable APIC+CSF configuration documented, regression test guards it. **Met.** APIC + CSF is safe to enable simultaneously; pre-existing knobs from surftens_on.toml (48³+, 3 smoothing passes, mild viscosity, CFL substep cap 64) work unchanged.
 
 ---
 
