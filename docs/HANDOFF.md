@@ -4,11 +4,18 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **Picking the next task:** the v0.7 roadmap is closed. New macro tasks live
-> in `docs/BACKLOG.md` (ordered queue, not FIFO — risk-aware). Open that and
-> grab a Tier 1 micro if you don't have user input. Don't pick a Tier 3 macro
-> without running its spike micro first (those exist specifically to abort
-> the macro early if reality disagrees with the plan).
+> **End-of-v0.9-sprint state (2026-05-16):** 154/154 tests, 80 IDs / 102
+> callables, v0.7 + v0.8 + v0.9 milestones essentially closed (v0.8 modulo
+> Mixbox-license skip + B3.2/3.5 deferred; v0.9 modulo B11.3 lava demo).
+> **v1.0 pivoted** — B7 NanoVDB macro aborted by spike (Warp 1.13 has no
+> kernel-side volume_store); replacement "B7-alt" deferred-dense-allocation
+> needs its own spike before macro commitment.
+>
+> **Picking the next task:** open `docs/BACKLOG.md` and §8.0b/§8.2/§12 of
+> this file. Tier-1 quick-win options listed in §12. The remaining macro
+> work is concentrated in (a) closing the last 3 of 9 CUDA-graph configs,
+> (b) the B7-alt spike, (c) B11.3 lava demo. Don't pick a Tier 3 macro
+> without running its spike micro first.
 
 ## 1. Identity
 
@@ -203,6 +210,97 @@ the real whitewater_splash bake still uses the legacy speed-threshold
 selector. Closing micro: thread `potential` through `commands.py:cmd_simulate`
 under a flag, then refresh step22.mp4.
 
+### 8.0b v0.9 progress (2026-05-16) — Tier 2 macros closed, v1.0 pivoted
+
+Status of v0.9 milestone macros (the "Production-fast" window) and the
+v1.0 gating spike after this session:
+
+| # | Macro                                                  | Status |
+|---|--------------------------------------------------------|--------|
+| B4 | Block-sparse iteration for GS-RB + PCG                 | ✅ closed |
+| B5 | CUDA-graphs capture for the per-step kernel sequence   | ✅ closed (6 of 9 configs) |
+| B6 | APIC + CSF interaction QA                              | ✅ closed (no fix needed) |
+| B7 | Sparse v2 — NanoVDB-backed storage                     | ❌ **ABORTED** by spike — pivot to B7-alt |
+| B11 | Per-particle scalar attributes (temperature)          | ▶ B11.1/B11.2 done, B11.3 demo deferred |
+| B12 | Per-frame timing instrumentation (`--timings`)        | ✅ closed |
+
+Key per-macro detail (everything else is in BACKLOG):
+
+**§8.0b.B4 — block-sparse stack complete.** S2.6.5 per-tile GS-RB and
+S2.6.6 per-tile PCG kernels added (plus shared `_build_active_blocks`
+helper). Bench at 128³ / ~10% fill:
+* Jacobi sparse (S2.16, v0.7) — 2.4× kernel-only
+* GS-RB sparse (S2.6.5)        — **2.1× kernel-only** (80 iters)
+* PCG sparse (S2.6.6)          — **1.1× full-step** (30 iters)
+PCG's modest speedup is the macro-level honest finding: its 8 device
+ops/iter vs GS-RB's 2 mean per-tile dispatch overhead + one extra
+device→host sync (n_active) eats into the per-iter saving. Documented
+follow-up: cache `n_active` on-device.
+
+**§8.0b.B5 — CUDA graphs ship for 6 of 9 configurations.**
+Eligibility matrix:
+```
+                       no-CSF    CSF (σ>0)
+jacobi/gsrb dense       ✅          ✅       ← 6 configs eligible
+PCG dense               ❌          ❌
+sparse (block_sparse=1) ❌          ❌
+```
+* B5.1 spike (Jacobi, no CSF): direct 0.43 ms → graph 0.20 ms = **2.17×**
+* Real bake `two_color_drop` (90 frames, jacobi, 8 substeps): sim 0.72s
+  → 0.15s = **4.8×**, 88% hit rate
+* Real bake `surftens_on` (60 frames, σ=1, 38 substeps): sim 3.35s
+  → 0.19s = **17.6×**, 97% hit rate ← CSF made eligible by moving
+  S2.14.6 force-balance fully device-side
+CLI flag: `gpufluid simulate --enable-cuda-graphs` (off by default).
+
+PCG/`block_sparse=True` are documented follow-ups:
+* PCG: forcing `max_iter` to capture cleanly regressed `big_pcg` net
+  (4.8s → 9.3s) because that scene converges early. `_no_host_sync`
+  plumbing exists, eligibility flag stays off until an on-device
+  convergence-check idiom lands.
+* block_sparse: `_build_active_blocks` reads `n_active.numpy()`. Fix
+  needs the per-tile kernels to launch worst-case dim + cap in-kernel
+  via a `n_active_dev` device buffer. Six kernels to touch.
+
+**§8.0b.B6 — APIC + CSF stable, no fix needed.** `tests/test_b6_apic_csf_interaction.py`:
+COM drift < 2%, max|v| < 35 m/s on the surftens_on parameter set with
+`transfer_mode="apic"`. Existing knobs from `surftens_on.toml`
+(48³+, 3 smoothing passes, mild viscosity, CFL substep cap 64) work
+unchanged.
+
+**§8.0b.B7 — sparse v2 ABORTED, pivot documented.** Spike found two
+fatal problems with the BACKLOG plan:
+1. **`wp.Volume` is read-only from kernels in Warp 1.13.** No
+   `volume_store_*` API. The plan to atomic_add into a sparse Volume
+   is physically impossible.
+2. Even read-only, `volume_lookup_i` is 1.3-2.3× slower than dense
+   indexing — borderline at the BACKLOG abort threshold.
+
+`tests/test_b7_1_volume_is_read_only` is the trip-wire: when Warp ships
+the missing store API, that test starts failing and forces re-eval.
+
+**Pivot recommendation in BACKLOG B7:** "B7-alt" — extend S2.16
+block-sparse compaction with deferred dense allocation (allocate
+`wp.array3d` lazily for the bbox of active tiles, rebuild every N
+frames with dilation margin). Gets ~70-80% of the sparse v2 memory
+win without depending on Warp upstream. Needs its own spike.
+
+**§8.0b.B11 — scalar attribute pipeline (temperature).** S2.18.1/2/3
+kernels parallel the S2.15 colour pipeline but for one float channel.
+`attr_temperature` slot on FlipSolver3D; `seed_box(temperature=...)`
+kwarg with append-in-lockstep semantics. Drive-by: fixed `seed_box`
+to concatenate positions whenever ANY attribute is in play (was
+colour-only). B11.3 lava demo deferred — needs CLI/TOML wiring for
+per-source temperature + a colormap renderer (cdist-style nearest
+particle, like step24).
+
+**§8.0b.B12 — per-section profiler shipped.** `StepProfiler` wraps
+`wp.ScopedTimer(synchronize=True)`; opt-in via
+`FlipSolver3D(enable_timing=True)`. CLI flag `--timings` prints
+per-section totals at end and dumps `<cache>/timings.json`. Sample on
+two_color_drop (40³, 90 frames): pressure 49.9%, color 11%, p2g 7.2%,
+g2p_advect 4.7%, rest <5% each.
+
 ### 8.1 v0.7 done (2026-05-16) — one-line summary
 
 | # | Macro                                                  | Where to look for details |
@@ -218,17 +316,29 @@ under a flag, then refresh step22.mp4.
 | 9 | Whitewater quality — foam/spray/bubble                 | step22.mp4, `test_w7_quality.py`, DESIGN.md §6.1 |
 | 10 | Sparse v1 (block-sparse pressure)                     | `test_s2_16_sparse_jacobi.py`, DESIGN.md §5.5 — Sparse v2 is BACKLOG B7 |
 
-### 8.2 Live queue (`docs/BACKLOG.md`) — current milestone: **v0.8**
+### 8.2 Live queue (`docs/BACKLOG.md`) — current milestone: **v0.9 essentially closed, v1.0 pivot pending**
 
 The next-task queue is in `docs/BACKLOG.md`, with release milestones at the
-top. We're currently in the **v0.8 "Reachable"** window — Tier 1 macros that
-expose v0.7 features through the Blender addon UI.
+top. After this session:
 
-**Default next task:** B1 (addon UI for v0.7 params) → start with B1.1
-(`SurfaceTensionGroup` PropertyGroup in `properties.py`). Then B1.2..B1.6 in
-order. After B1 lands → pick B2 (Mixbox LUT) or B3 (better whitewater
-classifier) — both Tier 1, both safe in any order. Once all three are done,
-v0.8 ships and we move into the v0.9 perf-squeeze window.
+* **v0.8** essentially closed (B1 ✅, B2 skipped license, B3 partial).
+* **v0.9** essentially closed: B4 ✅, B5 ✅ (6 of 9 configs), B6 ✅, B12 ✅,
+  B11 50% done. The remaining v0.9 micro is **B11.3 lava demo**.
+* **v1.0** pivoted: original B7 (NanoVDB) aborted; replacement "B7-alt"
+  (deferred dense allocation, ~70-80% of the win) needs its own spike.
+
+**Default next task** (no user direction):
+* If you want a quick visible win → **B11.3 lava demo** (closes the last v0.9
+  micro). ~1 session. Reuses step24 cdist nearest-particle renderer.
+* If you want to push into v1.0 → **B7-alt spike**: prototype deferred-dense
+  allocation. Allocate `wp.array3d` lazily for the bounding box of active
+  8³ tiles, rebuild every N frames with a dilation margin. Risk: needs a
+  coord-translation layer in every kernel (offset_x/y/z). Run the spike at
+  128³ with 5% fill before committing to the macro.
+* If you want to close out the B5 follow-ups → port PCG and block-sparse to
+  the graph-eligible path. PCG needs an on-device convergence-check
+  (stop-flag idiom). Block-sparse needs `n_active_dev` device buffer + cap
+  in 6 per-tile kernels. Both unblock the remaining 3 of 9 configs.
 
 **Picking rules:**
 
@@ -260,11 +370,22 @@ When you finish a macro:
 ```bash
 cd E:\projects\gpu_flip\gpufluid
 source .venv/Scripts/activate
-pytest -q                          # 70 passed
-gpufluid info                      # 50 block IDs across 7 layers (G1/S2/F3/D4/M5/I6/C7); A8/W7 separate
-gpufluid simulate examples/scenes/waterfall.toml   # waterfall + ball drop (anim obstacle)
-gpufluid simulate examples/scenes/v06_kitchen_sink.toml   # all v0.6 features
+pytest -q                          # 154 passed
+gpufluid info                      # 80 unique block IDs / 102 callables across G1/S2/F3/D4/M5/I6/C7/A8/W7
+gpufluid simulate examples/scenes/two_color_drop.toml  --enable-cuda-graphs --timings
+                                   # canonical demo of B5 + B12 wins
+gpufluid simulate examples/scenes/surftens_on.toml --enable-cuda-graphs
+                                   # CSF now graph-eligible (17.6× sim speedup)
 ```
+
+**Demo videos shipped this session:**
+* `out/videos/step23.mp4` — whitewater A/B (legacy `\|v\|>thr` vs W7.7
+  trapped-air potential), matplotlib SBS with per-class count overlays
+* `out/videos/step23_eevee.mp4` — same scene, Eevee headless renderer,
+  9× faster than matplotlib (`render_step23_eevee.py`)
+* `out/videos/step24.mp4` — kitchen-sink v0.8 demo (2 coloured drops + σ
+  + APIC + sphere obstacle + W7.7 ww, Eevee with per-vertex colour from
+  nearest-particle cdist — see `render_step24_eevee.py`)
 
 ## 11. Quick reference: key files when continuing
 
@@ -280,21 +401,91 @@ gpufluid simulate examples/scenes/v06_kitchen_sink.toml   # all v0.6 features
 | Render ablation | `python examples/render_side_by_side.py --left-cache A --right-cache B --out out/videos/<name>.mp4` |
 | Manually test the addon in your Blender | Use the MCP server (`mcp__Blender__execute_blender_code`); the addon is installed at `C:\Users\timof\AppData\Roaming\Blender Foundation\Blender\5.1\extensions\user_default\gpufluid_blender\` |
 
-## 12. Open TODOs at handoff
+## 12. Open TODOs at handoff (2026-05-16 session end)
 
-- Step 17 candidate: **Surface tension (S2.14)** — most visible classic FLIP feature still missing
-- Step 18 candidate: **Per-particle color attribute** — enables Mixbox-style two-fluid demos
-- Step 19 candidate: **BVH for GPU mesh SDF** — unblocks 10k+ tri obstacle meshes per frame
-- All "FUTURE" items in `docs/BLOCKS.md` are valid targets.
+Sized roughly by session-count and grouped by where they unblock.
+
+**Tier 1 — quick wins, ≤1 session:**
+- **B11.3 — lava demo (red→blue colormap from temperature scalar).**
+  Wire `[[fluids]] temperature = ...` through TOML + colormap in
+  `examples/render_step24_eevee.py`. Closes the last v0.9 micro.
+- **B3.5 — refresh step22.mp4 with the W7.7 selector turned ON.** Same
+  scene config, just `whitewater_use_potential = true`. Already wired
+  through CLI (B3.3).
+- **PCG graph-eligibility — on-device convergence-check (stop flag).**
+  `_no_host_sync` plumbing already in `_pressure_pcg`. Add a 1-int
+  device buffer "done", gate subsequent-iter kernels on it, drop the
+  forced max_iter trade-off. Unblocks the 7th of 9 graph configs.
+
+**Tier 2 — risk:med, 1-2 sessions each:**
+- **B7-alt spike — deferred dense allocation for 256³+.** Allocate
+  `wp.array3d` lazily for the bbox of active 8³ tiles, rebuild every N
+  frames with dilation. Spike at 128³/5% fill: does memory drop by ~5×
+  without breaking the dense kernels? (They'd need a coord-translation
+  layer with `offset_xyz`.) See BACKLOG B7 "pivot recommendation".
+- **Block-sparse + CUDA graphs.** Six per-tile kernels need an
+  `n_active_dev` device buffer + in-kernel cap so launches happen at
+  worst-case dim. Unblocks 2 more of 9 graph configs (sparse jacobi,
+  sparse gs-rb). Sparse PCG remains gated on the PCG convergence fix.
+
+**Hygiene:**
+- `docs/BLOCKS.md` doesn't track everything that landed in S2.6.5,
+  S2.6.6, S2.14.6_dev variants, S2.18.x, G1.9. `gpufluid info` is the
+  source of truth; BLOCKS.md is meant for the human-readable index but
+  falls behind during fast iteration.
+- Flaky `tests/test_m5_4_gpu_mc.py::test_gpu_mc_speedup_at_128` —
+  pre-existing perf bench sensitive to GPU thermal/concurrent load.
+  Passes in isolation, occasionally fails in the full suite. Fix: relax
+  threshold from 3× to 2.5× or warm GPU more aggressively.
 
 ---
 
-**State at handoff (verified 2026-05-16, end of v0.7 sprint):** 109/109 tests green, **72 unique block IDs / 90 callables** via `gpufluid info`, 22 step videos in `out/videos/`, new colored-particle renderer at `examples/render_colored_particles.py`, addon zip 24 KB at `addon/gpufluid_blender.zip` (addon UI not yet exposing `surface_tension`/`csf_smoothing_passes`/`color` — CLI/TOML only). TOML now supports `[[fluids]]` array for multi-source scenes (each with optional `color = [r,g,b]`). Cache layout: when `output.particles=true` and any seed has a colour, a `colors/frame_NNNN.npy` sidecar (Nx3 float32) is written next to `particles/frame_NNNN.npy`. Moving-boundary BC works (numerically: 30 mm bow wave, 11 mm wake trough). USD cache pipeline tested in Blender. Reseed/decimate/checkpoint/GSRB/CSF all wired through CLI; CSF auto-engages `step_cfl` substepping (S2.14.5) and force balance (S2.14.6).
+**State at handoff (verified 2026-05-16, end of v0.9 sprint):**
+* **Tests:** 154/154 green (109 v0.7 baseline + 45 added across v0.8/v0.9).
+* **Registry:** 80 unique block IDs / 102 callables via `gpufluid info`.
+* **Demo videos:** 24 mp4 in `out/videos/` (step23/23_eevee/24 added this
+  session; matplotlib SBS + Eevee headless renderers both work).
+* **Addon zip:** 37 KB at `addon/gpufluid_blender.zip` (v0.8.0). UI exposes
+  σ, csf_smoothing_passes, per-source colour, whitewater + class-vis +
+  W7.7 potential toggle, surface + whitewater cache attach.
+* **CLI features:** `gpufluid simulate <scene.toml>` accepts
+  `--enable-cuda-graphs` (B5), `--timings` (B12), `--resume`,
+  `--start-frame`, `--checkpoint-every`.
+* **Repo:** `https://github.com/ArkBee/GPUFLUID` (branch `main`).
+  `origin/main` ends at commit `586b4a7` (step24 demo). The **7 commits
+  since** (B11/B4.1 → B4.2 → B7.1 → B5.1 → B5.2 → B5 follow-up)
+  are local-only — need user auth to push.
 
-Drive-by fix included in this session: viscosity branch of step() was calling `k3_enforce_solid_bc` with 7 args instead of 9 (missing `solid_u/v/w`). Path only fires when `viscosity>0`, so it was latent. Fixed alongside CSF integration.
+**Git stack to push when auth's ready** (newest first):
+```
+b195b18  B5 follow-up — CSF graph-eligible (17.6× on surftens_on)
+3d7240a  B5.2-B5.5 — CUDA-graph cache + CLI flag (4.8× two_color_drop)
+cb7f31e  BACKLOG: tick B5.1
+896507b  B5.1 spike — CUDA graphs capture works (2.17×)
+7d48861  B7.1 spike — Sparse v2 ABORTED, pivot documented
+b2fefb2  B4.2/B4.3/B4.4/B4.5 — block-sparse PCG (S2.6.6), B4 closed
+7761dc0  B11.1/B11.2 (S2.18) + B4.1 spike per-tile GS-RB (S2.6.5)
+586b4a7  ← origin/main (step24 — kitchen-sink v0.8 demo)
+```
 
-## 13. Repo hygiene notes (2026-05-16)
+## 13. Repo hygiene notes (2026-05-16, end of v0.9 sprint)
 
-- **Not a git repo.** `git status` fails. If you want history/branching, run `git init && git add -A && git commit -m "snapshot at v0.6 handoff"` early in the session. All workflow rules in §9 (block IDs, tests-before-done, per-step videos) still apply without git, but rollback is manual until then.
-- **`docs/BLOCKS.md` is stale.** It still marks several blocks as `plan` that are actually `impl` in source (S2.6.2 GS-RB, S2.11 reseed, S2.12 APIC, D4.2.4 plane, D4.5.2 mesh seeder, F3.5 checkpoint, M5.6 decimate, I6.5 USD, A8.* addon, W7.* whitewater). The implementations exist and are tested — BLOCKS.md just hasn't caught up. Refresh it before/when claiming a new feature is "added"; otherwise trust `gpufluid info` output and DESIGN.md for the source of truth.
-- **Two D4.3 rows in BLOCKS.md** (one `plan`, one `impl,test`) — dedupe on next BLOCKS edit.
+- **Is now a git repo.** `origin/main` at `586b4a7`; 7 unpushed local
+  commits sit on `main`. User's PAT was used one-shot for the
+  initial push; subsequent pushes need a fresh auth (PAT in chat or
+  Git Credential Manager).
+- **`docs/BLOCKS.md` lags reality** — fast iteration this session added
+  S2.6.5, S2.6.6, S2.14.6_dev, S2.18.1/2/3, G1.9 plus new test rows
+  without a full BLOCKS rewrite. `gpufluid info` is the source of
+  truth for what's registered; DESIGN.md for architecture intent.
+- **CSF S2.14.6 has TWO kernel variants now:**
+  `k3_csf_subtract_bias_{u,v,w}` (legacy, takes host-computed `bias`)
+  vs `_dev` siblings (read sum/count from device). `_apply_surface_tension`
+  uses the `_dev` ones. Legacy kernels are still registered + tested
+  via `test_s2_14_*`; nothing calls them in the live solver. Safe to
+  delete in a future cleanup, but they're zero-cost dead weight.
+- **PCG `_no_host_sync=True` plumbing is dormant.** The flag exists in
+  `_pressure_pcg`, step() does NOT pass it (PCG eligibility is OFF in
+  `_cuda_graph_eligible`). When the on-device convergence-check idiom
+  ships, the eligibility flip is a one-line change and the existing
+  plumbing carries the weight.
