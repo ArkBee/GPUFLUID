@@ -144,7 +144,7 @@ Each step() does 20+ `wp.launch` calls. CUDA graphs would record them once
 and replay each step, eliminating launch overhead. Warp supports
 `wp.capture_begin / wp.capture_launch`.
 
-* [ ] B5.1 — Audit `step()` for host-syncs (anything that calls `.numpy()` inside the per-step path can't be in a graph). Move them outside (CSF balance already uses GPU, advection CFL is one float, etc.).
+* [x] B5.1 — Audit `step()` for host-syncs (anything that calls `.numpy()` inside the per-step path can't be in a graph). Move them outside (CSF balance already uses GPU, advection CFL is one float, etc.). *(2026-05-16 spike: 6 sync sites identified — PCG dense/sparse r_norm^2 reads, CSF S2.14.6 force-balance (3 axes), sparse pressure n_active. Plus a redundant `wp.synchronize()` at end of step() that I removed in this commit. Of the 9 solver configurations we ship, **3 are graph-eligible today** (jacobi/gsrb × any transfer_mode, no CSF, no sparse). The other 6 need their syncs moved out as B5.2 work. Capture+replay verified bit-identical to direct step on Jacobi at 32^3, **2.17× speedup at 64^3 / 20 iters** (0.43→0.20 ms/step) — way above the B5.5 target of 1.15×. Macro greenlit.)*
 * [ ] B5.2 — Add `solver._graph` lazy cache keyed by `(transfer_mode, pressure_solver, has_csf, has_color)` — a graph is invalid when topology changes.
 * [ ] B5.3 — Invalidate on every `prepare_frame` (since marker/obstacles changed) — capture freshly for the next N=1..3 frames inside that topology, then replay.
 * [ ] B5.4 — Pytest: same numerical output with/without graphs.
