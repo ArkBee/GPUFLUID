@@ -158,6 +158,48 @@ of macro tasks, each broken into 3–10 micros sized for a single session.
 Macros are tagged with `risk:low|med|high`, `value:user|infra|research`, and
 dependency edges so a new session can pick safely.
 
+### 8.0 v0.8 partial (2026-05-16) — Blender-side smoke verified
+
+Status of v0.8 milestone macros after this session:
+
+| # | Macro                                                | Where to look |
+|---|-------------------------------------------------------|---------------|
+| B1 | Addon UI exposes v0.7 params (B1.1–B1.5 done; B1.6 verified via MCP) | step §8.0.B1 below |
+| B2 | Mixbox LUT — **skipped**: CC BY-NC 4.0 license conflicts with "compete with paid FLIP Fluids" goal | see §8.0.B2 |
+| B3 | Better whitewater classifier — **partial**: B3.1 trapped-air done + emit fold-in. B3.2 / B3.4 real bake / B3.5 video pending. | step §8.0.B3 |
+
+**§8.0.B1 verification record (Blender 5.1.1, MCP, 2026-05-16):**
+Reinstalled `addon/gpufluid_blender.zip` (now v0.8.0) into Blender's extensions
+dir. Property groups load (`Domain.surface_tension_group` with σ=0 / passes=2,
+`Domain.whitewater_group` with enable=False / speed_thr=4.0 / show_foam=True,
+`Fluid.use_color` + `Fluid.color`). Reset interpreter preference (extension
+re-install nukes it — note for future repackaging). Configured Domain
+(32³, 4 frames, σ=0.05, ww enabled) + Fluid (color=red, use_color=True).
+`collect_scene()` returned a dict with `cfl=True auto-on from σ>0`, 2 fluid
+sources, color RGB carried through, whitewater knobs threaded, 1 in / 1 out
+/ 2 obs. Subprocess bake via configured interpreter returncode=0 in 2.13s,
+all 4 cache streams written (mesh / particles / colors / whitewater = 4 ply +
+3 × 4 npy). `bpy.ops.gpufluid.attach_cache` returned `{'FINISHED'}`,
+`frame_change_post` handler registered, scrubbing frames 1→4 swapped
+target-mesh vertex counts 1084 → 1196 → 1424 → 1782 (exact match to solver
+log). No exceptions from any panel draw during property-access tests.
+**Latent bug found:** addon zip reinstall resets the
+`prefs.interpreter_path` to empty, so the first bake after upgrade fails
+with WinError 87 until the user re-points it. Document or add a default
+sniff in preferences.py (future micro).
+
+**§8.0.B2 — Mixbox license:** the published LUT is CC BY-NC 4.0
+(scrtwpns/mixbox). Either pay for a commercial licence or write our own
+2-pigment K-M solver (~50 lines, less painterly). Deferred until product
+direction decided.
+
+**§8.0.B3 status:** GPU trapped-air potential ships (`W7.7` in
+`sim/whitewater_potentials.py`); `emit_from_fluid` accepts `potential=`
+kwarg for weighted selection. NOT yet wired into `cli/commands.py`, so
+the real whitewater_splash bake still uses the legacy speed-threshold
+selector. Closing micro: thread `potential` through `commands.py:cmd_simulate`
+under a flag, then refresh step22.mp4.
+
 ### 8.1 v0.7 done (2026-05-16) — one-line summary
 
 | # | Macro                                                  | Where to look for details |

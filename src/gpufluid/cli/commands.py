@@ -120,7 +120,8 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                           viscosity_iters=scene.simulation.viscosity_iters,
                           surface_tension=scene.simulation.surface_tension,
                           csf_smoothing_passes=scene.simulation.csf_smoothing_passes,
-                          transfer_mode=scene.simulation.transfer_mode)
+                          transfer_mode=scene.simulation.transfer_mode,
+                          enable_timing=bool(getattr(args, "timings", False)))
     grid_xyz = solver.cell_centers_np()
     obstacle_sdf = _build_obstacle_sdf(scene, grid_xyz)
     if obstacle_sdf is not None:
@@ -368,6 +369,25 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     manifest_path = write_cache_manifest(cache_dir, manifest)
     print(f"[gpufluid] done. cache: {cache_dir}  manifest: {manifest_path.name}")
     print(f"           sim total: {t_sim_total:.2f}s  mesh total: {t_mesh_total:.2f}s")
+    # B12 — per-section profiler report (only when --timings was passed)
+    timings = solver._prof.summarize()
+    if timings:
+        ms_total = sum(timings.values())
+        print("[gpufluid] per-section timings (--timings):")
+        for name, ms in sorted(timings.items(), key=lambda kv: -kv[1]):
+            pct = (100.0 * ms / ms_total) if ms_total > 0 else 0.0
+            calls = solver._prof.call_counts.get(name, 0)
+            print(f"             {name:<18s} {ms:>9.1f} ms  ({pct:5.1f}%)  x{calls}")
+        # Persist alongside the manifest so downstream tooling can ingest.
+        import json
+        timings_path = cache_dir / "timings.json"
+        timings_path.write_text(json.dumps(
+            {"sections_ms": timings,
+             "call_counts": solver._prof.call_counts,
+             "sim_total_s": t_sim_total,
+             "mesh_total_s": t_mesh_total},
+            indent=2, sort_keys=True))
+        print(f"             dumped to {timings_path}")
     return 0
 
 
@@ -435,6 +455,9 @@ def main(argv=None) -> int:
     p_sim.add_argument("--resume", default=None, help="checkpoint .npz to resume from")
     p_sim.add_argument("--start-frame", type=int, default=0, help="frame to start bake from (used with --resume)")
     p_sim.add_argument("--checkpoint-every", type=int, default=0, help="write checkpoint every N frames (0 = off)")
+    p_sim.add_argument("--timings", action="store_true",
+                       help="(B12) wrap each major solver phase in wp.ScopedTimer, "
+                            "print per-section totals at the end + write timings.json next to cache.json")
     p_sim.set_defaults(func=cmd_simulate)
 
     p_bench = sub.add_parser("bench", help="solver throughput benchmark")

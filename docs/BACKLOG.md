@@ -259,9 +259,9 @@ generalises to any per-particle scalar or vec. Useful for:
 per-block (e.g., "P2G: 18%, pressure: 31%, G2P: 12%") would let users tune
 faster.
 
-* [ ] B12.1 — Add lightweight `wp.ScopedTimer` wrapper around each major S2.x launch.
-* [ ] B12.2 — Aggregate per-block totals across the whole bake; print at the end.
-* [ ] B12.3 — Optional JSON dump to `cache.json -> timings`.
+* [x] B12.1 — Add lightweight `wp.ScopedTimer` wrapper around each major S2.x launch. *(2026-05-16: `StepProfiler` in `primitives/profiling.py` wraps `wp.ScopedTimer(synchronize=True, print=False, dict=...)`. When disabled it returns `contextlib.nullcontext` — zero cost. step() instruments 9 always-on sections (clear, p2g, normalize, gravity_bc, divergence, pressure, grad_subtract_bc, g2p_advect, color) + 2 conditional (viscosity, surface_tension).)*
+* [x] B12.2 — Aggregate per-block totals across the whole bake; print at the end. *(2026-05-16: `solver._prof.summarize()` returns ms-per-section. cmd_simulate prints sorted table when `--timings` flag is set, e.g. `pressure 528.0 ms (49.9%) x720`.)*
+* [x] B12.3 — Optional JSON dump to `cache.json -> timings`. *(2026-05-16: writes `<cache>/timings.json` next to `cache.json` with `sections_ms`, `call_counts`, `sim_total_s`, `mesh_total_s`. Separate file (not embedded in `cache.json`) so the manifest stays stable for downstream readers.)*
 
 **Acceptance:** end-of-bake report shows per-block percentages.
 

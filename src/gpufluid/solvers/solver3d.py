@@ -1660,7 +1660,10 @@ class FlipSolver3D:
                  surface_tension: float = 0.0,
                  csf_smoothing_passes: int = 2,
                  transfer_mode: str = "flip",
-                 device: Optional[str] = None):
+                 device: Optional[str] = None,
+                 enable_timing: bool = False):
+        from ..primitives.profiling import StepProfiler
+        self._prof = StepProfiler(enabled=enable_timing)
         self.nx, self.ny, self.nz = nx, ny, nz
         self.dx = dx if dx is not None else 1.0 / max(nx, ny, nz)
         self.dom = wp.vec3(nx * self.dx, ny * self.dx, nz * self.dx)
@@ -2234,34 +2237,40 @@ class FlipSolver3D:
         nx, ny, nz, dx = self.nx, self.ny, self.nz, self.dx
         full = (max(nx + 1, nx), max(ny + 1, ny), max(nz + 1, nz))
         dev = self.device
-        wp.launch(k3_clear_grid, dim=full,
-                  inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww, self.marker], device=dev)
-        if self.transfer_mode == "apic":
-            if self.affine_C is None or self.affine_C.shape[0] != self.n_particles:
-                # rebuild after inflow/outflow compaction
-                zeros_C = np.zeros((self.n_particles, 3, 3), dtype=np.float32)
-                self.affine_C = wp.array(zeros_C, dtype=wp.mat33, device=dev)
-            wp.launch(k3_p2g_apic, dim=self.n_particles,
-                      inputs=[self.pos, self.vel, self.affine_C,
-                              self.u, self.v, self.w, self.uw, self.vw, self.ww,
-                              self.marker, dx, nx, ny, nz], device=dev)
-        else:
-            wp.launch(k3_p2g, dim=self.n_particles,
-                      inputs=[self.pos, self.vel,
-                              self.u, self.v, self.w, self.uw, self.vw, self.ww,
-                              self.marker, dx, nx, ny, nz], device=dev)
-        wp.launch(k3_normalize, dim=full,
-                  inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww,
-                          self.us, self.vs, self.ws], device=dev)
-        wp.launch(k3_add_gravity, dim=self.v.shape,
-                  inputs=[self.v, self.gravity, dt], device=dev)
-        wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
-                  inputs=[self.u, self.v, self.w, self.marker,
-                          self.solid_u, self.solid_v, self.solid_w,
-                          nx, ny, nz], device=dev)
+        prof = self._prof
+        with prof.section("clear"):
+            wp.launch(k3_clear_grid, dim=full,
+                      inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww, self.marker], device=dev)
+        with prof.section("p2g"):
+            if self.transfer_mode == "apic":
+                if self.affine_C is None or self.affine_C.shape[0] != self.n_particles:
+                    # rebuild after inflow/outflow compaction
+                    zeros_C = np.zeros((self.n_particles, 3, 3), dtype=np.float32)
+                    self.affine_C = wp.array(zeros_C, dtype=wp.mat33, device=dev)
+                wp.launch(k3_p2g_apic, dim=self.n_particles,
+                          inputs=[self.pos, self.vel, self.affine_C,
+                                  self.u, self.v, self.w, self.uw, self.vw, self.ww,
+                                  self.marker, dx, nx, ny, nz], device=dev)
+            else:
+                wp.launch(k3_p2g, dim=self.n_particles,
+                          inputs=[self.pos, self.vel,
+                                  self.u, self.v, self.w, self.uw, self.vw, self.ww,
+                                  self.marker, dx, nx, ny, nz], device=dev)
+        with prof.section("normalize"):
+            wp.launch(k3_normalize, dim=full,
+                      inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww,
+                              self.us, self.vs, self.ws], device=dev)
+        with prof.section("gravity_bc"):
+            wp.launch(k3_add_gravity, dim=self.v.shape,
+                      inputs=[self.v, self.gravity, dt], device=dev)
+            wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
+                      inputs=[self.u, self.v, self.w, self.marker,
+                              self.solid_u, self.solid_v, self.solid_w,
+                              nx, ny, nz], device=dev)
         # S2.13 viscosity (semi-implicit). Solve (I - r·Lap) u_new = u for each
         # MAC component using Jacobi. Re-uses uw/vw/ww as scratch buffers.
         if self.viscosity > 0.0:
+          with prof.section("viscosity"):
             r = dt * self.viscosity / (dx * dx)
             for old, scratch in [(self.u, self.uw), (self.v, self.vw), (self.w, self.ww)]:
                 wp.copy(scratch, old)
@@ -2284,90 +2293,96 @@ class FlipSolver3D:
         # so the impulse is projected to a divergence-free field by the pressure
         # solve. Allocations are lazy: only paid when surface_tension>0.
         if self.surface_tension > 0.0:
+          with prof.section("surface_tension"):
             self._apply_surface_tension(dt)
             wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
                       inputs=[self.u, self.v, self.w, self.marker,
                               self.solid_u, self.solid_v, self.solid_w,
                               nx, ny, nz], device=dev)
-        wp.launch(k3_compute_divergence, dim=(nx, ny, nz),
-                  inputs=[self.u, self.v, self.w, self.div, self.marker, dx, dt, self.rho], device=dev)
-        if pressure_solver == "pcg":
-            self.last_pressure_iters = self._pressure_pcg(max_iter=pressure_iters)
-        elif pressure_solver == "jacobi":
-            self.p.zero_(); self.p_tmp.zero_()
-            if pressure_block_sparse:
-                # S2.16 — rebuild the 8³ active-block bitmask + compact list.
-                import warp.utils as wputils
-                nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
-                nby = (ny + BLOCK_SIZE - 1) // BLOCK_SIZE
-                nbz = (nz + BLOCK_SIZE - 1) // BLOCK_SIZE
-                n_blocks = nbx * nby * nbz
-                if (self._block_active is None
-                        or self._block_active.shape != (nbx, nby, nbz)):
-                    self._block_active = zeros_int((nbx, nby, nbz), dev=dev)
-                    self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
-                    self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
-                    self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
-                self._block_active.zero_()
-                wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
-                          inputs=[self.marker, self._block_active, BLOCK_SIZE],
-                          device=dev)
-                # Flatten bitmask (alias view) and prefix-sum to compact coords.
-                # array_scan needs a 1D input — alias self._block_active.
-                self._block_active_flat = self._block_active.flatten()
-                wputils.array_scan(self._block_active_flat, self._block_prefix,
-                                   inclusive=True)
-                n_active = int(self._block_prefix[n_blocks - 1:n_blocks].numpy()[0])
-                if n_active == 0:
-                    # No fluid → pressure stays zero
-                    pass
+        with prof.section("divergence"):
+            wp.launch(k3_compute_divergence, dim=(nx, ny, nz),
+                      inputs=[self.u, self.v, self.w, self.div, self.marker, dx, dt, self.rho], device=dev)
+        with prof.section("pressure"):
+            if pressure_solver == "pcg":
+                self.last_pressure_iters = self._pressure_pcg(max_iter=pressure_iters)
+            elif pressure_solver == "jacobi":
+                self.p.zero_(); self.p_tmp.zero_()
+                if pressure_block_sparse:
+                    # S2.16 — rebuild the 8³ active-block bitmask + compact list.
+                    import warp.utils as wputils
+                    nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    nby = (ny + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    nbz = (nz + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    n_blocks = nbx * nby * nbz
+                    if (self._block_active is None
+                            or self._block_active.shape != (nbx, nby, nbz)):
+                        self._block_active = zeros_int((nbx, nby, nbz), dev=dev)
+                        self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
+                        self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
+                        self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
+                    self._block_active.zero_()
+                    wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
+                              inputs=[self.marker, self._block_active, BLOCK_SIZE],
+                              device=dev)
+                    # Flatten bitmask (alias view) and prefix-sum to compact coords.
+                    # array_scan needs a 1D input — alias self._block_active.
+                    self._block_active_flat = self._block_active.flatten()
+                    wputils.array_scan(self._block_active_flat, self._block_prefix,
+                                       inclusive=True)
+                    n_active = int(self._block_prefix[n_blocks - 1:n_blocks].numpy()[0])
+                    if n_active == 0:
+                        # No fluid → pressure stays zero
+                        pass
+                    else:
+                        wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
+                                  inputs=[self._block_active, self._block_prefix,
+                                          self._block_coords], device=dev)
+                        # S2.6.4 per-tile launch (n_active × 512 threads per sweep)
+                        cells_per_block = BLOCK_SIZE ** 3
+                        for _ in range(pressure_iters):
+                            wp.launch(k3_jacobi_pressure_per_tile,
+                                      dim=n_active * cells_per_block,
+                                      inputs=[self.p, self.p_tmp, self.div, self.marker,
+                                              self._block_coords, BLOCK_SIZE],
+                                      device=dev)
+                            self.p, self.p_tmp = self.p_tmp, self.p
                 else:
-                    wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
-                              inputs=[self._block_active, self._block_prefix,
-                                      self._block_coords], device=dev)
-                    # S2.6.4 per-tile launch (n_active × 512 threads per sweep)
-                    cells_per_block = BLOCK_SIZE ** 3
                     for _ in range(pressure_iters):
-                        wp.launch(k3_jacobi_pressure_per_tile,
-                                  dim=n_active * cells_per_block,
-                                  inputs=[self.p, self.p_tmp, self.div, self.marker,
-                                          self._block_coords, BLOCK_SIZE],
-                                  device=dev)
+                        wp.launch(k3_jacobi_pressure, dim=(nx, ny, nz),
+                                  inputs=[self.p, self.p_tmp, self.div, self.marker], device=dev)
                         self.p, self.p_tmp = self.p_tmp, self.p
-            else:
+                self.last_pressure_iters = pressure_iters
+            elif pressure_solver == "gsrb":
+                self.p.zero_()
                 for _ in range(pressure_iters):
-                    wp.launch(k3_jacobi_pressure, dim=(nx, ny, nz),
-                              inputs=[self.p, self.p_tmp, self.div, self.marker], device=dev)
-                    self.p, self.p_tmp = self.p_tmp, self.p
-            self.last_pressure_iters = pressure_iters
-        elif pressure_solver == "gsrb":
-            self.p.zero_()
-            for _ in range(pressure_iters):
-                wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
-                          inputs=[self.p, self.div, self.marker, 0], device=dev)
-                wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
-                          inputs=[self.p, self.div, self.marker, 1], device=dev)
-            self.last_pressure_iters = pressure_iters
-        else:
-            raise ValueError(f"unknown pressure_solver: {pressure_solver!r}")
-        wp.launch(k3_subtract_pressure_grad, dim=(nx + 1, ny + 1, nz + 1),
-                  inputs=[self.u, self.v, self.w, self.p, self.marker, dx, dt, self.rho], device=dev)
-        wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
-                  inputs=[self.u, self.v, self.w, self.marker,
-                          self.solid_u, self.solid_v, self.solid_w,
-                          nx, ny, nz], device=dev)
-        if self.transfer_mode == "apic":
-            wp.launch(k3_g2p_apic_advect, dim=self.n_particles,
-                      inputs=[self.pos, self.vel, self.affine_C,
-                              self.u, self.v, self.w,
-                              dx, dt, nx, ny, nz, self.dom], device=dev)
-        else:
-            wp.launch(k3_g2p_and_advect, dim=self.n_particles,
-                      inputs=[self.pos, self.vel,
-                              self.u, self.v, self.w, self.us, self.vs, self.ws,
-                              dx, dt, nx, ny, nz, self.flip_blend, self.dom], device=dev)
+                    wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
+                              inputs=[self.p, self.div, self.marker, 0], device=dev)
+                    wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
+                              inputs=[self.p, self.div, self.marker, 1], device=dev)
+                self.last_pressure_iters = pressure_iters
+            else:
+                raise ValueError(f"unknown pressure_solver: {pressure_solver!r}")
+        with prof.section("grad_subtract_bc"):
+            wp.launch(k3_subtract_pressure_grad, dim=(nx + 1, ny + 1, nz + 1),
+                      inputs=[self.u, self.v, self.w, self.p, self.marker, dx, dt, self.rho], device=dev)
+            wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
+                      inputs=[self.u, self.v, self.w, self.marker,
+                              self.solid_u, self.solid_v, self.solid_w,
+                              nx, ny, nz], device=dev)
+        with prof.section("g2p_advect"):
+            if self.transfer_mode == "apic":
+                wp.launch(k3_g2p_apic_advect, dim=self.n_particles,
+                          inputs=[self.pos, self.vel, self.affine_C,
+                                  self.u, self.v, self.w,
+                                  dx, dt, nx, ny, nz, self.dom], device=dev)
+            else:
+                wp.launch(k3_g2p_and_advect, dim=self.n_particles,
+                          inputs=[self.pos, self.vel,
+                                  self.u, self.v, self.w, self.us, self.vs, self.ws,
+                                  dx, dt, nx, ny, nz, self.flip_blend, self.dom], device=dev)
         # S2.15 — color transfer at end of step (positions are now current)
-        self._apply_color_transfer()
+        with prof.section("color"):
+            self._apply_color_transfer()
         wp.synchronize()
 
     # --------------------------------------------------- F3.6 prepare_frame

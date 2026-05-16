@@ -17,6 +17,7 @@ passing pytest; **plan** = declared but not yet written.
 | G1.6     | Trilinear scatter w/ atomic_add            | G1    | `gpufluid/primitives/gridmath.py`            | impl |
 | G1.7     | Box-blur 3D                                | G1    | `gpufluid/primitives/gridmath.py`            | impl |
 | G1.8     | Cell-centre grid (host)                    | G1    | `gpufluid/domain/sdf.py`                     | impl,test |
+| G1.9     | Step profiler (per-section ScopedTimer)    | G1    | `gpufluid/primitives/profiling.py`           | impl,test |
 | S2.1     | P2G transfer                               | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.2     | Normalize faces                            | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.3     | Add gravity                                | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
