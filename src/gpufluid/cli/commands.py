@@ -412,7 +412,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                   f"({pct:.0f}% hit rate, {misses} captures)")
         else:
             print("[gpufluid] cuda-graph: not eligible for any step "
-                  "(check PCG/CSF/sparse — those configs aren't capturable yet)")
+                  "(PCG and pressure_block_sparse=true still fall through)")
     return 0
 
 

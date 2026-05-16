@@ -480,6 +480,77 @@ def k3_csf_subtract_bias_w(
 block("S2.14.6", "Force-balance CSF: subtract per-axis mean impulse over the fluid blob")(k3_csf_sum_u)
 
 
+# ----- S2.14.6 device-side variants — host-sync-free for CUDA-graph capture
+@wp.kernel
+def k3_csf_subtract_bias_u_dev(
+    u: wp.array3d(dtype=float),
+    marker: wp.array3d(dtype=int),
+    sum_dev: wp.array(dtype=float),
+    count_dev: wp.array(dtype=float),
+    nx: int, ny: int, nz: int,
+):
+    """Same as k3_csf_subtract_bias_u but reads sum/count from device
+    instead of taking a host-computed `bias` float. Lets the host skip
+    the `s.numpy() / c.numpy()` round-trip so step() stays sync-free
+    under graph capture (B5 follow-up)."""
+    i, j, k = wp.tid()
+    if i <= 0 or i >= nx or j < 0 or j >= ny or k < 0 or k >= nz:
+        return
+    if marker[i - 1, j, k] == 2 or marker[i, j, k] == 2:
+        return
+    if marker[i - 1, j, k] != 1 and marker[i, j, k] != 1:
+        return
+    c = count_dev[0]
+    if c <= 0.5:
+        return
+    u[i, j, k] = u[i, j, k] - sum_dev[0] / c
+
+
+@wp.kernel
+def k3_csf_subtract_bias_v_dev(
+    v: wp.array3d(dtype=float),
+    marker: wp.array3d(dtype=int),
+    sum_dev: wp.array(dtype=float),
+    count_dev: wp.array(dtype=float),
+    nx: int, ny: int, nz: int,
+):
+    i, j, k = wp.tid()
+    if i < 0 or i >= nx or j <= 0 or j >= ny or k < 0 or k >= nz:
+        return
+    if marker[i, j - 1, k] == 2 or marker[i, j, k] == 2:
+        return
+    if marker[i, j - 1, k] != 1 and marker[i, j, k] != 1:
+        return
+    c = count_dev[0]
+    if c <= 0.5:
+        return
+    v[i, j, k] = v[i, j, k] - sum_dev[0] / c
+
+
+@wp.kernel
+def k3_csf_subtract_bias_w_dev(
+    w_: wp.array3d(dtype=float),
+    marker: wp.array3d(dtype=int),
+    sum_dev: wp.array(dtype=float),
+    count_dev: wp.array(dtype=float),
+    nx: int, ny: int, nz: int,
+):
+    i, j, k = wp.tid()
+    if i < 0 or i >= nx or j < 0 or j >= ny or k <= 0 or k >= nz:
+        return
+    if marker[i, j, k - 1] == 2 or marker[i, j, k] == 2:
+        return
+    if marker[i, j, k - 1] != 1 and marker[i, j, k] != 1:
+        return
+    c = count_dev[0]
+    if c <= 0.5:
+        return
+    w_[i, j, k] = w_[i, j, k] - sum_dev[0] / c
+
+
+block("S2.14.6", "CSF force-balance (device-side, no host sync)")(k3_csf_subtract_bias_u_dev)
+
+
 # =============================================================================
 # S2.15 — Per-particle color attribute (RGB)
 # =============================================================================
@@ -2417,7 +2488,12 @@ class FlipSolver3D:
     # only every `check_every` iterations (default 10). This collapses ~3
     # CUDA syncs per iter (the v0.4 implementation) down to ~0.1.
     def _pressure_pcg(self, max_iter: int, tol: float = 1e-4,
-                      check_every: int = 10) -> int:
+                      check_every: int = 10,
+                      _no_host_sync: bool = False) -> int:
+        """If `_no_host_sync` is True (CUDA-graph capture path), skips the
+        residual host reads — runs exactly `max_iter` iterations regardless
+        of convergence. Trades a small amount of redundant iteration for
+        graph-capture eligibility."""
         nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
         if not hasattr(self, "_pcg_r"):
             self._pcg_r = zeros((nx, ny, nz), dev=dev)
@@ -2451,11 +2527,13 @@ class FlipSolver3D:
         dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_old)
         dev_dot(self._pcg_r, self._pcg_r, self._pcg_r0_norm2)
 
-        # one upfront host read so we can early-exit on already-zero residual
-        r0_norm2_host = float(self._pcg_r0_norm2.numpy()[0])
-        if r0_norm2_host < 1e-30:
-            return 0
-        tol_sq = (tol ** 2) * r0_norm2_host
+        tol_sq = 0.0
+        if not _no_host_sync:
+            # one upfront host read so we can early-exit on already-zero residual
+            r0_norm2_host = float(self._pcg_r0_norm2.numpy()[0])
+            if r0_norm2_host < 1e-30:
+                return 0
+            tol_sq = (tol ** 2) * r0_norm2_host
 
         for it in range(max_iter):
             wp.launch(k3_apply_A, dim=(nx, ny, nz),
@@ -2471,8 +2549,8 @@ class FlipSolver3D:
             wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
                       inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r, self._pcg_r, self.marker],
                       device=dev)
-            # convergence check: only every `check_every` iters
-            if (it + 1) % check_every == 0 or it == max_iter - 1:
+            # convergence check: only when host-syncs are permitted
+            if not _no_host_sync and ((it + 1) % check_every == 0 or it == max_iter - 1):
                 dev_dot(self._pcg_r, self._pcg_r, self._pcg_r_norm2)
                 if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
                     return it + 1
@@ -2654,23 +2732,25 @@ class FlipSolver3D:
         wp.launch(k3_csf_apply_w, dim=self.w.shape,
                   inputs=[self.w, self._csf_chi, self._csf_kappa, self.marker,
                           coeff, dx, nx, ny, nz], device=dev)
-        # S2.14.6 — subtract per-axis mean impulse (kills parasitic drift)
+        # S2.14.6 — subtract per-axis mean impulse (kills parasitic drift).
+        # Device-side variant: sum + count stay on device, the subtract
+        # kernel reads both and computes bias = sum / count internally.
+        # No `.numpy()` round-trip → step() remains capturable into a
+        # CUDA graph (B5 follow-up to make σ scenes graph-eligible).
         for sum_kern, sub_kern, vel, vel_pre in [
-            (k3_csf_sum_u, k3_csf_subtract_bias_u, self.u, self._csf_u_pre),
-            (k3_csf_sum_v, k3_csf_subtract_bias_v, self.v, self._csf_v_pre),
-            (k3_csf_sum_w, k3_csf_subtract_bias_w, self.w, self._csf_w_pre),
+            (k3_csf_sum_u, k3_csf_subtract_bias_u_dev, self.u, self._csf_u_pre),
+            (k3_csf_sum_v, k3_csf_subtract_bias_v_dev, self.v, self._csf_v_pre),
+            (k3_csf_sum_w, k3_csf_subtract_bias_w_dev, self.w, self._csf_w_pre),
         ]:
             self._csf_sum.zero_(); self._csf_count.zero_()
             wp.launch(sum_kern, dim=vel.shape,
                       inputs=[vel_pre, vel, self.marker,
                               self._csf_sum, self._csf_count,
                               nx, ny, nz], device=dev)
-            s = float(self._csf_sum.numpy()[0])
-            c = float(self._csf_count.numpy()[0])
-            if c > 0.5:
-                bias = s / c
-                wp.launch(sub_kern, dim=vel.shape,
-                          inputs=[vel, self.marker, bias, nx, ny, nz], device=dev)
+            wp.launch(sub_kern, dim=vel.shape,
+                      inputs=[vel, self.marker,
+                              self._csf_sum, self._csf_count,
+                              nx, ny, nz], device=dev)
 
     # ----------------------------------------------------------- S2.18 scalar attrs (B11)
     @block("S2.18", "Per-particle scalar attribute: P2G → normalize → G2P (B11)")
@@ -2726,14 +2806,27 @@ class FlipSolver3D:
     def _cuda_graph_eligible(self, pressure_solver: str,
                               pressure_block_sparse: bool) -> bool:
         """Which solver configurations can be captured into a CUDA graph
-        today. Anything that reads device→host inside step() is excluded."""
-        if pressure_solver not in ("jacobi", "gsrb"):
-            return False        # PCG has r_norm² convergence check
+        today. Anything that reads device→host inside step() is excluded.
+
+        B5 follow-up: S2.14.6 force-balance was moved device-side, so
+        `surface_tension > 0` (CSF) is now allowed — that's the biggest
+        v0.8 user-facing win since most demo scenes use σ.
+
+        Still excluded:
+          * **PCG** — the algorithm itself is sync-free under
+            `_no_host_sync=True` (refactor lives in `_pressure_pcg`),
+            but forcing `max_iter` every step regresses scenes that
+            normally converge early. Real-scene bench on `big_pcg`
+            showed a NET slowdown despite the launch-overhead saving.
+            Track upstream Warp for an on-device "early exit" idiom
+            (or implement a stop-flag pattern) and re-enable then.
+          * **`pressure_block_sparse=True`** — `_build_active_blocks`
+            reads `n_active.numpy()`. Fixing this needs the per-tile
+            kernels to launch at worst-case dim and cap in-kernel.
+        """
         if pressure_block_sparse:
-            return False        # n_active.numpy() inside the build
-        if self.surface_tension > 0.0:
-            return False        # CSF S2.14.6 force-balance reads 3 sums
-        return True
+            return False
+        return pressure_solver in ("jacobi", "gsrb")
 
     def _cuda_graph_make_key(self, dt: float, pressure_iters: int,
                               pressure_solver: str,
@@ -2778,11 +2871,13 @@ class FlipSolver3D:
                 self._cuda_graph_hits += 1
                 return
             # Recapture: ask the inner _step_impl to execute, and capture
-            # all launches it emits onto the graph.
+            # all launches it emits onto the graph. Pass _no_host_sync=True
+            # so PCG skips its convergence-check device→host reads (which
+            # would otherwise abort the capture mid-loop).
             wp.capture_begin(device=self.device, force_module_load=False)
             try:
                 self._step_impl(dt, pressure_iters, pressure_solver,
-                                pressure_block_sparse)
+                                pressure_block_sparse, _no_host_sync=True)
             except Exception:
                 try: wp.capture_end(device=self.device)
                 except Exception: pass
@@ -2793,12 +2888,13 @@ class FlipSolver3D:
             self._cuda_graph_misses += 1
             return
         # Direct path — either user opted out of graphs or this config has
-        # an in-step host sync (PCG / CSF / block-sparse).
+        # an in-step host sync (block-sparse pressure).
         self._step_impl(dt, pressure_iters, pressure_solver,
                         pressure_block_sparse)
 
     def _step_impl(self, dt: float, pressure_iters: int,
-                   pressure_solver: str, pressure_block_sparse: bool):
+                   pressure_solver: str, pressure_block_sparse: bool,
+                   _no_host_sync: bool = False):
         """Original per-step pipeline. step() may call this directly or
         wrap it in a CUDA-graph capture. Keep the body sync-free so the
         capture-path stays valid (see B5.1 audit)."""
@@ -2877,7 +2973,8 @@ class FlipSolver3D:
                         max_iter=pressure_iters)
                 else:
                     self.last_pressure_iters = self._pressure_pcg(
-                        max_iter=pressure_iters)
+                        max_iter=pressure_iters,
+                        _no_host_sync=_no_host_sync)
             elif pressure_solver == "jacobi":
                 self.p.zero_(); self.p_tmp.zero_()
                 if pressure_block_sparse:

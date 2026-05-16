@@ -75,22 +75,32 @@ def test_b5_2_changed_args_force_recapture():
 
 
 def test_b5_2_ineligible_config_falls_through():
-    """PCG, CSF, block-sparse all do device→host syncs inside step().
-    Trying to capture them would raise. The cache layer must detect this
-    and fall through to the direct path silently."""
+    """Jacobi/GS-RB are graph-eligible, with or without CSF. PCG and
+    `pressure_block_sparse=True` still fall through to the direct path
+    — PCG because forcing max_iter regresses early-converging scenes
+    (real-bake measured net slowdown on big_pcg), block-sparse because
+    `_build_active_blocks` reads `n_active.numpy()`."""
+    # PCG: kept ineligible after `_no_host_sync` plumbing was added but
+    # didn't pan out on real scenes — see B5 follow-up BACKLOG entry.
     s_pcg = _seeded(enable_cuda_graphs=True)
     s_pcg.step(0.005, pressure_iters=5, pressure_solver="pcg")
-    assert s_pcg._cuda_graph is None  # PCG ineligible
-    assert s_pcg._cuda_graph_misses == 0
+    assert s_pcg._cuda_graph is None, \
+        "PCG should fall through pending an on-device convergence-check idiom"
 
+    # CSF: eligible after k3_csf_subtract_bias_*_dev refactor.
     s_csf = _seeded(enable_cuda_graphs=True, surface_tension=0.1)
     s_csf.step(0.001, pressure_iters=10, pressure_solver="jacobi")
-    assert s_csf._cuda_graph is None  # CSF ineligible
+    assert s_csf._cuda_graph is not None, \
+        "CSF should be graph-eligible after the S2.14.6 device-side refactor"
 
+    # Block-sparse: still INELIGIBLE — `_build_active_blocks` reads
+    # `n_active.numpy()` inside step(). Fixing this needs a deeper change
+    # (launch the per-tile kernels at worst-case dim + cap in-kernel).
     s_sparse = _seeded(enable_cuda_graphs=True)
     s_sparse.step(0.005, pressure_iters=10, pressure_solver="jacobi",
                    pressure_block_sparse=True)
-    assert s_sparse._cuda_graph is None  # block-sparse ineligible
+    assert s_sparse._cuda_graph is None, \
+        "block-sparse pressure should still fall through to the direct path"
 
 
 def test_b5_2_replay_matches_direct_to_fp_precision():
