@@ -286,11 +286,27 @@ fatal problems with the BACKLOG plan:
 `tests/test_b7_1_volume_is_read_only` is the trip-wire: when Warp ships
 the missing store API, that test starts failing and forces re-eval.
 
-**Pivot recommendation in BACKLOG B7:** "B7-alt" — extend S2.16
-block-sparse compaction with deferred dense allocation (allocate
-`wp.array3d` lazily for the bbox of active tiles, rebuild every N
-frames with dilation margin). Gets ~70-80% of the sparse v2 memory
-win without depending on Warp upstream. Needs its own spike.
+**§8.0b.B7-alt.1 — deferred-dense spike GREEN (2026-05-16, same session).**
+Pivot from B7 (NanoVDB → deferred-dense `wp.array3d` over bbox of
+active 8³ tiles). The B7-alt.1 spike (`tests/test_b7_alt_1_spike_deferred_dense.py`)
+answers both killers:
+
+* **Memory bbox ratio @ 128³ / ~5% fill:**
+  * connected-blob topology: bbox=(48,48,48), **18.96× memory drop**
+    (way above the 5× greenlight bar).
+  * scattered-droplets (200 droplets): bbox=(128,128,128), **1.00×
+    drop** — bbox covers the whole domain. Pathological case; macro
+    must be documented as "not a silver bullet for dispersed scenes."
+* **Coord-translation correctness:** a Jacobi-like kernel re-launched
+  on a sub-dense `wp.array3d` of size bbox+dilation=1 with an
+  `offset_xyz` parameter produces **bit-exact** results vs full-dense
+  on every active fluid cell after 40 iterations (rel err = 0.000e+00).
+
+Verdict: GREEN on realistic blob-shaped scenes. Macro micros
+B7-alt.2 … B7-alt.8 are spelled out in BACKLOG (refactor field
+storage; thread `offset_xyz` through ~20 dense kernels; on-device
+resize; 256³ dam-break acceptance bench; user-facing extent-ratio
+warning for scattered scenes).
 
 **§8.0b.B11 — scalar attribute pipeline (temperature), closed.** S2.18.1/2/3
 kernels parallel the S2.15 colour pipeline but for one float channel.
@@ -451,11 +467,15 @@ Sized roughly by session-count and grouped by where they unblock.
   `test_b5_2_ineligible_config_falls_through`.
 
 **Tier 2 — risk:med, 1-2 sessions each:**
-- **B7-alt spike — deferred dense allocation for 256³+.** Allocate
-  `wp.array3d` lazily for the bbox of active 8³ tiles, rebuild every N
-  frames with dilation. Spike at 128³/5% fill: does memory drop by ~5×
-  without breaking the dense kernels? (They'd need a coord-translation
-  layer with `offset_xyz`.) See BACKLOG B7 "pivot recommendation".
+- ~~B7-alt spike — deferred dense allocation for 256³+.~~ **DONE 2026-05-16
+  — verdict GREEN.** 18.96× memory drop on connected-blob @128³/5%
+  fill, bit-exact coord-translation. Macro micros B7-alt.2..B7-alt.8
+  (BACKLOG) are the next v1.0-opening work. NB: scattered-droplets
+  topology gets 1.00× drop (pathological — must be documented as a
+  non-goal in the macro's user-facing copy).
+- **B7-alt.2 — refactor field storage to support sub-dense `wp.array3d`
+  + `_sub_offset` attribute.** Rebuild trigger lives in `prepare_frame`.
+  ~1 session.
 
 **Tier 2 (closed this session):**
 - ~~Block-sparse + CUDA graphs (Option B)~~ — **shipped**: `_n_active_dev`
