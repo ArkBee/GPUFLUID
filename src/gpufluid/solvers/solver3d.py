@@ -2917,7 +2917,10 @@ class FlipSolver3D:
         if self.attr_temperature is not None:
             with prof.section("temperature"):
                 self._apply_scalar_transfer(self.attr_temperature)
-        wp.synchronize()
+        # No host-sync here. step() queues ops on the default stream and
+        # downstream consumers (mesh extraction, particles readback) sync
+        # implicitly when they call .numpy(). Removing the explicit sync
+        # is what makes step() capturable into a CUDA graph (B5.1 spike).
 
     # --------------------------------------------------- F3.6 prepare_frame
     @block("F3.6", "Per-frame hook: rebuild marker for anim obstacles, emit "
