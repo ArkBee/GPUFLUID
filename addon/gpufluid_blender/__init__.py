@@ -13,7 +13,7 @@ Block index for this package:
 bl_info = {
     "name": "gpufluid",
     "author": "gpufluid contributors",
-    "version": (0, 0, 2),
+    "version": (0, 8, 0),
     "blender": (4, 5, 0),
     "location": "View3D > Sidebar > GpuFluid",
     "description": "GPU FLIP fluid simulator (NVIDIA Warp)",
