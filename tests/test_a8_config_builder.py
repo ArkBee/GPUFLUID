@@ -136,6 +136,51 @@ def test_b1_4_cli_loads_multi_source_with_color():
     assert scene.simulation.surface_tension == pytest.approx(0.25)
 
 
+# ---- B1.5 — whitewater output round-trip -----------------------------------
+
+def test_b1_5_whitewater_disabled_omits_block():
+    s = _minimal_scene()
+    parsed = tomllib.loads(build_toml(s))
+    assert "whitewater" not in parsed["output"], \
+        "whitewater key should be absent when disabled (preserves CLI default = False)"
+
+
+def test_b1_5_whitewater_enabled_round_trips_all_knobs():
+    s = _minimal_scene()
+    s["output"]["whitewater"] = True
+    s["output"]["whitewater_speed_threshold"] = 5.5
+    s["output"]["whitewater_lifetime_sec"] = 2.25
+    s["output"]["whitewater_emit_per_frame_max"] = 1234
+    s["output"]["whitewater_total_cap"] = 56789
+    parsed = tomllib.loads(build_toml(s))
+    o = parsed["output"]
+    assert o["whitewater"] is True
+    assert o["whitewater_speed_threshold"] == pytest.approx(5.5)
+    assert o["whitewater_lifetime_sec"] == pytest.approx(2.25)
+    assert o["whitewater_emit_per_frame_max"] == 1234
+    assert o["whitewater_total_cap"] == 56789
+
+
+def test_b1_5_cli_loads_whitewater_config():
+    """Whitewater params produced by addon must parse via load_scene."""
+    from gpufluid.cli.config import load_scene
+    import tempfile, os
+    s = _minimal_scene()
+    s["output"]["whitewater"] = True
+    s["output"]["whitewater_speed_threshold"] = 3.0
+    s["output"]["whitewater_total_cap"] = 42000
+    toml_str = build_toml(s)
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(toml_str); path = f.name
+    try:
+        scene = load_scene(path)
+    finally:
+        os.unlink(path)
+    assert scene.output.whitewater is True
+    assert scene.output.whitewater_speed_threshold == pytest.approx(3.0)
+    assert scene.output.whitewater_total_cap == 42000
+
+
 def test_a8_5_rejects_unknown_obstacle_type():
     s = _minimal_scene()
     s["obstacles"] = [{"type": "trapezohedron"}]

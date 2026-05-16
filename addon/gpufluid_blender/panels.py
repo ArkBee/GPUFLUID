@@ -56,6 +56,15 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
         if d.use_cfl:
             sub.prop(d, "cfl_factor")
             sub.prop(d, "cfl_max_substeps")
+        # Surface tension (B1.1)
+        st = box.box()
+        st.label(text="Surface Tension (S2.14)")
+        stg = d.surface_tension_group
+        st.prop(stg, "surface_tension")
+        if stg.surface_tension > 0.0:
+            st.prop(stg, "csf_smoothing_passes")
+            st.label(text="CFL substepping auto-enabled when σ > 0",
+                     icon="INFO")
         sub2 = box.box()
         sub2.label(text="Particle Reseeding (S2.11)")
         sub2.prop(d, "reseed")
@@ -93,6 +102,12 @@ class GPUFLUID_PT_fluid(bpy.types.Panel):
         layout.prop(f, "is_fluid")
         layout.prop(f, "ppc")
         layout.prop(f, "fill_mesh")
+        # Per-source colour (S2.15 / B1.2)
+        cbox = layout.box()
+        cbox.label(text="Particle Colour (S2.15)")
+        cbox.prop(f, "use_color")
+        if f.use_color:
+            cbox.prop(f, "color")
 
 
 class GPUFLUID_PT_obstacle(bpy.types.Panel):
@@ -156,6 +171,36 @@ class GPUFLUID_PT_outflow(bpy.types.Panel):
         layout.prop(o, "is_outflow")
         row = layout.row(align=True)
         row.prop(o, "frame_start"); row.prop(o, "frame_end")
+
+
+# [BLK A8.7.1] Whitewater sub-panel (B1.5)
+class GPUFLUID_PT_whitewater(bpy.types.Panel):
+    bl_label = "Whitewater (W7)"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = PANEL_CATEGORY
+
+    @classmethod
+    def poll(cls, context):
+        o = context.active_object
+        return o is not None and o.gpufluid_domain.is_domain
+
+    def draw(self, context):
+        layout = self.layout
+        ww = context.active_object.gpufluid_domain.whitewater_group
+        layout.prop(ww, "enable")
+        col = layout.column()
+        col.active = ww.enable
+        col.prop(ww, "speed_threshold")
+        col.prop(ww, "lifetime_sec")
+        col.prop(ww, "emit_per_frame_max")
+        col.prop(ww, "total_cap")
+        box = col.box()
+        box.label(text="Class Visibility (cache reader)")
+        row = box.row(align=True)
+        row.prop(ww, "show_foam", toggle=True)
+        row.prop(ww, "show_spray", toggle=True)
+        row.prop(ww, "show_bubble", toggle=True)
 
 
 class GPUFLUID_PT_bake(bpy.types.Panel):

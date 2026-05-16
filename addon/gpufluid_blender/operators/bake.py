@@ -192,17 +192,29 @@ def collect_scene(context, domain_obj):
             "reseed_min_per_cell": dprops.reseed_min_per_cell,
             "reseed_max_per_cell": dprops.reseed_max_per_cell,
         },
-        "output": {
-            "cache_dir": bpy.path.abspath(dprops.cache_dir),
-            "iso_level": dprops.iso_level, "smooth_passes": dprops.smooth_passes,
-            "mesh_smooth_passes": dprops.mesh_smooth_passes,
-            "mesh_smooth_method": dprops.mesh_smooth_method,
-            "decimate_ratio": dprops.decimate_ratio,
-            "wall_margin_cells": dprops.wall_margin_cells,
-            "usd": dprops.write_usd,
-            "particles": dprops.write_particles, "preview": False,
-        },
+        "output": _output_dict(dprops),
     }, dom_size, origin
+
+
+def _output_dict(dprops):
+    out = {
+        "cache_dir": bpy.path.abspath(dprops.cache_dir),
+        "iso_level": dprops.iso_level, "smooth_passes": dprops.smooth_passes,
+        "mesh_smooth_passes": dprops.mesh_smooth_passes,
+        "mesh_smooth_method": dprops.mesh_smooth_method,
+        "decimate_ratio": dprops.decimate_ratio,
+        "wall_margin_cells": dprops.wall_margin_cells,
+        "usd": dprops.write_usd,
+        "particles": dprops.write_particles, "preview": False,
+    }
+    ww = getattr(dprops, "whitewater_group", None)
+    if ww is not None and ww.enable:
+        out["whitewater"] = True
+        out["whitewater_speed_threshold"] = float(ww.speed_threshold)
+        out["whitewater_lifetime_sec"] = float(ww.lifetime_sec)
+        out["whitewater_emit_per_frame_max"] = int(ww.emit_per_frame_max)
+        out["whitewater_total_cap"] = int(ww.total_cap)
+    return out
 
 
 def _export_obj(obj, path):

@@ -33,6 +33,7 @@ from . import panels
 _CLASSES = (
     preferences.GpufluidPreferences,
     properties.GpufluidSurfaceTensionGroup,
+    properties.GpufluidWhitewaterGroup,
     properties.GpufluidDomainProps,
     properties.GpufluidFluidProps,
     properties.GpufluidObstacleProps,
@@ -54,6 +55,7 @@ _CLASSES = (
     panels.GPUFLUID_PT_obstacle,
     panels.GPUFLUID_PT_inflow,
     panels.GPUFLUID_PT_outflow,
+    panels.GPUFLUID_PT_whitewater,
     panels.GPUFLUID_PT_bake,
 )
 

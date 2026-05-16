@@ -176,4 +176,12 @@ def build_toml(scene_dict: Dict[str, Any]) -> str:
         lines.append(f"usd = {'true' if out['usd'] else 'false'}")
     lines.append(f"particles = {'true' if out.get('particles', False) else 'false'}")
     lines.append(f"preview = {'true' if out.get('preview', False) else 'false'}")
+    if out.get("whitewater"):
+        lines.append("whitewater = true")
+        for k in ("whitewater_speed_threshold", "whitewater_lifetime_sec"):
+            if k in out:
+                lines.append(f"{k} = {float(out[k]):g}")
+        for k in ("whitewater_emit_per_frame_max", "whitewater_total_cap"):
+            if k in out:
+                lines.append(f"{k} = {int(out[k])}")
     return "\n".join(lines) + "\n"

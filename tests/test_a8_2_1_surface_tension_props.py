@@ -121,3 +121,49 @@ def test_a8_3_1_fluid_has_color_and_use_color():
     assert cargs.get("subtype") == "COLOR"
     assert cargs.get("min", 0) >= 0.0 and cargs.get("max", 1) <= 1.0
     assert tuple(cargs.get("default")) == (1.0, 1.0, 1.0)
+
+
+# ---- B1.5 — Whitewater property group + Domain wiring ----------------------
+
+def test_a8_2_2_whitewater_group_exposes_toml_knobs():
+    props = _load_properties_module()
+    cls = getattr(props, "GpufluidWhitewaterGroup", None)
+    assert cls is not None, "GpufluidWhitewaterGroup missing from properties.py"
+    declared = dict(getattr(cls, "__annotations__", {}))
+    # Mirror of cli/config.py:199-203 — every TOML knob must have a UI prop.
+    expected = {
+        "enable": "BoolProperty",
+        "speed_threshold": "FloatProperty",
+        "lifetime_sec": "FloatProperty",
+        "emit_per_frame_max": "IntProperty",
+        "total_cap": "IntProperty",
+        "show_foam": "BoolProperty",
+        "show_spray": "BoolProperty",
+        "show_bubble": "BoolProperty",
+    }
+    for k, kind in expected.items():
+        assert k in declared, f"WhitewaterGroup missing {k!r}"
+        assert declared[k][1] == kind, f"{k}: expected {kind}, got {declared[k][1]}"
+    # Defaults match cli/config.py defaults.
+    assert declared["enable"][2]["default"] is False
+    assert declared["speed_threshold"][2]["default"] == 4.0
+    assert declared["lifetime_sec"][2]["default"] == 1.5
+    assert declared["emit_per_frame_max"][2]["default"] == 4000
+    assert declared["total_cap"][2]["default"] == 80000
+
+
+def test_a8_2_2_domain_has_pointer_to_whitewater_group():
+    props = _load_properties_module()
+    declared = dict(getattr(props.GpufluidDomainProps, "__annotations__", {}))
+    assert "whitewater_group" in declared
+    assert declared["whitewater_group"][1] == "PointerProperty"
+    assert declared["whitewater_group"][2]["type"] is props.GpufluidWhitewaterGroup
+
+
+def test_a8_2_2_registered_before_domain_in_init():
+    _install_bpy_stub()
+    src = (Path(__file__).resolve().parents[1] /
+           "addon" / "gpufluid_blender" / "__init__.py").read_text(encoding="utf-8")
+    i_inner = src.find("GpufluidWhitewaterGroup")
+    i_domain = src.find("GpufluidDomainProps")
+    assert i_inner != -1 and i_inner < i_domain

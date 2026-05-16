@@ -21,6 +21,39 @@ class GpufluidSurfaceTensionGroup(bpy.types.PropertyGroup):
     )
 
 
+# [BLK A8.2.2] Whitewater sub-group attached to Domain (B1.5)
+# Mirrors the TOML `output.whitewater_*` knobs (cli/config.py:199-203) plus
+# class-visibility toggles consumed by the cache loader at import time
+# (cache_loader honors show_* by filtering whitewater_kinds/*.npy on read).
+class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
+    enable: bpy.props.BoolProperty(
+        name="Whitewater (W7)", default=False,
+        description="Emit foam / spray / bubble particles. Three classes are "
+                    "auto-assigned by density (see W7.4 classifier)",
+    )
+    speed_threshold: bpy.props.FloatProperty(
+        name="Speed Threshold (m/s)", default=4.0, min=0.0, max=100.0,
+        description="Emit when |particle velocity| exceeds this",
+    )
+    lifetime_sec: bpy.props.FloatProperty(
+        name="Lifetime (s)", default=1.5, min=0.05, max=60.0,
+        description="Base whitewater particle lifetime (per-class lifetimes "
+                    "in WhitewaterConfig stay at their defaults)",
+    )
+    emit_per_frame_max: bpy.props.IntProperty(
+        name="Emit/Frame Cap", default=4000, min=0, max=200000,
+        description="Upper bound on new whitewater particles each frame",
+    )
+    total_cap: bpy.props.IntProperty(
+        name="Total Cap", default=80000, min=0, max=2_000_000,
+        description="Absolute whitewater particle cap (oldest get culled)",
+    )
+    # Class-visibility — consumed at cache-load time, not at sim time.
+    show_foam: bpy.props.BoolProperty(name="Foam", default=True)
+    show_spray: bpy.props.BoolProperty(name="Spray", default=True)
+    show_bubble: bpy.props.BoolProperty(name="Bubble", default=True)
+
+
 # [BLK A8.2]
 class GpufluidDomainProps(bpy.types.PropertyGroup):
     is_domain: bpy.props.BoolProperty(name="Is gpufluid Domain", default=False)
@@ -77,6 +110,9 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
 
     # surface tension (S2.14) — nested group, see GpufluidSurfaceTensionGroup
     surface_tension_group: bpy.props.PointerProperty(type=GpufluidSurfaceTensionGroup)
+
+    # whitewater (W7) — nested group, see GpufluidWhitewaterGroup
+    whitewater_group: bpy.props.PointerProperty(type=GpufluidWhitewaterGroup)
 
     # reseed (S2.11)
     reseed: bpy.props.BoolProperty(name="Particle Reseeding", default=False,

@@ -98,6 +98,8 @@ passing pytest; **plan** = declared but not yet written.
 | A8.8     | Helper operators                           | A8    | `addon/gpufluid_blender/operators/helpers.py`| impl |
 | A8.2.1   | Surface tension property group (B1.1)      | A8    | `addon/gpufluid_blender/properties.py`       | impl |
 | A8.3.1   | Per-source colour fields (B1.2)            | A8    | `addon/gpufluid_blender/properties.py`       | impl |
+| A8.2.2   | Whitewater property group (B1.5)           | A8    | `addon/gpufluid_blender/properties.py`       | impl |
+| A8.7.1   | Whitewater sub-panel (B1.5)                | A8    | `addon/gpufluid_blender/panels.py`           | impl |
 
 ## Test coverage (current sprint v0.1)
 
