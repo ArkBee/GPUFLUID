@@ -23,7 +23,7 @@ which milestone we're inside.
 |---------|--------------------------|--------------------------------|---------------|--------|
 | v0.7    | Solver feature complete  | (10-item original roadmap)     | done          | ✅ closed 2026-05-16 |
 | **v0.8** | **"Reachable" — Blender exposes the v0.7 features** | **Tier 1: B1, B2, B3**     | **3-5**       | **▶ next** |
-| v0.9    | "Production-fast" — hot path squeezed              | Tier 2: B4, B5, B6 + B11, B12  | 4-6           | queued |
+| v0.9    | "Production-fast" — hot path squeezed              | Tier 2: B4, B5, B6 + B11, B12  | 4-6           | ✅ closed 2026-05-16 (B5 ships 6/9 graph configs; sparse-graph + PCG-graph deferred to v1.x polish) |
 | v1.0    | "Scale" — 256³+ scenes via sparse storage          | Tier 3: B7 (aborted, see B7.1) → B7-alt deferred-allocation | 3-5 | ⚠ pivoted 2026-05-16 |
 | v1.x+   | Research extensions      | B8 differentiable, B9 multi-GPU | open-ended    | optional |
 
@@ -246,7 +246,7 @@ Cheap to add via `alembic` Python bindings.
 
 **Acceptance:** scenes with `output.alembic = true` produce a `.abc` Blender can scrub.
 
-### B11. Per-particle scalar attributes (temperature / age / density) `risk:low value:user` ▶ in progress 2026-05-16
+### B11. Per-particle scalar attributes (temperature / age / density) `risk:low value:user` ✅ closed 2026-05-16 (B11.3 lava demo shipped)
 
 S2.15 introduced one vec3 attribute (colour). The same P2G/G2P pattern
 generalises to any per-particle scalar or vec. Useful for:
@@ -257,7 +257,7 @@ generalises to any per-particle scalar or vec. Useful for:
 
 * [x] B11.1 — Refactor `_apply_color_transfer` into `_apply_attribute_transfer(attr_array, channels=1|3)` so it handles scalar AND vec3 with one code path. *(2026-05-16: chose a parallel implementation rather than a unified one — `_apply_scalar_transfer(attr_wp)` lives next to `_apply_color_transfer()` with dedicated S2.18.1/2/3 kernels (k3_p2g_scalar / k3_normalize_scalar / k3_g2p_scalar). Same P2G→normalize→G2P pattern, one channel. Keeps the colour-vec3 path intact and avoids vec3-conditional branches in Warp kernels.)*
 * [x] B11.2 — Add `self.attr_temperature: wp.array(dtype=float)` and a `seed_box(..., temperature=20.0)` knob. *(2026-05-16: solver gains `attr_temperature` slot; `seed_box` accepts `temperature=` kwarg with append-in-lockstep semantics matching the colour path. Drive-by fix: `seed_box` now concatenates positions whenever EITHER side carries an attribute (was colour-only) — old behaviour replaced uncoloured second seeds, which broke the temperature multi-source case.)*
-* [ ] B11.3 — Demo: hot water (red) poured into cold water (blue) — show colour blend driven by temperature, not by direct colour. *(deferred — needs CLI/TOML plumbing for per-source temperature and a renderer that maps a scalar attr to a colourmap. Reuses the step24 nearest-particle pipeline.)*
+* [x] B11.3 — Demo: hot lava drop (1500 K) splashes into a cool basin (300 K); per-vertex colour driven by temperature, not by direct colour. *(2026-05-16: closed via `[[fluids]] temperature = X` TOML key (FluidBoxCfg/FluidMeshCfg gain `temperature: Optional[float]` in `cli/config.py`), threaded through `cmd_simulate._seed_one` into both `seed_box(temperature=...)` and the newly-extended `seed_mesh(temperature=...)`. Per-frame sidecar `<cache>/temperatures/frame_NNNN.npy` written next to `colors/`. Demo scene `examples/scenes/lava_drop.toml` (64³, σ=0.1, APIC, sphere obstacle, 90 fr) + renderer `examples/render_step25_eevee.py` (nearest-particle T → 5-anchor blackbody-ish colormap on both Base Color AND Emission Strength; Eevee bloom). Regression `tests/test_b11_3_temperature_toml.py` (pure-config + GPU bake variants). Closes v0.9.)*
 
 **Acceptance:** at least one scalar attribute besides colour works end-to-end through cache.
 

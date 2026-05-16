@@ -1,0 +1,66 @@
+# Step 25 / B11.3 — lava demo, the last v0.9 micro.
+#
+# Drives the visible colour from the per-particle TEMPERATURE scalar
+# (S2.18, wired through `[[fluids]] temperature = ...` per B11.3) — not
+# from per-source RGB. The renderer (`examples/render_step25_eevee.py`)
+# samples each surface vertex's nearest-particle temperature and maps it
+# through a hot→cold colormap (white-hot → yellow → orange → red → near
+# black) so you can see the lava actually "cool" as the P2G→G2P pass
+# mixes hot bulk with colder splash and rim.
+#
+# Stack reused from step24:
+#   * S2.18 / B11  per-particle scalar (NEW path under test)
+#   * S2.14         σ to keep the lava cohering as a blob
+#   * S2.12         APIC transfer (B6 OK with σ on this scene shape)
+#   * D4.2.1        sphere obstacle (the lava hits it and splashes)
+#   * F3.4          CFL substepping (auto via σ>0)
+
+[domain]
+resolution = [64, 64, 64]
+
+# Hot lava drop — falls from above, splashes on the obstacle.
+[[fluids]]
+type = "box"
+lo = [0.30, 0.65, 0.35]
+hi = [0.55, 0.85, 0.65]
+ppc = 8
+temperature = 1500.0           # Kelvin-ish; renderer normalises 0..1500
+
+# Cooler "crust" pool sitting in the basin — the splash mixes into it
+# and we see the lava cool at the contact zone.
+[[fluids]]
+type = "box"
+lo = [0.10, 0.05, 0.10]
+hi = [0.90, 0.20, 0.90]
+ppc = 8
+temperature = 300.0
+
+[[obstacle]]
+type = "sphere"
+center = [0.50, 0.30, 0.50]
+radius = 0.12
+
+[simulation]
+dt = 0.005
+pressure_iters = 50
+pressure_solver = "jacobi"
+flip_blend = 0.95              # ignored when transfer_mode = apic
+transfer_mode = "apic"
+gravity = -9.81
+surface_tension = 0.1
+csf_smoothing_passes = 2
+viscosity = 0.02               # slight damping reads as "viscous lava"
+cfl = true
+cfl_max_substeps = 32
+frames = 90
+fps = 24
+
+[output]
+cache_dir = "../../out/step25_lava"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2
+particles = true               # needed: render_step25 reads per-particle T sidecar

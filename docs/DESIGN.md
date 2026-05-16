@@ -149,6 +149,7 @@ mutates arrays out.
 | S2.13   | Viscosity (semi-implicit Jacobi diffusion of face velocity)  | impl |
 | S2.14   | Surface tension (Brackbill-Kothe CSF, face-applied)          | impl |
 | S2.15   | Per-particle color attribute (RGB), P2G/G2P transfer         | impl |
+| S2.18   | Per-particle scalar attribute (temperature), P2G/G2P transfer | impl |
 | S2.11.GPU | Reseed particles fully on GPU (count → rank → compact → emit) | impl |
 
 ### 5.3 D4.3.GPU.BVH — BVH-accelerated mesh-inside test
@@ -212,6 +213,45 @@ Sub-blocks:
 realistic blue+yellow=green mixing instead of muddy gray. Drop-in
 replacement on the G2P side: same color array, different blend rule.
 Not in v0.6 (LUT is ~270 KB, needs a load-time download path).
+
+### 5.6 S2.18 — Per-particle scalar attribute (temperature, B11)
+
+Generalises the S2.15 pattern to a single-channel float. Each particle
+carries an `attr_temperature` float; the field is scattered to a grid
+scalar (S2.18.1, atomic add), normalised by the same weight grid used
+by S2.15 (S2.18.2 reuses the S2.15.2 weight accumulator), and sampled
+back to particles each step (S2.18.3). All three kernels are gated on
+`self.attr_temperature is not None`, so scenes that don't use a scalar
+attribute pay zero overhead (no allocations, no kernel launches, no
+profiler section).
+
+Sub-blocks:
+
+| Sub-ID    | Kernel                                                       |
+|-----------|--------------------------------------------------------------|
+| S2.18.1   | P2G scatter of per-particle scalar (atomic add into grid)    |
+| S2.18.2   | Normalize grid scalar by deposited weight                    |
+| S2.18.3   | G2P gather grid scalar back to particle                      |
+
+**Surface area:** `seed_box(..., temperature=X)` and `seed_mesh(...,
+temperature=X)` accept a float that's broadcast to all particles in
+that source, with append-in-lockstep semantics that mirror the colour
+path (multi-source scenes work; uncoloured/un-tempered second seeds
+get padded to a neutral value to stay aligned with existing arrays).
+
+**TOML surface (B11.3, 2026-05-16):** `[[fluids]] temperature = X`
+(any float, no implicit range) parses into `FluidBoxCfg.temperature`
+or `FluidMeshCfg.temperature` (Optional[float]; None ⇒ no scalar
+attribute allocated). The CLI threads this into the seeder via
+`cmd_simulate._seed_one`. Per-frame the simulator dumps a
+`<cache>/temperatures/frame_NNNN.npy` sidecar (mirrors the
+`<cache>/colors/` sidecar from S2.15) for renderer consumption.
+
+**Limitations:** the reseed paths (S2.11 CPU + S2.11.GPU) compact
+`attr_color` in lockstep but DO NOT yet do the same for
+`attr_temperature` — opportunistic follow-up. A scene that combines
+`reseed=true` with per-source temperature will lose the scalar on the
+first reseed pass.
 
 
 ---

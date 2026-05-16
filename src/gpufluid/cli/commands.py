@@ -175,14 +175,15 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     from .config import FluidBoxCfg, FluidMeshCfg
     def _seed_one(f):
         if isinstance(f, FluidBoxCfg):
-            solver.seed_box(f.lo, f.hi, ppc=f.ppc, color=f.color)
+            solver.seed_box(f.lo, f.hi, ppc=f.ppc, color=f.color,
+                            temperature=f.temperature)
         elif isinstance(f, FluidMeshCfg):
             mp = f.path
             if scene.config_dir is not None and not Path(mp).is_absolute():
                 mp = str(scene.config_dir / mp)
             solver.seed_mesh(mp, ppc=f.ppc, scale=f.scale,
                              translate=f.translate, rotate_deg=f.rotate_deg,
-                             color=f.color)
+                             color=f.color, temperature=f.temperature)
 
     if getattr(args, "resume", None):
         solver.load_checkpoint(args.resume)
@@ -325,6 +326,12 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 colors_dir.mkdir(parents=True, exist_ok=True)
                 np.save(colors_dir / f"frame_{frame:04d}.npy",
                         solver.attr_color.numpy().astype(np.float32))
+            # B11.3 / S2.18: per-particle temperature sidecar (lava demo etc.)
+            if solver.attr_temperature is not None:
+                temps_dir = parts_dir.parent / "temperatures"
+                temps_dir.mkdir(parents=True, exist_ok=True)
+                np.save(temps_dir / f"frame_{frame:04d}.npy",
+                        solver.attr_temperature.numpy().astype(np.float32))
 
         if ww_sys is not None:
             fpos, fvel = solver.get_particles()

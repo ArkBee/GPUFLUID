@@ -2331,7 +2331,8 @@ class FlipSolver3D:
     # ------------------------------------------------------- D4.5.2 mesh seeder
     @block("D4.5.2", "Mesh volumetric seeder (fill arbitrary triangle mesh with particles)")
     def seed_mesh(self, mesh_path, ppc: int = 8, scale: float = 1.0,
-                  translate=(0.0, 0.0, 0.0), rotate_deg=None, color=None):
+                  translate=(0.0, 0.0, 0.0), rotate_deg=None, color=None,
+                  temperature=None):
         """Fill the interior of a closed triangle mesh with particles.
 
         Uses the same GPU ray-cast (D4.3.GPU) used for animated mesh
@@ -2403,6 +2404,22 @@ class FlipSolver3D:
             prev_col = self.attr_color.numpy() if prev_n > 0 else np.zeros((0, 3), dtype=np.float32)
             self.attr_color = wp.array(np.concatenate([prev_col, pad], axis=0),
                                        dtype=wp.vec3, device=self.device)
+        # B11.3 / S2.18 — per-particle scalar (temperature) maintained in
+        # lockstep with the colour attribute. Same append-or-pad semantics.
+        new_n = self.n_particles - prev_n
+        if temperature is not None:
+            new_t = np.full(new_n, float(temperature), dtype=np.float32)
+            if self.attr_temperature is not None and prev_n > 0:
+                prev_t = self.attr_temperature.numpy()
+                t = np.concatenate([prev_t, new_t], axis=0)
+            else:
+                t = new_t
+            self.attr_temperature = wp.array(t, dtype=float, device=self.device)
+        elif self.attr_temperature is not None:
+            pad = np.zeros(new_n, dtype=np.float32)
+            prev_t = self.attr_temperature.numpy() if prev_n > 0 else np.zeros(0, dtype=np.float32)
+            self.attr_temperature = wp.array(np.concatenate([prev_t, pad], axis=0),
+                                              dtype=float, device=self.device)
 
     # ------------------------------------------------------- D4.5.1 seeders
     @block("D4.5.1", "Box seeder (uniform jittered, ppc particles per cell)")

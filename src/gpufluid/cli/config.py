@@ -76,6 +76,7 @@ class FluidBoxCfg:
     hi: Tuple[float, float, float] = (0.40, 0.70, 0.40)
     ppc: int = 8
     color: Optional[Tuple[float, float, float]] = None   # S2.15: per-source RGB
+    temperature: Optional[float] = None                  # B11.3 / S2.18: per-source scalar
 
 
 @dataclass
@@ -87,6 +88,7 @@ class FluidMeshCfg:
     rotate_deg: Optional[Tuple[float, float, float]] = None
     ppc: int = 8
     color: Optional[Tuple[float, float, float]] = None
+    temperature: Optional[float] = None                  # B11.3 / S2.18: per-source scalar
 
 
 @dataclass
@@ -339,6 +341,9 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
     def _parse_fluid_entry(fl: dict) -> object:
         ftype = fl.get("type", "box")
         color = _tuple(fl["color"], 3, "fluid.color") if "color" in fl else None
+        # B11.3 / S2.18 — per-source scalar (temperature). Plain float; the
+        # solver attaches it as a per-particle attribute via seed_box/seed_mesh.
+        temperature = float(fl["temperature"]) if "temperature" in fl else None
         if ftype == "box":
             return FluidBoxCfg(
                 type="box",
@@ -346,6 +351,7 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
                 hi=_tuple(fl.get("hi", [0.40, 0.70, 0.40]), 3, "fluid.hi"),
                 ppc=int(fl.get("ppc", 8)),
                 color=color,
+                temperature=temperature,
             )
         if ftype == "mesh":
             return FluidMeshCfg(
@@ -356,6 +362,7 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
                 rotate_deg=_tuple(fl["rotate_deg"], 3, "fluid.rotate_deg") if "rotate_deg" in fl else None,
                 ppc=int(fl.get("ppc", 8)),
                 color=color,
+                temperature=temperature,
             )
         raise BlockError("C7.1", f"unknown fluid type: {ftype!r}")
 

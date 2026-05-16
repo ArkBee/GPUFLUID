@@ -4,18 +4,20 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **End-of-v0.9-sprint state (2026-05-16):** 154/154 tests, 80 IDs / 102
-> callables, v0.7 + v0.8 + v0.9 milestones essentially closed (v0.8 modulo
-> Mixbox-license skip + B3.2/3.5 deferred; v0.9 modulo B11.3 lava demo).
-> **v1.0 pivoted** — B7 NanoVDB macro aborted by spike (Warp 1.13 has no
-> kernel-side volume_store); replacement "B7-alt" deferred-dense-allocation
-> needs its own spike before macro commitment.
+> **End-of-v0.9-sprint state (2026-05-16):** 154/154 tests baseline + 3 new
+> from B11.3 (config parses + GPU bake regression), 80 IDs / 102 callables,
+> v0.7 + v0.8 + v0.9 milestones essentially closed (v0.8 modulo
+> Mixbox-license skip + B3.2/3.5 deferred; **v0.9 now fully closed —
+> B11.3 lava demo shipped this session**). **v1.0 pivoted** — B7 NanoVDB
+> macro aborted by spike (Warp 1.13 has no kernel-side volume_store);
+> replacement "B7-alt" deferred-dense-allocation needs its own spike
+> before macro commitment.
 >
 > **Picking the next task:** open `docs/BACKLOG.md` and §8.0b/§8.2/§12 of
-> this file. Tier-1 quick-win options listed in §12. The remaining macro
-> work is concentrated in (a) closing the last 3 of 9 CUDA-graph configs,
-> (b) the B7-alt spike, (c) B11.3 lava demo. Don't pick a Tier 3 macro
-> without running its spike micro first.
+> this file. With B11.3 closed, the open queue is (a) closing the last 3
+> of 9 CUDA-graph configs (PCG + the two sparse-graph configs),
+> (b) the B7-alt spike (gates v1.0), (c) B3.2/B3.5 v0.8 polish. Don't
+> pick a Tier 3 macro without running its spike micro first.
 
 ## 1. Identity
 
@@ -142,6 +144,7 @@ Run `gpufluid info` to see live count. **Verified 2026-05-16 (post-S2.14/15/D4.3
 | 23 | **Whitewater selector A/B (B3.1/B3.3 demo)**: side-by-side 80³ waterfall + basin splash, identical scene baked twice — left pane uses legacy `\|v\|>threshold` selector, right pane uses the new W7.7 trapped-air potential. Live per-class counters overlay each frame. Peak-splash (frame 30) snapshot: legacy emits 829 foam + 29 spray + 2116 bubble = 2974 total; potential emits 379 foam + 27 spray + 969 bubble = 1375 total. Mesh is identical between panes (same solver state), so the visible whitewater difference is entirely the selector. Demonstrates the v0.8 thesis: trapped-air potential redirects the emit budget toward genuinely turbulent regions instead of treating all fast-moving fluid as ww-eligible. Renderer `examples/render_step23.py` builds the side-by-side directly from the two cache dirs. | ✅ matplotlib mesh+scatter SBS, 60 fr |
 | 23b | **Same scene, Eevee renderer**: parallel mp4 produced via `examples/render_step23_eevee.py` (Blender 5.1, headless Eevee). 60 frames bake **27.3 s wall / 456 ms/frame**, ~9× faster than the matplotlib pipeline used for the canonical step23 (4 min). Establishes the Eevee path for future demos (step24+) as the default — matplotlib stays only when per-frame per-vertex colour overlays are required. **Polish gap:** Eevee version currently renders all whitewater as a single emissive sphere; the per-class colour and the live count overlays from step23.mp4 are lost. Closing micro: drive material colour from the `gpufluid_kind` INT attribute via a Geometry Nodes graph + 2D compositor text. | ✅ Blender Eevee, 60 fr |
 | 24 | **Kitchen-sink v0.8 demo** — every major v0.8 feature in one bake: `[[fluids]]` multi-source colour (red + blue), surface tension σ=0.1, APIC transfer mode (B6: known safe with σ), sphere obstacle, W7.7 trapped-air potential whitewater, Eevee-rendered single pane. Sim 3.6s for 90 frames @ 64³ + 32 CFL substeps/frame (σ-bound). Renderer `examples/render_step24_eevee.py`: builds a fresh scene in Blender, attaches a custom per-frame loader that (a) reads the surface mesh PLY, (b) per mesh vertex finds the nearest fluid particle and copies its RGB into a FLOAT_COLOR `fluidcol` attribute, (c) updates a vertex-only whitewater mesh that instances a small emissive sphere on every point. Result: the colour-mixing story is visible directly on the smooth surface — red drop + blue drop fall, get rounded by σ, hit the cream obstacle, splash and mix into purple in the basin. Render wall: ~150 s for 90 frames @ 1600×900 (most of it is the per-vertex cdist nearest-particle pass; render alone is ~50 ms/frame). | ✅ Blender Eevee, 90 fr |
+| 25 | **Lava demo (B11.3)** — closes the last v0.9 micro. Hot lava drop (`temperature = 1500.0`) splashes from above into a cool basin (`temperature = 300.0`); the *visible colour* is driven entirely by the per-particle temperature scalar S2.18, not by per-source RGB. Wiring: `[[fluids]] temperature = X` lands in `FluidBoxCfg.temperature` (cli/config.py), threads through `cmd_simulate._seed_one` into `solver.seed_box(temperature=...)` / `solver.seed_mesh(temperature=...)` (mesh seeder was extended in this session for parity). Per-frame sidecar `<cache>/temperatures/frame_NNNN.npy` written next to `colors/`. Renderer `examples/render_step25_eevee.py` clones step24's nearest-particle cdist transfer but maps T → RGB through a 5-anchor blackbody-ish colormap and ALSO drives a per-vertex emission-strength attribute (`lavaemit`), so the splash contact zone visibly cools as the P2G→G2P pass mixes hot bulk with cold basin. Eevee bloom on for hot-peak glow. Scene `examples/scenes/lava_drop.toml` (64³, σ=0.1, APIC, sphere obstacle, viscosity=0.02, 90 fr). Regression `tests/test_b11_3_temperature_toml.py` — 2 pure-config tests + 1 GPU end-to-end. | ✅ Blender Eevee, 90 fr (built; user runs on Windows for actual mp4) |
 
 **Renderer notes:** Blender MCP hung around step8 first attempt; switched to matplotlib (`examples/render_ply_sequence.py` and `render_side_by_side.py`). Both renderers work, Blender Eevee gives prettier output, matplotlib is reliable. For animation visibility — keep frame count to active-physics phase only (typically 30–60 frames). Otherwise water settles and the rest looks frozen.
 
@@ -221,7 +224,7 @@ v1.0 gating spike after this session:
 | B5 | CUDA-graphs capture for the per-step kernel sequence   | ✅ closed (6 of 9 configs) |
 | B6 | APIC + CSF interaction QA                              | ✅ closed (no fix needed) |
 | B7 | Sparse v2 — NanoVDB-backed storage                     | ❌ **ABORTED** by spike — pivot to B7-alt |
-| B11 | Per-particle scalar attributes (temperature)          | ▶ B11.1/B11.2 done, B11.3 demo deferred |
+| B11 | Per-particle scalar attributes (temperature)          | ✅ closed (B11.3 lava demo shipped 2026-05-16) |
 | B12 | Per-frame timing instrumentation (`--timings`)        | ✅ closed |
 
 Key per-macro detail (everything else is in BACKLOG):
@@ -285,14 +288,18 @@ block-sparse compaction with deferred dense allocation (allocate
 frames with dilation margin). Gets ~70-80% of the sparse v2 memory
 win without depending on Warp upstream. Needs its own spike.
 
-**§8.0b.B11 — scalar attribute pipeline (temperature).** S2.18.1/2/3
+**§8.0b.B11 — scalar attribute pipeline (temperature), closed.** S2.18.1/2/3
 kernels parallel the S2.15 colour pipeline but for one float channel.
 `attr_temperature` slot on FlipSolver3D; `seed_box(temperature=...)`
 kwarg with append-in-lockstep semantics. Drive-by: fixed `seed_box`
 to concatenate positions whenever ANY attribute is in play (was
-colour-only). B11.3 lava demo deferred — needs CLI/TOML wiring for
-per-source temperature + a colormap renderer (cdist-style nearest
-particle, like step24).
+colour-only). **B11.3 (this session)** wired `[[fluids]] temperature = X`
+through cli/config.py + cmd_simulate, extended `seed_mesh` for parity,
+added per-frame `<cache>/temperatures/frame_NNNN.npy` sidecar (mirrors
+`colors/`), shipped scene `examples/scenes/lava_drop.toml`, renderer
+`examples/render_step25_eevee.py` (5-anchor blackbody-ish colormap T→RGB
++ per-vertex emission-strength attribute, Eevee bloom), regression
+`tests/test_b11_3_temperature_toml.py`. v0.9 milestone now fully closed.
 
 **§8.0b.B12 — per-section profiler shipped.** `StepProfiler` wraps
 `wp.ScopedTimer(synchronize=True)`; opt-in via
@@ -300,6 +307,12 @@ particle, like step24).
 per-section totals at end and dumps `<cache>/timings.json`. Sample on
 two_color_drop (40³, 90 frames): pressure 49.9%, color 11%, p2g 7.2%,
 g2p_advect 4.7%, rest <5% each.
+
+### 8.0c v0.9 fully closed (2026-05-16, B11.3 lava demo)
+
+| # | Macro                                                  | Where to look |
+|---|--------------------------------------------------------|---------------|
+| B11.3 | Lava demo — per-particle temperature drives colour    | step25 row in §6, `test_b11_3_temperature_toml.py`, `examples/scenes/lava_drop.toml`, `examples/render_step25_eevee.py` |
 
 ### 8.1 v0.7 done (2026-05-16) — one-line summary
 
@@ -322,14 +335,12 @@ The next-task queue is in `docs/BACKLOG.md`, with release milestones at the
 top. After this session:
 
 * **v0.8** essentially closed (B1 ✅, B2 skipped license, B3 partial).
-* **v0.9** essentially closed: B4 ✅, B5 ✅ (6 of 9 configs), B6 ✅, B12 ✅,
-  B11 50% done. The remaining v0.9 micro is **B11.3 lava demo**.
+* **v0.9** fully closed: B4 ✅, B5 ✅ (6 of 9 configs), B6 ✅, B11 ✅
+  (incl. B11.3 lava demo this session), B12 ✅.
 * **v1.0** pivoted: original B7 (NanoVDB) aborted; replacement "B7-alt"
   (deferred dense allocation, ~70-80% of the win) needs its own spike.
 
 **Default next task** (no user direction):
-* If you want a quick visible win → **B11.3 lava demo** (closes the last v0.9
-  micro). ~1 session. Reuses step24 cdist nearest-particle renderer.
 * If you want to push into v1.0 → **B7-alt spike**: prototype deferred-dense
   allocation. Allocate `wp.array3d` lazily for the bounding box of active
   8³ tiles, rebuild every N frames with a dilation margin. Risk: needs a
@@ -339,6 +350,8 @@ top. After this session:
   the graph-eligible path. PCG needs an on-device convergence-check
   (stop-flag idiom). Block-sparse needs `n_active_dev` device buffer + cap
   in 6 per-tile kernels. Both unblock the remaining 3 of 9 configs.
+* If you want a v0.8 polish closeout → **B3.5** refresh step22.mp4 with the
+  W7.7 selector turned ON (CLI flag already exists since B3.3).
 
 **Picking rules:**
 
@@ -370,12 +383,17 @@ When you finish a macro:
 ```bash
 cd E:\projects\gpu_flip\gpufluid
 source .venv/Scripts/activate
-pytest -q                          # 154 passed
+pytest -q                          # 154 baseline + 3 from B11.3 = 157 (2 config + 1 GPU bake)
 gpufluid info                      # 80 unique block IDs / 102 callables across G1/S2/F3/D4/M5/I6/C7/A8/W7
 gpufluid simulate examples/scenes/two_color_drop.toml  --enable-cuda-graphs --timings
                                    # canonical demo of B5 + B12 wins
 gpufluid simulate examples/scenes/surftens_on.toml --enable-cuda-graphs
                                    # CSF now graph-eligible (17.6× sim speedup)
+gpufluid simulate examples/scenes/lava_drop.toml
+                                   # B11.3 lava demo — bakes mesh + particles + temperatures sidecar
+blender --background --python examples/render_step25_eevee.py -- \
+        --cache out/step25_lava --out out/step25_eevee_frames
+                                   # produces 90 PNGs; stitch to mp4 per the docstring at top of the script
 ```
 
 **Demo videos shipped this session:**
@@ -386,6 +404,11 @@ gpufluid simulate examples/scenes/surftens_on.toml --enable-cuda-graphs
 * `out/videos/step24.mp4` — kitchen-sink v0.8 demo (2 coloured drops + σ
   + APIC + sphere obstacle + W7.7 ww, Eevee with per-vertex colour from
   nearest-particle cdist — see `render_step24_eevee.py`)
+* `out/videos/step25.mp4` — **B11.3 lava demo** (hot drop into cold
+  basin, visible colour driven by per-particle temperature scalar via
+  blackbody-ish colormap + per-vertex emission strength, Eevee bloom —
+  see `render_step25_eevee.py`). Bake + render must be run on the user's
+  Windows box (Warp + CUDA + Blender required).
 
 ## 11. Quick reference: key files when continuing
 
@@ -406,9 +429,6 @@ gpufluid simulate examples/scenes/surftens_on.toml --enable-cuda-graphs
 Sized roughly by session-count and grouped by where they unblock.
 
 **Tier 1 — quick wins, ≤1 session:**
-- **B11.3 — lava demo (red→blue colormap from temperature scalar).**
-  Wire `[[fluids]] temperature = ...` through TOML + colormap in
-  `examples/render_step24_eevee.py`. Closes the last v0.9 micro.
 - **B3.5 — refresh step22.mp4 with the W7.7 selector turned ON.** Same
   scene config, just `whitewater_use_potential = true`. Already wired
   through CLI (B3.3).
@@ -416,6 +436,12 @@ Sized roughly by session-count and grouped by where they unblock.
   `_no_host_sync` plumbing already in `_pressure_pcg`. Add a 1-int
   device buffer "done", gate subsequent-iter kernels on it, drop the
   forced max_iter trade-off. Unblocks the 7th of 9 graph configs.
+- **B11.3 follow-up — reseed propagates `attr_temperature`.** Current
+  reseed paths (`sim/reseed.py:reseed_particles_gpu` + CPU sibling)
+  carry `attr_color_wp` but not `attr_temperature`. Scenes with
+  reseed=true + per-source temperature will lose the scalar on the
+  first reseed pass. Same compaction plumbing as colour. Trivial,
+  ≤30 min.
 
 **Tier 2 — risk:med, 1-2 sessions each:**
 - **B7-alt spike — deferred dense allocation for 256³+.** Allocate
@@ -440,40 +466,33 @@ Sized roughly by session-count and grouped by where they unblock.
 
 ---
 
-**State at handoff (verified 2026-05-16, end of v0.9 sprint):**
-* **Tests:** 154/154 green (109 v0.7 baseline + 45 added across v0.8/v0.9).
-* **Registry:** 80 unique block IDs / 102 callables via `gpufluid info`.
-* **Demo videos:** 24 mp4 in `out/videos/` (step23/23_eevee/24 added this
-  session; matplotlib SBS + Eevee headless renderers both work).
-* **Addon zip:** 37 KB at `addon/gpufluid_blender.zip` (v0.8.0). UI exposes
-  σ, csf_smoothing_passes, per-source colour, whitewater + class-vis +
-  W7.7 potential toggle, surface + whitewater cache attach.
+**State at handoff (2026-05-16, end of v0.9 sprint + B11.3 close):**
+* **Tests:** 154 baseline green + 3 new from B11.3 (2 pure-config, 1 GPU
+  bake) → expected 157/157 after the user's `pytest -q` on Windows.
+  Linux sandbox can't run Warp/CUDA, so the GPU test was not executed
+  here — see §"Verification handoff" below.
+* **Registry:** 80 unique block IDs / 102 callables via `gpufluid info`
+  (unchanged — B11.3 was a wiring + renderer job, no new `@block` calls).
+* **Demo videos:** 24 baseline mp4 in `out/videos/`; step25 (B11.3 lava)
+  awaits the user's Windows bake — code/scenes/renderer all shipped.
+* **Addon zip:** 37 KB at `addon/gpufluid_blender.zip` (v0.8.0). UI does
+  NOT yet expose per-source `temperature` — opportunistic follow-up,
+  same surface area as the existing `color` field in `properties.py`.
 * **CLI features:** `gpufluid simulate <scene.toml>` accepts
   `--enable-cuda-graphs` (B5), `--timings` (B12), `--resume`,
-  `--start-frame`, `--checkpoint-every`.
+  `--start-frame`, `--checkpoint-every`; TOML now also accepts
+  `[[fluids]] temperature = X` (B11.3).
 * **Repo:** `https://github.com/ArkBee/GPUFLUID` (branch `main`).
-  `origin/main` ends at commit `586b4a7` (step24 demo). The **7 commits
-  since** (B11/B4.1 → B4.2 → B7.1 → B5.1 → B5.2 → B5 follow-up)
-  are local-only — need user auth to push.
-
-**Git stack to push when auth's ready** (newest first):
-```
-b195b18  B5 follow-up — CSF graph-eligible (17.6× on surftens_on)
-3d7240a  B5.2-B5.5 — CUDA-graph cache + CLI flag (4.8× two_color_drop)
-cb7f31e  BACKLOG: tick B5.1
-896507b  B5.1 spike — CUDA graphs capture works (2.17×)
-7d48861  B7.1 spike — Sparse v2 ABORTED, pivot documented
-b2fefb2  B4.2/B4.3/B4.4/B4.5 — block-sparse PCG (S2.6.6), B4 closed
-7761dc0  B11.1/B11.2 (S2.18) + B4.1 spike per-tile GS-RB (S2.6.5)
-586b4a7  ← origin/main (step24 — kitchen-sink v0.8 demo)
-```
+  Pre-B11.3 stack pushed this session — `origin/main` ends at
+  `93e42e2` (the previous "docs/HANDOFF refresh"). B11.3 commits land
+  on top of that.
 
 ## 13. Repo hygiene notes (2026-05-16, end of v0.9 sprint)
 
-- **Is now a git repo.** `origin/main` at `586b4a7`; 7 unpushed local
-  commits sit on `main`. User's PAT was used one-shot for the
-  initial push; subsequent pushes need a fresh auth (PAT in chat or
-  Git Credential Manager).
+- **Is now a git repo.** `origin/main` at `93e42e2` (pushed this
+  session — pre-B11.3 stack of 8 commits delivered with a one-shot
+  PAT). B11.3 commits land on top after the user runs the Windows-side
+  verification.
 - **`docs/BLOCKS.md` lags reality** — fast iteration this session added
   S2.6.5, S2.6.6, S2.14.6_dev, S2.18.1/2/3, G1.9 plus new test rows
   without a full BLOCKS rewrite. `gpufluid info` is the source of
