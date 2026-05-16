@@ -88,6 +88,8 @@ passing pytest; **plan** = declared but not yet written.
 | W7.4     | Kind classifier (foam/spray/bubble)        | W7    | `gpufluid/sim/whitewater.py`                 | impl,test |
 | W7.5     | Per-class dynamics (gravity/drag/buoyancy) | W7    | `gpufluid/sim/whitewater.py`                 | impl,test |
 | W7.6     | Kind sidecar I/O for render                | W7    | `gpufluid/cli/commands.py`                   | impl,test |
+| W7.7     | Trapped-air potential (Ihmsen 2012)        | W7    | `gpufluid/sim/whitewater_potentials.py`      | impl,test |
+| W7.7.H   | Host wrapper for W7.7 (numpy → numpy)      | W7    | `gpufluid/sim/whitewater_potentials.py`      | impl,test |
 | A8.1     | Addon register/unregister                  | A8    | `addon/gpufluid_blender/__init__.py`         | impl |
 | A8.2     | Domain property group                      | A8    | `addon/gpufluid_blender/properties.py`       | impl |
 | A8.3     | Fluid source                               | A8    | `addon/gpufluid_blender/properties.py`       | impl |

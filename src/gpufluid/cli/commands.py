@@ -409,6 +409,7 @@ def cmd_info(args: argparse.Namespace) -> int:
     # Force-load modules that register blocks but aren't imported by top-level
     # gpufluid (W7 whitewater, S2.11 reseed, D4.3.GPU.BVH mesh_sdf_gpu)
     import gpufluid.sim.whitewater   # noqa
+    import gpufluid.sim.whitewater_potentials  # noqa — registers W7.7
     import gpufluid.sim.reseed       # noqa
     import gpufluid.domain.mesh_sdf_gpu  # noqa
     reg = get_registry()

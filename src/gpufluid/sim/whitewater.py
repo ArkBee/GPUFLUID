@@ -118,9 +118,24 @@ class WhitewaterSystem:
     @block("W7.2", "Emit new whitewater from fast-moving fluid particles")
     def emit_from_fluid(self, fluid_pos: np.ndarray, fluid_vel: np.ndarray,
                         density: Optional[np.ndarray] = None,
-                        dx: Optional[float] = None):
-        """Optionally pass ``density`` (the M5 smoothed indicator grid) +
-        ``dx`` to classify emissions into foam/spray/bubble at spawn time."""
+                        dx: Optional[float] = None,
+                        potential: Optional[np.ndarray] = None):
+        """Emit new whitewater particles seeded from fast or turbulent fluid.
+
+        Selector modes:
+          * ``potential=None`` (legacy / v0.7): emit any particle whose speed
+            exceeds ``cfg.speed_threshold``, uniform random subsample to the
+            emit cap.
+          * ``potential`` provided (B3.1+, expects values in [0, 1]): sample
+            with probability proportional to potential, so genuine turbulence
+            pockets dominate and laminar bulk fluid contributes ~0 — this is
+            the Ihmsen 2012 §3 approach. Particles with potential==0 are
+            never selected. The speed-threshold gate still applies, so a
+            stationary fluid never emits regardless of potential.
+
+        Optionally pass ``density`` (the M5 smoothed indicator grid) + ``dx``
+        to classify emissions into foam/spray/bubble at spawn time.
+        """
         if len(fluid_pos) == 0:
             return
         speeds = np.linalg.norm(fluid_vel, axis=1)
@@ -128,8 +143,21 @@ class WhitewaterSystem:
         idx = np.where(mask)[0]
         if len(idx) == 0:
             return
-        if len(idx) > self.cfg.emit_per_frame_max:
-            idx = self.rng.choice(idx, size=self.cfg.emit_per_frame_max, replace=False)
+        cap = self.cfg.emit_per_frame_max
+        if potential is not None:
+            if potential.shape != speeds.shape:
+                raise ValueError(
+                    f"potential must be shape ({speeds.shape[0]},), got {potential.shape}")
+            w = np.clip(potential[idx].astype(np.float64), 0.0, None)
+            total = w.sum()
+            if total <= 0.0:
+                return  # gate open but no turbulence → no emit (the v0.7
+                        # selector would have flooded here)
+            p = w / total
+            n_pick = min(cap, int(np.count_nonzero(w)))
+            idx = self.rng.choice(idx, size=n_pick, replace=False, p=p)
+        elif len(idx) > cap:
+            idx = self.rng.choice(idx, size=cap, replace=False)
         new_pos = fluid_pos[idx].copy()
         if self.cfg.spawn_offset != 0.0:
             new_pos[:, 1] += self.cfg.spawn_offset

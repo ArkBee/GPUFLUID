@@ -113,11 +113,11 @@ works but produces ~30 spray / ~800 foam / ~2100 bubble in the splash demo —
 spray count is low because the heuristic doesn't find wave crests properly.
 Ihmsen et al. 2012 §3 has the full potential definitions.
 
-* [ ] B3.1 — Implement Trapped-Air potential: `I_ta = Σ_j (1 - cos(θ_ij)) · (1 - |v_ij|/v_max)` over neighbours, capped at 1. Per fluid particle on GPU (uses a HashGrid for neighbour query — `wp.HashGrid` is already available).
-* [ ] B3.2 — Implement Wave-Crest potential: `I_wc = |∇·n̂|` curvature-like measure against the surface normal n̂ (reuse S2.14.2 normal field).
-* [ ] B3.3 — Emit rate per particle = `clamp(α·I_ta + β·I_wc, 0, max_rate)·dt` instead of the current `|v|>threshold` cut-off.
-* [ ] B3.4 — Pytest: a falling jet emits ≥5× more spray than the current heuristic in `whitewater_splash.toml` while keeping foam/bubble counts similar.
-* [ ] B3.5 — Refresh `step22.mp4` with the new classifier.
+* [x] B3.1 — Implement Trapped-Air potential: `I_ta = Σ_j (1 - cos(θ_ij)) · (1 - |v_ij|/v_max)` over neighbours, capped at 1. Per fluid particle on GPU (uses a HashGrid for neighbour query — `wp.HashGrid` is already available). *(2026-05-16: `gpufluid/sim/whitewater_potentials.py` with W7.7 kernel + W7.7.H host wrapper. wp.HashGrid built per call (one-shot, no caching yet). The (1 - cos θ) factor is intentionally NOT pre-clamped per-pair — only the final sum is capped at 1 (spec said sum-cap; per-pair clamp was an early bug I removed when test_w7_7_v_max_scales_pair_contribution caught it).)*
+* [ ] B3.2 — Implement Wave-Crest potential: `I_wc = |∇·n̂|` curvature-like measure against the surface normal n̂ (reuse S2.14.2 normal field). *(deferred: needs S2.14.2 hookup, which is CSF-only — separate session.)*
+* [~] B3.3 — Emit rate per particle = `clamp(α·I_ta + β·I_wc, 0, max_rate)·dt` instead of the current `|v|>threshold` cut-off. *(partial: emit_from_fluid now takes an optional `potential=` arg and samples weighted by it instead of uniform-random over speed-gated particles. Speed gate still applies. Full rate-times-dt formulation with α/β coefficients deferred until B3.2 lands.)*
+* [~] B3.4 — Pytest: a falling jet emits ≥5× more spray than the current heuristic in `whitewater_splash.toml` while keeping foam/bubble counts similar. *(proxy passed: `test_w7_7_potential_weighted_emit_prefers_turbulent_particles` shows >90% of emissions in the turbulent slab vs ~50% for the legacy uniform selector — ≥1.8× concentration ratio. Real scene benchmark needs commands.py wiring → next session.)*
+* [ ] B3.5 — Refresh `step22.mp4` with the new classifier. *(blocked on commands.py wiring; deferred.)*
 
 **Acceptance:** new step22 visibly has *more* airborne spray + cleaner foam boundary.
 
