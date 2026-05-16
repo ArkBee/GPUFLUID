@@ -121,7 +121,8 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                           surface_tension=scene.simulation.surface_tension,
                           csf_smoothing_passes=scene.simulation.csf_smoothing_passes,
                           transfer_mode=scene.simulation.transfer_mode,
-                          enable_timing=bool(getattr(args, "timings", False)))
+                          enable_timing=bool(getattr(args, "timings", False)),
+                          enable_cuda_graphs=bool(getattr(args, "enable_cuda_graphs", False)))
     grid_xyz = solver.cell_centers_np()
     obstacle_sdf = _build_obstacle_sdf(scene, grid_xyz)
     if obstacle_sdf is not None:
@@ -402,6 +403,16 @@ def cmd_simulate(args: argparse.Namespace) -> int:
              "mesh_total_s": t_mesh_total},
             indent=2, sort_keys=True))
         print(f"             dumped to {timings_path}")
+    if solver._enable_cuda_graphs:
+        hits = solver._cuda_graph_hits; misses = solver._cuda_graph_misses
+        total = hits + misses
+        if total > 0:
+            pct = 100.0 * hits / total
+            print(f"[gpufluid] cuda-graph: {hits}/{total} steps replayed "
+                  f"({pct:.0f}% hit rate, {misses} captures)")
+        else:
+            print("[gpufluid] cuda-graph: not eligible for any step "
+                  "(check PCG/CSF/sparse — those configs aren't capturable yet)")
     return 0
 
 
@@ -472,6 +483,11 @@ def main(argv=None) -> int:
     p_sim.add_argument("--timings", action="store_true",
                        help="(B12) wrap each major solver phase in wp.ScopedTimer, "
                             "print per-section totals at the end + write timings.json next to cache.json")
+    p_sim.add_argument("--enable-cuda-graphs", action="store_true",
+                       help="(B5) capture step() into a CUDA graph and replay it "
+                            "across substeps with the same topology. ~2x speedup "
+                            "at 64^3 for jacobi/gsrb + no CSF + no block-sparse. "
+                            "Other configs fall through to direct execution.")
     p_sim.set_defaults(func=cmd_simulate)
 
     p_bench = sub.add_parser("bench", help="solver throughput benchmark")

@@ -138,19 +138,20 @@ pressure paths and are bigger wins at scale. Same compaction infrastructure.
 
 **Acceptance:** scenes using `pressure_solver = "gsrb"` or `"pcg"` get the block-sparse path automatically and the regression tests pass.
 
-### B5. CUDA-graphs capture for the per-step kernel sequence `risk:med value:infra`
+### B5. CUDA-graphs capture for the per-step kernel sequence `risk:med value:infra` ✅ closed 2026-05-16 (eligible configs only)
 
 Each step() does 20+ `wp.launch` calls. CUDA graphs would record them once
 and replay each step, eliminating launch overhead. Warp supports
 `wp.capture_begin / wp.capture_launch`.
 
 * [x] B5.1 — Audit `step()` for host-syncs (anything that calls `.numpy()` inside the per-step path can't be in a graph). Move them outside (CSF balance already uses GPU, advection CFL is one float, etc.). *(2026-05-16 spike: 6 sync sites identified — PCG dense/sparse r_norm^2 reads, CSF S2.14.6 force-balance (3 axes), sparse pressure n_active. Plus a redundant `wp.synchronize()` at end of step() that I removed in this commit. Of the 9 solver configurations we ship, **3 are graph-eligible today** (jacobi/gsrb × any transfer_mode, no CSF, no sparse). The other 6 need their syncs moved out as B5.2 work. Capture+replay verified bit-identical to direct step on Jacobi at 32^3, **2.17× speedup at 64^3 / 20 iters** (0.43→0.20 ms/step) — way above the B5.5 target of 1.15×. Macro greenlit.)*
-* [ ] B5.2 — Add `solver._graph` lazy cache keyed by `(transfer_mode, pressure_solver, has_csf, has_color)` — a graph is invalid when topology changes.
-* [ ] B5.3 — Invalidate on every `prepare_frame` (since marker/obstacles changed) — capture freshly for the next N=1..3 frames inside that topology, then replay.
-* [ ] B5.4 — Pytest: same numerical output with/without graphs.
-* [ ] B5.5 — Bench: target ≥15% speedup at 64³ (small grids = launch overhead dominates).
+* [x] B5.2 — Add `solver._graph` lazy cache keyed by `(transfer_mode, pressure_solver, has_csf, has_color)` — a graph is invalid when topology changes. *(2026-05-16: `_cuda_graph` slot + `_cuda_graph_key` + hit/miss counters. Cache key includes the full set of variables that affect launch sequence: transfer_mode, pressure_solver, pressure_block_sparse, surface_tension>0, viscosity>0, attr_color, attr_temperature, n_particles, dt, pressure_iters. Different args → different key → recapture. Ineligible configs (PCG/CSF/sparse) fall through to direct path silently.)*
+* [x] B5.3 — Invalidate on every `prepare_frame` (since marker/obstacles changed) — capture freshly for the next N=1..3 frames inside that topology, then replay. *(2026-05-16: `prepare_frame` calls `_cuda_graph_invalidate()` at entry. With CFL substepping (8-32 substeps/frame typical), first substep recaptures, the rest replay. Real-scene bake on `two_color_drop` showed 88% hit rate = 630 replays / 90 captures over 720 substeps.)*
+* [x] B5.4 — Pytest: same numerical output with/without graphs. *(2026-05-16: `test_b5_2_replay_matches_direct_to_fp_precision` — two solvers from the same seed, one with `enable_cuda_graphs=True` and one without; end-state velocity fields agree to <1e-4 relative drift after 5 steps × 4 hits.)*
+* [x] B5.5 — Bench: target ≥15% speedup at 64³ (small grids = launch overhead dominates). *(2026-05-16: **real bake (two_color_drop, 90 frames, 40³, 8 substeps/frame, jacobi) — sim time 0.72 s → 0.15 s = 4.8× speedup**. Way exceeds the 1.15× target. `gpufluid simulate --enable-cuda-graphs` is the CLI flag; off by default. End-of-bake prints hit/miss tally.)*
 
-**Acceptance:** an `--enable-cuda-graphs` flag on `gpufluid simulate` (default off until proven robust).
+**Acceptance:** an `--enable-cuda-graphs` flag on `gpufluid simulate`. **Met for 3 of 9 solver configs.** PCG, CSF, and block-sparse paths still have device→host syncs in step() and fall through to direct mode. Closing those is a follow-up micro (move the syncs out of the per-step path — possible via on-device convergence-check buffers, but each takes care).
+
 
 ### B6. APIC + CSF interaction QA `risk:low value:infra` ✅ closed 2026-05-16
 

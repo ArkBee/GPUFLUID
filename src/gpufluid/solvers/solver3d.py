@@ -1977,9 +1977,17 @@ class FlipSolver3D:
                  csf_smoothing_passes: int = 2,
                  transfer_mode: str = "flip",
                  device: Optional[str] = None,
-                 enable_timing: bool = False):
+                 enable_timing: bool = False,
+                 enable_cuda_graphs: bool = False):
         from ..primitives.profiling import StepProfiler
         self._prof = StepProfiler(enabled=enable_timing)
+        # B5.2 — CUDA-graph cache. Lazily captures step() for the current
+        # topology + launch args, replays until the topology changes.
+        self._enable_cuda_graphs = bool(enable_cuda_graphs)
+        self._cuda_graph = None
+        self._cuda_graph_key = None
+        self._cuda_graph_hits = 0
+        self._cuda_graph_misses = 0
         self.nx, self.ny, self.nz = nx, ny, nz
         self.dx = dx if dx is not None else 1.0 / max(nx, ny, nz)
         self.dom = wp.vec3(nx * self.dx, ny * self.dx, nz * self.dx)
@@ -2714,11 +2722,86 @@ class FlipSolver3D:
                           self._cgrid_r, self._cgrid_g, self._cgrid_b, self._cgrid_w,
                           dx, nx, ny, nz], device=dev)
 
+    # ----------------------------------------------------------- B5.2 graph cache
+    def _cuda_graph_eligible(self, pressure_solver: str,
+                              pressure_block_sparse: bool) -> bool:
+        """Which solver configurations can be captured into a CUDA graph
+        today. Anything that reads device→host inside step() is excluded."""
+        if pressure_solver not in ("jacobi", "gsrb"):
+            return False        # PCG has r_norm² convergence check
+        if pressure_block_sparse:
+            return False        # n_active.numpy() inside the build
+        if self.surface_tension > 0.0:
+            return False        # CSF S2.14.6 force-balance reads 3 sums
+        return True
+
+    def _cuda_graph_make_key(self, dt: float, pressure_iters: int,
+                              pressure_solver: str,
+                              pressure_block_sparse: bool):
+        """Hashable cache key. Anything that changes the kernel-launch
+        sequence or constants must appear here, otherwise replaying the
+        cached graph would silently use stale args."""
+        return (
+            self.transfer_mode,
+            pressure_solver,
+            bool(pressure_block_sparse),
+            self.surface_tension > 0.0,
+            self.viscosity > 0.0,
+            self.attr_color is not None,
+            self.attr_temperature is not None,
+            int(self.n_particles),
+            float(dt),
+            int(pressure_iters),
+        )
+
+    def _cuda_graph_invalidate(self):
+        """Called whenever topology changes (prepare_frame, set_particles,
+        seed_box on an existing solver, etc.)."""
+        self._cuda_graph = None
+        self._cuda_graph_key = None
+
     # ----------------------------------------------------------- F3.3 step
     @block("F3.3", "Per-step pipeline: S2.1..S2.9 fixed order")
     def step(self, dt: float, pressure_iters: int = 80,
              pressure_solver: str = "jacobi",
              pressure_block_sparse: bool = False):
+        # B5.2 — auto-replay through a captured graph when the config is
+        # eligible AND the cached graph's key still matches. First call
+        # in a topology pays the capture cost; subsequent calls just
+        # replay (~2× faster at 64³, validated by the B5.1 spike).
+        if self._enable_cuda_graphs and self._cuda_graph_eligible(
+                pressure_solver, pressure_block_sparse):
+            key = self._cuda_graph_make_key(
+                dt, pressure_iters, pressure_solver, pressure_block_sparse)
+            if self._cuda_graph is not None and self._cuda_graph_key == key:
+                wp.capture_launch(self._cuda_graph)
+                self._cuda_graph_hits += 1
+                return
+            # Recapture: ask the inner _step_impl to execute, and capture
+            # all launches it emits onto the graph.
+            wp.capture_begin(device=self.device, force_module_load=False)
+            try:
+                self._step_impl(dt, pressure_iters, pressure_solver,
+                                pressure_block_sparse)
+            except Exception:
+                try: wp.capture_end(device=self.device)
+                except Exception: pass
+                self._cuda_graph_invalidate()
+                raise
+            self._cuda_graph = wp.capture_end(device=self.device)
+            self._cuda_graph_key = key
+            self._cuda_graph_misses += 1
+            return
+        # Direct path — either user opted out of graphs or this config has
+        # an in-step host sync (PCG / CSF / block-sparse).
+        self._step_impl(dt, pressure_iters, pressure_solver,
+                        pressure_block_sparse)
+
+    def _step_impl(self, dt: float, pressure_iters: int,
+                   pressure_solver: str, pressure_block_sparse: bool):
+        """Original per-step pipeline. step() may call this directly or
+        wrap it in a CUDA-graph capture. Keep the body sync-free so the
+        capture-path stays valid (see B5.1 audit)."""
         nx, ny, nz, dx = self.nx, self.ny, self.nz, self.dx
         full = (max(nx + 1, nx), max(ny + 1, ny), max(nz + 1, nz))
         dev = self.device
@@ -2926,6 +3009,10 @@ class FlipSolver3D:
     @block("F3.6", "Per-frame hook: rebuild marker for anim obstacles, emit "
                   "inflow particles, drop outflow particles")
     def prepare_frame(self, frame_idx: int, frame_dt: float):
+        # B5.2 — topology may change here (marker rebuild, inflow/outflow
+        # particle count delta). Drop any cached graph; next step() will
+        # recapture for the new topology.
+        self._cuda_graph_invalidate()
         # ---- animated obstacles: rebuild marker = walls ∪ static ∪ analytic_anim
         # then overlay mesh-anim via GPU ray-cast (after upload, see comment in _build_anim_sdf).
         # Also: for each moving obstacle, write its world-space velocity into
