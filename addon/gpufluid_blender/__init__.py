@@ -32,6 +32,7 @@ from . import panels
 
 _CLASSES = (
     preferences.GpufluidPreferences,
+    preferences.GPUFLUID_OT_detect_interpreter,
     properties.GpufluidSurfaceTensionGroup,
     properties.GpufluidWhitewaterGroup,
     properties.GpufluidDomainProps,
@@ -70,6 +71,8 @@ def register():
     bpy.types.Object.gpufluid_inflow = bpy.props.PointerProperty(type=properties.GpufluidInflowProps)
     bpy.types.Object.gpufluid_outflow = bpy.props.PointerProperty(type=properties.GpufluidOutflowProps)
     cache_loader.register_handler()
+    # Auto-fill interpreter on a fresh install (extension reinstall wipes prefs).
+    preferences.auto_fill_interpreter_on_first_use()
 
 
 # [BLK A8.1]

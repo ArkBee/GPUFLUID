@@ -330,7 +330,21 @@ def cmd_simulate(args: argparse.Namespace) -> int:
             # W7.4 — share the M5 density grid so whitewater can classify
             # spray/foam/bubble at emit time and pop bubbles at the surface.
             ww_density = extractor.dens.numpy() if extractor is not None else None
-            ww_sys.emit_from_fluid(fpos, fvel, density=ww_density, dx=solver.dx)
+            # B3.3 — optionally compute the W7.7 trapped-air potential and
+            # pass it as the emit weight, so genuine turbulence pockets emit
+            # whitewater rather than every fast-moving bulk particle.
+            ww_potential = None
+            if scene.output.whitewater_use_potential and fpos.shape[0] > 0:
+                from ..sim.whitewater_potentials import trapped_air_potential
+                r = scene.output.whitewater_potential_radius
+                if r <= 0.0:
+                    r = 2.5 * float(solver.dx)
+                ww_potential = trapped_air_potential(
+                    fpos, fvel, radius=r,
+                    v_max=scene.output.whitewater_potential_v_max,
+                )
+            ww_sys.emit_from_fluid(fpos, fvel, density=ww_density, dx=solver.dx,
+                                   potential=ww_potential)
             ww_sys.step(1.0 / scene.simulation.fps,
                         dom=tuple(scene.domain_size),
                         density=ww_density, dx=solver.dx)

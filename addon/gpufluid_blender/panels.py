@@ -195,6 +195,12 @@ class GPUFLUID_PT_whitewater(bpy.types.Panel):
         col.prop(ww, "lifetime_sec")
         col.prop(ww, "emit_per_frame_max")
         col.prop(ww, "total_cap")
+        pbox = col.box()
+        pbox.label(text="Trapped-Air Potential (W7.7)")
+        pbox.prop(ww, "use_potential")
+        if ww.use_potential:
+            pbox.prop(ww, "potential_radius")
+            pbox.prop(ww, "potential_v_max")
         box = col.box()
         box.label(text="Class Visibility (cache reader)")
         row = box.row(align=True)

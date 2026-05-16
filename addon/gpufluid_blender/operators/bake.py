@@ -214,6 +214,10 @@ def _output_dict(dprops):
         out["whitewater_lifetime_sec"] = float(ww.lifetime_sec)
         out["whitewater_emit_per_frame_max"] = int(ww.emit_per_frame_max)
         out["whitewater_total_cap"] = int(ww.total_cap)
+        if getattr(ww, "use_potential", False):
+            out["whitewater_use_potential"] = True
+            out["whitewater_potential_radius"] = float(ww.potential_radius)
+            out["whitewater_potential_v_max"] = float(ww.potential_v_max)
     return out
 
 

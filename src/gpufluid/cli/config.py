@@ -201,6 +201,12 @@ class OutputCfg:
     whitewater_lifetime_sec: float = 1.5
     whitewater_emit_per_frame_max: int = 4000
     whitewater_total_cap: int = 80000
+    # W7.7 trapped-air potential (B3.3): when True, the emit selector samples
+    # particles weighted by the Ihmsen-2012 trapped-air potential instead of
+    # uniform-random over the speed-gated set. Off by default for back-compat.
+    whitewater_use_potential: bool = False
+    whitewater_potential_radius: float = 0.0   # 0 ⇒ auto = 2.5·dx
+    whitewater_potential_v_max: float = 10.0   # velocity normaliser
 
 
 @dataclass
@@ -406,6 +412,9 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         whitewater_lifetime_sec=float(out.get("whitewater_lifetime_sec", 1.5)),
         whitewater_emit_per_frame_max=int(out.get("whitewater_emit_per_frame_max", 4000)),
         whitewater_total_cap=int(out.get("whitewater_total_cap", 80000)),
+        whitewater_use_potential=bool(out.get("whitewater_use_potential", False)),
+        whitewater_potential_radius=float(out.get("whitewater_potential_radius", 0.0)),
+        whitewater_potential_v_max=float(out.get("whitewater_potential_v_max", 10.0)),
         particles=bool(out.get("particles", False)),
         preview=bool(out.get("preview", False)),
     )

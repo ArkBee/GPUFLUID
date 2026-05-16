@@ -148,13 +148,15 @@ class WhitewaterSystem:
             if potential.shape != speeds.shape:
                 raise ValueError(
                     f"potential must be shape ({speeds.shape[0]},), got {potential.shape}")
-            w = np.clip(potential[idx].astype(np.float64), 0.0, None)
-            total = w.sum()
-            if total <= 0.0:
-                return  # gate open but no turbulence → no emit (the v0.7
-                        # selector would have flooded here)
-            p = w / total
-            n_pick = min(cap, int(np.count_nonzero(w)))
+            # Add a tiny floor so even "perfectly laminar" particles get
+            # a non-zero (but much lower) emit probability. Without this a
+            # waterfall column — laminar relative to itself — would emit
+            # almost no whitewater because every neighbour has the same
+            # velocity vector. Floor magnitude (1e-3) is small enough that
+            # turbulent zones still dominate by ~3 orders of magnitude.
+            w = np.clip(potential[idx].astype(np.float64), 0.0, None) + 1.0e-3
+            p = w / w.sum()
+            n_pick = min(cap, len(idx))
             idx = self.rng.choice(idx, size=n_pick, replace=False, p=p)
         elif len(idx) > cap:
             idx = self.rng.choice(idx, size=cap, replace=False)

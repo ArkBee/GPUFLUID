@@ -52,6 +52,21 @@ class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
     show_foam: bpy.props.BoolProperty(name="Foam", default=True)
     show_spray: bpy.props.BoolProperty(name="Spray", default=True)
     show_bubble: bpy.props.BoolProperty(name="Bubble", default=True)
+    # W7.7 trapped-air potential (B3.3): weight emission by Ihmsen 2012's
+    # divergent-velocity potential instead of the legacy |v|>threshold.
+    use_potential: bpy.props.BoolProperty(
+        name="Trapped-Air Potential (W7.7)", default=False,
+        description="Bias emit toward turbulent flow pockets (Ihmsen 2012); "
+                    "fewer but more representative whitewater particles",
+    )
+    potential_radius: bpy.props.FloatProperty(
+        name="Potential Radius", default=0.0, min=0.0, max=2.0,
+        description="Neighbour search radius (m). 0 = auto = 2.5·dx",
+    )
+    potential_v_max: bpy.props.FloatProperty(
+        name="Potential v_max", default=10.0, min=0.1, max=100.0,
+        description="Velocity normaliser for the (1 - |v_ij|/v_max) factor",
+    )
 
 
 # [BLK A8.2]
