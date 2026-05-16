@@ -586,6 +586,92 @@ block("S2.15.3", "G2P gather grid color back to particle")(k3_g2p_color)
 
 
 # =============================================================================
+# S2.18 — Per-particle SCALAR attribute transfer (temperature, age, density…)
+#         Same P2G/normalize/G2P pattern as S2.15 colour, one channel.
+#         B11: generalises S2.15 for non-RGB attributes.
+# =============================================================================
+
+@wp.kernel
+def k3_p2g_scalar(
+    pos: wp.array(dtype=wp.vec3),
+    attr: wp.array(dtype=float),
+    sgrid_v: wp.array3d(dtype=float),
+    sgrid_w: wp.array3d(dtype=float),
+    dx: float, nx: int, ny: int, nz: int,
+):
+    """[BLK S2.18.1] Trilinear scatter of per-particle scalar onto a
+    cell-centred grid. Mirrors k3_p2g_color but for one channel."""
+    p = wp.tid()
+    pp = pos[p]
+    v = attr[p]
+    fx = pp[0] / dx - 0.5
+    fy = pp[1] / dx - 0.5
+    fz = pp[2] / dx - 0.5
+    i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
+    sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
+    for di in range(2):
+        for dj in range(2):
+            for dk in range(2):
+                ii = i0 + di; jj = j0 + dj; kk = k0 + dk
+                if ii >= 0 and ii < nx and jj >= 0 and jj < ny and kk >= 0 and kk < nz:
+                    wx = float(1.0) - sx
+                    if di == 1: wx = sx
+                    wy = float(1.0) - sy
+                    if dj == 1: wy = sy
+                    wz = float(1.0) - sz
+                    if dk == 1: wz = sz
+                    w = wx * wy * wz
+                    wp.atomic_add(sgrid_v, ii, jj, kk, v * w)
+                    wp.atomic_add(sgrid_w, ii, jj, kk, w)
+
+
+block("S2.18.1", "P2G scatter of per-particle scalar onto grid")(k3_p2g_scalar)
+
+
+@wp.kernel
+def k3_normalize_scalar(
+    sgrid_v: wp.array3d(dtype=float),
+    sgrid_w: wp.array3d(dtype=float),
+):
+    """[BLK S2.18.2] Divide accumulated scalar by deposited weight."""
+    i, j, k = wp.tid()
+    if i >= sgrid_v.shape[0] or j >= sgrid_v.shape[1] or k >= sgrid_v.shape[2]:
+        return
+    w = sgrid_w[i, j, k]
+    if w > 1.0e-8:
+        sgrid_v[i, j, k] = sgrid_v[i, j, k] / w
+    else:
+        sgrid_v[i, j, k] = 0.0
+
+
+block("S2.18.2", "Normalize grid scalar by deposited weight")(k3_normalize_scalar)
+
+
+@wp.kernel
+def k3_g2p_scalar(
+    pos: wp.array(dtype=wp.vec3),
+    attr: wp.array(dtype=float),
+    sgrid_v: wp.array3d(dtype=float),
+    sgrid_w: wp.array3d(dtype=float),
+    dx: float, nx: int, ny: int, nz: int,
+):
+    """[BLK S2.18.3] Trilinear gather of grid scalar back to particle.
+    Particles in empty cells keep their previous value (no overwrite)."""
+    p = wp.tid()
+    pp = pos[p]
+    fx = pp[0] / dx - 0.5
+    fy = pp[1] / dx - 0.5
+    fz = pp[2] / dx - 0.5
+    v = sample3(sgrid_v, fx, fy, fz, nx, ny, nz)
+    w = sample3(sgrid_w, fx, fy, fz, nx, ny, nz)
+    if w > 1.0e-6:
+        attr[p] = v
+
+
+block("S2.18.3", "G2P gather grid scalar back to particle")(k3_g2p_scalar)
+
+
+# =============================================================================
 # S2.4 — Solid boundary conditions
 # =============================================================================
 
@@ -1010,6 +1096,90 @@ def k3_gauss_seidel_rb(
 
 
 block("S2.6.2", "Gauss-Seidel red-black sweep (in-place)")(k3_gauss_seidel_rb)
+
+
+# =============================================================================
+# S2.6.5 — Per-tile GS-RB (B4.1): same in-place red-black sweep but launched
+#          ONLY on the active 8³ blocks compacted by k_mark_active_blocks +
+#          k_compact_active_blocks (S2.16). For sparse-fill scenes this skips
+#          the dense (nx·ny·nz) launch grid and visits only fluid tiles.
+# =============================================================================
+
+@wp.kernel
+def k3_gauss_seidel_rb_per_tile(
+    p: wp.array3d(dtype=float),         # in-place
+    div: wp.array3d(dtype=float),
+    marker: wp.array3d(dtype=int),
+    active_coords: wp.array(dtype=wp.vec3i),
+    block_size: int,
+    color: int,                          # 0=red, 1=black
+):
+    """Launched with dim = n_active * block_size³. Each thread maps a
+    (block_index, cell_in_block) pair to a global (i,j,k). Cells where
+    (i+j+k)%2 != color are skipped.
+
+    Updates p in place — same red/black ordering as `k3_gauss_seidel_rb`.
+    Outside-active-set cells are not touched; they keep whatever value
+    they had from initialisation (zeros) or a prior sweep.
+    """
+    tid = wp.tid()
+    cells_per_block = block_size * block_size * block_size
+    blk = tid // cells_per_block
+    rem = tid - blk * cells_per_block
+    di = rem // (block_size * block_size)
+    rem2 = rem - di * (block_size * block_size)
+    dj = rem2 // block_size
+    dk = rem2 - dj * block_size
+    c = active_coords[blk]
+    i = c[0] * block_size + di
+    j = c[1] * block_size + dj
+    k = c[2] * block_size + dk
+    nx = p.shape[0]; ny = p.shape[1]; nz = p.shape[2]
+    if i >= nx or j >= ny or k >= nz:
+        return
+    if (i + j + k) % 2 != color:
+        return
+    if marker[i, j, k] != 1:
+        p[i, j, k] = 0.0
+        return
+    sum_nb = float(0.0); diag = float(0.0)
+    if i > 0:
+        m = marker[i - 1, j, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += p[i - 1, j, k]
+    if i < nx - 1:
+        m = marker[i + 1, j, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += p[i + 1, j, k]
+    if j > 0:
+        m = marker[i, j - 1, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += p[i, j - 1, k]
+    if j < ny - 1:
+        m = marker[i, j + 1, k]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += p[i, j + 1, k]
+    if k > 0:
+        m = marker[i, j, k - 1]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += p[i, j, k - 1]
+    if k < nz - 1:
+        m = marker[i, j, k + 1]
+        if m != 2:
+            diag += 1.0
+            if m == 1: sum_nb += p[i, j, k + 1]
+    if diag < 0.5:
+        p[i, j, k] = 0.0
+    else:
+        p[i, j, k] = (sum_nb - div[i, j, k]) / diag
+
+
+block("S2.6.5", "Per-tile GS-RB: red-black sweep on active 8³ blocks only")(k3_gauss_seidel_rb_per_tile)
 
 
 # =============================================================================
@@ -1712,6 +1882,13 @@ class FlipSolver3D:
         self._cgrid_g = None
         self._cgrid_b = None
         self._cgrid_w = None
+        # S2.18/B11 per-particle scalar attribute (temperature). None until set.
+        # Reuses the same P2G/normalize/G2P pattern as colour, single channel.
+        # Future B11 extensions can stamp `age`, `density`, etc. by adding more
+        # parallel attribute slots; the kernels themselves stay generic-shaped.
+        self.attr_temperature = None
+        self._sgrid_t = None
+        self._sgrid_tw = None
 
         # [BLK D4.1] solid wall shell — one-cell solid border
         m = np.zeros((nx, ny, nz), dtype=np.int32)
@@ -2004,7 +2181,7 @@ class FlipSolver3D:
 
     # ------------------------------------------------------- D4.5.1 seeders
     @block("D4.5.1", "Box seeder (uniform jittered, ppc particles per cell)")
-    def seed_box(self, lo, hi, ppc: int = 8, color=None):
+    def seed_box(self, lo, hi, ppc: int = 8, color=None, temperature=None):
         """[BLK D4.5.1] Seed a uniform grid of particles inside [lo, hi].
 
         color : optional (R,G,B) tuple in [0,1]. If provided, sets per-particle
@@ -2029,11 +2206,17 @@ class FlipSolver3D:
                                 positions.append([px, py, pz])
         positions = np.array(positions, dtype=np.float32)
         velocities = np.zeros_like(positions)
-        # Append-or-replace semantics. If pos already exists and color is
-        # passed, concatenate to support multi-colored sources in one scene.
+        # Append-or-replace semantics. Concatenate with existing particles
+        # whenever either side carries a per-particle attribute we'd lose
+        # by replacing — that covers multi-source scenes for both colour
+        # and the B11 scalar attribute (temperature). Otherwise we keep
+        # the v0.6 "second seed_box replaces" behaviour.
         prev_pos = self.pos.numpy() if self.pos is not None else np.zeros((0, 3), dtype=np.float32)
         prev_vel = self.vel.numpy() if self.vel is not None else np.zeros((0, 3), dtype=np.float32)
-        if color is not None and len(prev_pos) > 0 and self.attr_color is not None:
+        have_attrs = (color is not None or temperature is not None
+                      or self.attr_color is not None
+                      or self.attr_temperature is not None)
+        if have_attrs and len(prev_pos) > 0:
             positions = np.concatenate([prev_pos, positions], axis=0)
             velocities = np.concatenate([prev_vel, velocities], axis=0)
         self.pos = wp.array(positions, dtype=wp.vec3, device=self.device)
@@ -2055,6 +2238,23 @@ class FlipSolver3D:
             prev_col = self.attr_color.numpy() if len(prev_pos) > 0 else np.zeros((0, 3), dtype=np.float32)
             self.attr_color = wp.array(np.concatenate([prev_col, pad], axis=0),
                                        dtype=wp.vec3, device=self.device)
+        # Per-particle scalar (temperature) — same append-in-lockstep semantics.
+        new_n = len(positions) - len(prev_pos)
+        if temperature is not None:
+            new_t = np.full(new_n, float(temperature), dtype=np.float32)
+            if self.attr_temperature is not None and len(prev_pos) > 0:
+                prev_t = self.attr_temperature.numpy()
+                t = np.concatenate([prev_t, new_t], axis=0)
+            else:
+                t = new_t
+            self.attr_temperature = wp.array(t, dtype=float, device=self.device)
+        elif self.attr_temperature is not None:
+            # Seeded without temperature into a temperatured scene: pad with NaN-ish
+            # sentinel 0.0 (callers can re-stamp afterwards if they need a default).
+            pad = np.zeros(new_n, dtype=np.float32)
+            prev_t = self.attr_temperature.numpy() if len(prev_pos) > 0 else np.zeros(0, dtype=np.float32)
+            self.attr_temperature = wp.array(np.concatenate([prev_t, pad], axis=0),
+                                              dtype=float, device=self.device)
         self.n_particles = len(positions)
 
     # ---------- internal: PCG pressure solve (S2.6.3) -----------------------
@@ -2203,6 +2403,31 @@ class FlipSolver3D:
                 bias = s / c
                 wp.launch(sub_kern, dim=vel.shape,
                           inputs=[vel, self.marker, bias, nx, ny, nz], device=dev)
+
+    # ----------------------------------------------------------- S2.18 scalar attrs (B11)
+    @block("S2.18", "Per-particle scalar attribute: P2G → normalize → G2P (B11)")
+    def _apply_scalar_transfer(self, attr_wp):
+        """Run the P2G → normalize → G2P round-trip for a per-particle
+        float attribute. Allocates the scratch grids on first call.
+
+        ``attr_wp`` is the `wp.array(dtype=float)` we want to advect.
+        Lockstep with the particle array — caller maintains that.
+        """
+        if attr_wp is None or self.n_particles == 0:
+            return
+        nx, ny, nz, dx, dev = self.nx, self.ny, self.nz, self.dx, self.device
+        if self._sgrid_t is None:
+            self._sgrid_t = zeros((nx, ny, nz), dev=dev)
+            self._sgrid_tw = zeros((nx, ny, nz), dev=dev)
+        self._sgrid_t.zero_(); self._sgrid_tw.zero_()
+        wp.launch(k3_p2g_scalar, dim=self.n_particles,
+                  inputs=[self.pos, attr_wp, self._sgrid_t, self._sgrid_tw,
+                          dx, nx, ny, nz], device=dev)
+        wp.launch(k3_normalize_scalar, dim=(nx, ny, nz),
+                  inputs=[self._sgrid_t, self._sgrid_tw], device=dev)
+        wp.launch(k3_g2p_scalar, dim=self.n_particles,
+                  inputs=[self.pos, attr_wp, self._sgrid_t, self._sgrid_tw,
+                          dx, nx, ny, nz], device=dev)
 
     # ----------------------------------------------------------- S2.15 color
     @block("S2.15", "Per-particle color: P2G → normalize → G2P (linear RGB blend)")
@@ -2354,11 +2579,50 @@ class FlipSolver3D:
                 self.last_pressure_iters = pressure_iters
             elif pressure_solver == "gsrb":
                 self.p.zero_()
-                for _ in range(pressure_iters):
-                    wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
-                              inputs=[self.p, self.div, self.marker, 0], device=dev)
-                    wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
-                              inputs=[self.p, self.div, self.marker, 1], device=dev)
+                if pressure_block_sparse:
+                    # B4.1 — per-tile GS-RB. Build the active-block list the
+                    # same way the per-tile Jacobi branch does.
+                    import warp.utils as wputils
+                    nbx = (nx + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    nby = (ny + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    nbz = (nz + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    n_blocks = nbx * nby * nbz
+                    if (self._block_active is None
+                            or self._block_active.shape != (nbx, nby, nbz)):
+                        self._block_active = zeros_int((nbx, nby, nbz), dev=dev)
+                        self._block_active_flat = wp.zeros(n_blocks, dtype=int, device=dev)
+                        self._block_prefix = wp.zeros(n_blocks, dtype=int, device=dev)
+                        self._block_coords = wp.zeros(n_blocks, dtype=wp.vec3i, device=dev)
+                    self._block_active.zero_()
+                    wp.launch(k_mark_active_blocks, dim=(nx, ny, nz),
+                              inputs=[self.marker, self._block_active, BLOCK_SIZE],
+                              device=dev)
+                    self._block_active_flat = self._block_active.flatten()
+                    wputils.array_scan(self._block_active_flat, self._block_prefix,
+                                       inclusive=True)
+                    n_active = int(self._block_prefix[n_blocks - 1:n_blocks].numpy()[0])
+                    if n_active > 0:
+                        wp.launch(k_compact_active_blocks, dim=(nbx, nby, nbz),
+                                  inputs=[self._block_active, self._block_prefix,
+                                          self._block_coords], device=dev)
+                        cells_per_block = BLOCK_SIZE ** 3
+                        for _ in range(pressure_iters):
+                            wp.launch(k3_gauss_seidel_rb_per_tile,
+                                      dim=n_active * cells_per_block,
+                                      inputs=[self.p, self.div, self.marker,
+                                              self._block_coords, BLOCK_SIZE, 0],
+                                      device=dev)
+                            wp.launch(k3_gauss_seidel_rb_per_tile,
+                                      dim=n_active * cells_per_block,
+                                      inputs=[self.p, self.div, self.marker,
+                                              self._block_coords, BLOCK_SIZE, 1],
+                                      device=dev)
+                else:
+                    for _ in range(pressure_iters):
+                        wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
+                                  inputs=[self.p, self.div, self.marker, 0], device=dev)
+                        wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
+                                  inputs=[self.p, self.div, self.marker, 1], device=dev)
                 self.last_pressure_iters = pressure_iters
             else:
                 raise ValueError(f"unknown pressure_solver: {pressure_solver!r}")
@@ -2383,6 +2647,11 @@ class FlipSolver3D:
         # S2.15 — color transfer at end of step (positions are now current)
         with prof.section("color"):
             self._apply_color_transfer()
+        # S2.18 / B11 — generic scalar attribute transfer (temperature for now).
+        # Same pipeline; cheap when attr is None (early-return inside the helper).
+        if self.attr_temperature is not None:
+            with prof.section("temperature"):
+                self._apply_scalar_transfer(self.attr_temperature)
         wp.synchronize()
 
     # --------------------------------------------------- F3.6 prepare_frame

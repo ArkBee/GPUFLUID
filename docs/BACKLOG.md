@@ -130,7 +130,7 @@ Ihmsen et al. 2012 §3 has the full potential definitions.
 S2.6.4 covered Jacobi. GS-RB (S2.6.2) and PCG (S2.6.3) are the other two
 pressure paths and are bigger wins at scale. Same compaction infrastructure.
 
-* [ ] B4.1 — Port GS-RB to a per-tile launch kernel `k3_gauss_seidel_rb_per_tile`. Keep red/black colouring (parity check inside the tile).
+* [x] B4.1 — Port GS-RB to a per-tile launch kernel `k3_gauss_seidel_rb_per_tile`. Keep red/black colouring (parity check inside the tile). *(2026-05-16 spike: **2.1× speedup at 128³ / 9% fill / 80 iters** (5.2 ms→2.5 ms kernel-only, RTX 4080 SUPER). Parity vs dense GS-RB within 5% on the resulting velocity field. Block-sparse infrastructure (S2.16) ports cleanly — same `_block_active` + `_block_prefix` + `_block_coords` pipeline as Jacobi. step() picks the sparse path automatically when `pressure_block_sparse=True` and `pressure_solver="gsrb"`. **B4 macro is greenlit** based on this spike.)*
 * [ ] B4.2 — Port PCG: the spMV (`k_apply_A`), `k_apply_invM`, and per-residual axpy kernels each need block-sparse variants.
 * [ ] B4.3 — `step_cfl()` and `step()` accept `pressure_block_sparse: bool` consistently for all three solvers.
 * [ ] B4.4 — Bench: 128³ low fill, GS-RB sparse should match the 2.4× Jacobi speedup; PCG should be smaller (its per-iter work is more memory-bound).
@@ -238,7 +238,7 @@ Cheap to add via `alembic` Python bindings.
 
 **Acceptance:** scenes with `output.alembic = true` produce a `.abc` Blender can scrub.
 
-### B11. Per-particle scalar attributes (temperature / age / density) `risk:low value:user`
+### B11. Per-particle scalar attributes (temperature / age / density) `risk:low value:user` ▶ in progress 2026-05-16
 
 S2.15 introduced one vec3 attribute (colour). The same P2G/G2P pattern
 generalises to any per-particle scalar or vec. Useful for:
@@ -247,9 +247,9 @@ generalises to any per-particle scalar or vec. Useful for:
 * Age → fade alpha for splash droplets.
 * Cell density → for visualisation overlays.
 
-* [ ] B11.1 — Refactor `_apply_color_transfer` into `_apply_attribute_transfer(attr_array, channels=1|3)` so it handles scalar AND vec3 with one code path.
-* [ ] B11.2 — Add `self.attr_temperature: wp.array(dtype=float)` and a `seed_box(..., temperature=20.0)` knob.
-* [ ] B11.3 — Demo: hot water (red) poured into cold water (blue) — show colour blend driven by temperature, not by direct colour.
+* [x] B11.1 — Refactor `_apply_color_transfer` into `_apply_attribute_transfer(attr_array, channels=1|3)` so it handles scalar AND vec3 with one code path. *(2026-05-16: chose a parallel implementation rather than a unified one — `_apply_scalar_transfer(attr_wp)` lives next to `_apply_color_transfer()` with dedicated S2.18.1/2/3 kernels (k3_p2g_scalar / k3_normalize_scalar / k3_g2p_scalar). Same P2G→normalize→G2P pattern, one channel. Keeps the colour-vec3 path intact and avoids vec3-conditional branches in Warp kernels.)*
+* [x] B11.2 — Add `self.attr_temperature: wp.array(dtype=float)` and a `seed_box(..., temperature=20.0)` knob. *(2026-05-16: solver gains `attr_temperature` slot; `seed_box` accepts `temperature=` kwarg with append-in-lockstep semantics matching the colour path. Drive-by fix: `seed_box` now concatenates positions whenever EITHER side carries an attribute (was colour-only) — old behaviour replaced uncoloured second seeds, which broke the temperature multi-source case.)*
+* [ ] B11.3 — Demo: hot water (red) poured into cold water (blue) — show colour blend driven by temperature, not by direct colour. *(deferred — needs CLI/TOML plumbing for per-source temperature and a renderer that maps a scalar attr to a colourmap. Reuses the step24 nearest-particle pipeline.)*
 
 **Acceptance:** at least one scalar attribute besides colour works end-to-end through cache.
 
