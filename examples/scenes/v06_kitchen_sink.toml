@@ -1,0 +1,57 @@
+# Step 16: all v0.5/v0.6 features in one scene, with continuous inflow so
+# motion is visible throughout the entire clip (not just settling).
+# - mesh fluid seeder (D4.5.2): initial blob
+# - plane obstacle (D4.2.4): water hits and slides off a ramp
+# - inflow (D4.7): continuous trickle from above keeps it dynamic
+# - reseeding (S2.11), decimation (M5.6), GSRB (S2.6.2), USD (I6.5)
+
+[domain]
+resolution = [64, 64, 64]
+
+# Initial blob — falls onto the ramp at the start.
+[fluid]
+type = "mesh"
+path = "blob.obj"
+scale = 1.0
+translate = [0.30, 0.80, 0.50]
+ppc = 8
+
+# Constant trickle from the high end of the ramp.
+[[inflow]]
+lo = [0.18, 0.85, 0.45]
+hi = [0.25, 0.92, 0.55]
+velocity = [0.4, -2.5, 0.0]
+rate_per_sec = 18000
+
+# Drain only the far-right corner so the rest stays full of motion.
+[[outflow]]
+lo = [0.88, 0.00, 0.40]
+hi = [1.00, 0.10, 0.60]
+
+[[obstacle]]
+type = "plane"
+point = [0.50, 0.30, 0.50]
+normal = [0.55, 1.0, 0.0]
+bbox_lo = [0.10, 0.10, 0.05]
+bbox_hi = [0.90, 0.55, 0.95]
+
+[simulation]
+dt = 0.005
+pressure_iters = 30
+pressure_solver = "gsrb"
+gravity = -9.81
+frames = 30
+fps = 24
+reseed = true
+reseed_every_n_frames = 5
+
+[output]
+cache_dir = "../../out/v06_kitchen_sink"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+decimate_ratio = 0.5
+wall_margin_cells = 2
+usd = true

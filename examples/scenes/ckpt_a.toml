@@ -1,0 +1,20 @@
+[domain]
+resolution = [64, 64, 64]
+[fluid]
+type = "box"
+lo = [0.10, 0.35, 0.30]
+hi = [0.40, 0.80, 0.70]
+ppc = 8
+[simulation]
+dt = 0.005
+pressure_iters = 60
+gravity = -9.81
+frames = 30
+fps = 24
+[output]
+cache_dir = "../../out/ckpt_a"
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+wall_margin_cells = 2
+decimate_ratio = 0.5

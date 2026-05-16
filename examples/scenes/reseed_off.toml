@@ -1,0 +1,30 @@
+# Step 10 control: same as reseed_demo.toml but reseed disabled.
+
+[domain]
+resolution = [64, 64, 64]
+
+[fluid]
+type = "box"
+lo = [0.06, 0.30, 0.06]
+hi = [0.40, 0.85, 0.40]
+ppc = 8
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+pressure_solver = "jacobi"
+transfer_mode = "flip"
+gravity = -9.81
+frames = 180
+fps = 24
+reseed = false
+
+[output]
+cache_dir = "../../out/reseed_off"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2
+usd = false

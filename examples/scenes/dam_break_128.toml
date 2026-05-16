@@ -1,0 +1,33 @@
+# Step 20 demo: 128³ dam-break. Showcase that 128³ fluid sims with per-frame
+# meshing are now realtime-feasible thanks to M5.4 (wp.MarchingCubes).
+#
+# At 128³ the CPU skimage MC was ~40 ms/frame — the dominant frame cost above
+# the 24fps budget. GPU MC drops it to ~5 ms, leaving the pressure solver as
+# the new bottleneck.
+
+[domain]
+resolution = [128, 128, 128]
+
+[fluid]
+type = "box"
+lo = [0.05, 0.10, 0.10]
+hi = [0.40, 0.85, 0.90]
+ppc = 8
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+pressure_solver = "jacobi"
+flip_blend = 0.95
+gravity = -9.81
+frames = 90
+fps = 24
+
+[output]
+cache_dir = "../../out/dam_break_128"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2

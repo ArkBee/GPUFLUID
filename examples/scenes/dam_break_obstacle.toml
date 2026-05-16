@@ -1,0 +1,32 @@
+# Example scene config for `gpufluid simulate`.
+# Reproduces the dam_break_obstacle_3d demo via the CLI.
+
+[domain]
+resolution = [64, 64, 64]
+
+[fluid]
+type = "box"
+lo = [0.06, 0.06, 0.06]
+hi = [0.30, 0.70, 0.95]
+ppc = 8
+
+[[obstacle]]
+type = "cylinder_y"
+center = [0.50, 0.30, 0.50]
+radius = 0.10
+half_height = 0.30
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+flip_blend = 0.95
+gravity = -9.81
+frames = 60
+fps = 24
+
+[output]
+cache_dir = "../../out/cli_dam_break_obstacle"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+particles = false

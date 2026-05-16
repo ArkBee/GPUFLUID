@@ -1,0 +1,41 @@
+# Step 8: wake test. A SHALLOW pool covers the whole floor.
+# A large sphere (animated mesh obstacle, D4.6 + D4.3.GPU) moves across the
+# surface — wake / displacement should be obvious from a side view.
+
+[domain]
+resolution = [80, 32, 80]   # wide & flat — better aspect for a pool
+
+[fluid]
+type = "box"
+lo = [0.05, 0.04, 0.05]
+hi = [0.95, 0.20, 0.95]
+ppc = 8
+
+# Big sphere, partially submerged, drags across +X over the whole video.
+[[obstacle]]
+type = "mesh"
+path = "ball_big.obj"
+scale = 1.0
+translate = [-0.25, 0.13, 0.50]
+motion = { kind = "linear", velocity = [0.55, 0.0, 0.0] }
+
+[simulation]
+dt = 0.004
+pressure_iters = 30
+pressure_solver = "gsrb"
+transfer_mode = "flip"
+gravity = -9.81
+frames = 90
+fps = 24
+reseed = true
+reseed_every_n_frames = 5
+
+[output]
+cache_dir = "../../out/torus_punch"
+mesh = true
+iso_level = 0.55
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 1
+usd = false

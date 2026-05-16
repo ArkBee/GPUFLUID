@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+
+id = "gpufluid_blender"
+version = "0.0.2"
+name = "gpufluid"
+tagline = "GPU FLIP fluid simulator (NVIDIA Warp)"
+maintainer = "gpufluid contributors"
+type = "add-on"
+website = "https://example.invalid/gpufluid"
+tags = ["Physics"]
+
+blender_version_min = "4.5.0"
+license = ["SPDX:GPL-3.0-or-later"]

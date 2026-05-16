@@ -1,0 +1,30 @@
+# Control for step 8: same shallow pool, no moving sphere.
+[domain]
+resolution = [80, 32, 80]
+
+[fluid]
+type = "box"
+lo = [0.05, 0.04, 0.05]
+hi = [0.95, 0.20, 0.95]
+ppc = 8
+
+[simulation]
+dt = 0.004
+pressure_iters = 30
+pressure_solver = "gsrb"
+transfer_mode = "flip"
+gravity = -9.81
+frames = 90
+fps = 24
+reseed = true
+reseed_every_n_frames = 5
+
+[output]
+cache_dir = "../../out/no_torus"
+mesh = true
+iso_level = 0.55
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 1
+usd = false

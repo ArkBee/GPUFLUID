@@ -1,0 +1,36 @@
+# Step 17 ablation B: cube relaxes to sphere under surface tension.
+# Tuned for stability (Brackbill-Kothe CSF needs adequate resolution +
+# CFL substepping + a touch of viscosity to damp parasitic currents on
+# a 48³ grid).
+
+[domain]
+resolution = [48, 48, 48]
+
+[fluid]
+type = "box"
+lo = [0.30, 0.30, 0.30]
+hi = [0.70, 0.70, 0.70]
+ppc = 8
+
+[simulation]
+dt = 0.005
+pressure_iters = 50
+pressure_solver = "jacobi"
+flip_blend = 0.0           # pure PIC so CSF effect is visible
+gravity = 0.0
+surface_tension = 1.0       # σ; tuned with dx=1/48 → dt_csf ≈ 1.06 ms
+csf_smoothing_passes = 3    # wider band → smoother κ → fewer parasitic currents
+viscosity = 0.05            # mild damping to suppress slow drift mode
+viscosity_iters = 8
+cfl = true                  # MANDATORY when σ>0 (capillary CFL clamp, S2.14.5)
+cfl_max_substeps = 64
+frames = 60
+fps = 24
+
+[output]
+cache_dir = "../../out/surftens_on"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"

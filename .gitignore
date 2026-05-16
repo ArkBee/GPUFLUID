@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Bake artifacts — caches are huge (1.5 GB+), keep only the demo videos.
+out/*
+!out/videos/
+out/videos/*.tmp.mp4
+
+# Blender addon zip (rebuildable)
+addon/gpufluid_blender.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Generated obstacle/fluid meshes from examples (regenerable)
+examples/scenes/*.obj

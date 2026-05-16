@@ -1,0 +1,52 @@
+# Step 21 demo: S2.11.GPU reseed in a continuous-flow scene.
+#
+# Tuning lesson: reseed is *corrective*, not generative. Setting it too
+# aggressive (high `min_per_cell` or low `every_n_frames`) on a sparse
+# scene makes it emit/cull >100k particles per pass, churning the entire
+# fluid every few frames → visible "loop" artefact in the render.
+# The values below are the ones that actually produce a clean drain
+# animation while still demonstrating GPU reseed wins.
+
+[domain]
+resolution = [80, 80, 80]
+
+[fluid]
+type = "box"
+lo = [0.05, 0.45, 0.05]
+hi = [0.95, 0.95, 0.95]
+ppc = 8
+
+[[inflow]]
+lo = [0.20, 0.85, 0.30]
+hi = [0.45, 0.95, 0.70]
+velocity = [0.0, -3.0, 0.0]
+rate_per_sec = 60000
+frame_start = 0
+frame_end = 60
+
+[[outflow]]
+lo = [0.85, 0.0, 0.0]
+hi = [1.0, 0.06, 1.0]
+
+[simulation]
+dt = 0.005
+pressure_iters = 50
+pressure_solver = "jacobi"
+flip_blend = 0.95
+gravity = -9.81
+reseed = true
+reseed_min_per_cell = 2     # less aggressive: only fill near-voids
+reseed_max_per_cell = 16
+reseed_every_n_frames = 15  # let particles move between passes
+frames = 90
+fps = 24
+
+[output]
+cache_dir = "../../out/reseed_large"
+mesh = true
+particles = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2

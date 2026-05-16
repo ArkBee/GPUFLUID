@@ -1,0 +1,39 @@
+# Step 18 demo: two coloured cubes drop into a shared basin and mix.
+# Red box on the left, blue on the right, gravity pulls them together —
+# particles in the contact zone pick up the blended (purple-ish) color
+# via S2.15.1 P2G + S2.15.3 G2P.
+
+[domain]
+resolution = [40, 40, 40]
+
+[[fluids]]
+type = "box"
+lo = [0.10, 0.40, 0.30]
+hi = [0.40, 0.65, 0.70]
+ppc = 8
+color = [1.0, 0.10, 0.10]   # red
+
+[[fluids]]
+type = "box"
+lo = [0.60, 0.40, 0.30]
+hi = [0.90, 0.65, 0.70]
+ppc = 8
+color = [0.10, 0.20, 1.0]   # blue
+
+[simulation]
+dt = 0.005
+pressure_iters = 50
+pressure_solver = "jacobi"
+flip_blend = 0.90
+gravity = -9.81
+frames = 90
+fps = 24
+
+[output]
+cache_dir = "../../out/two_color_drop"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+particles = true   # need particles for color rendering
