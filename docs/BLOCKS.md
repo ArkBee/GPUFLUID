@@ -30,14 +30,14 @@ passing pytest; **plan** = declared but not yet written.
 | S2.5     | Divergence                                 | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.6.1   | Jacobi pressure iteration                  | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.6.2   | Gauss–Seidel red-black                     | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
-| S2.6.3   | PCG                                        | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
+| S2.6.3   | PCG (+ on-device stop-flag, Option A 9/9)  | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.7     | Subtract pressure gradient                 | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.8     | G2P + FLIP/PIC blend                       | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.9     | Particle advection + clamp                 | S2    | `gpufluid/solvers/solver3d.py`               | impl |
 | S2.10    | CFL substep count (host helper)            | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.10.GPU | GPU vmax atomic_max reduction              | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.6.4   | Block-sparse Jacobi pressure (skip empty)  | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
-| S2.16    | Active-block bitmask builder               | S2    | `gpufluid/solvers/solver3d.py`               | impl,test |
+| S2.16    | Active-block bitmask + n_active_dev mirror (Option B) | S2 | `gpufluid/solvers/solver3d.py`               | impl,test |
 | S2.11    | Particle reseed                            | S2    | `gpufluid/sim/reseed.py`                     | impl,test |
 | S2.11.GPU | GPU reseed (count + rank + compact + emit) | S2    | `gpufluid/sim/reseed.py`                     | impl,test |
 | S2.11.GPU.COUNT | Atomic per-cell particle count       | S2    | `gpufluid/sim/reseed.py`                     | impl,test |

@@ -44,3 +44,10 @@ whitewater = true
 whitewater_speed_threshold = 3.5
 whitewater_emit_per_frame_max = 3000
 whitewater_total_cap = 60000
+# B3.5 (2026-05-16): switched to the W7.7 trapped-air potential selector.
+# Without this flag the emit budget went to any fast-moving bulk fluid;
+# with it on, the budget concentrates on genuine turbulence pockets near
+# the impact zone. Step23 already shows the A/B on a side-by-side; step22
+# now reflects the v0.8 default of "potential, not speed threshold."
+whitewater_use_potential = true
+whitewater_potential_v_max = 8.0

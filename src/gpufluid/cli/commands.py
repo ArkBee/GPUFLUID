@@ -248,16 +248,20 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 reseed_particles, reseed_particles_gpu, RESEED_GPU_THRESHOLD)
             import warp as wp
             if solver.n_particles >= RESEED_GPU_THRESHOLD:
-                new_pos_wp, new_vel_wp, new_col_wp, n_emit, n_cull = reseed_particles_gpu(
+                (new_pos_wp, new_vel_wp, new_col_wp, new_temp_wp,
+                 n_emit, n_cull) = reseed_particles_gpu(
                     solver.pos, solver.vel, solver.marker, solver.dx, reseed_cfg,
                     rng_reseed,
                     attr_color_wp=solver.attr_color,
+                    attr_temperature_wp=solver.attr_temperature,
                     device=solver.device)
                 if n_emit > 0 or n_cull > 0:
                     solver.pos = new_pos_wp
                     solver.vel = new_vel_wp
                     if new_col_wp is not None:
                         solver.attr_color = new_col_wp
+                    if new_temp_wp is not None:
+                        solver.attr_temperature = new_temp_wp
                     solver.affine_C = None
                     solver.n_particles = int(new_pos_wp.shape[0])
             else:

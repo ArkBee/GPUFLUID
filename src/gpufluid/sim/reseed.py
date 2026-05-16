@@ -228,6 +228,20 @@ def k_scatter_alive_color(
         color_out[prefix[i] - 1] = color_in[i]
 
 
+@wp.kernel
+def k_scatter_alive_scalar(
+    scalar_in: wp.array(dtype=float),
+    alive: wp.array(dtype=int),
+    prefix: wp.array(dtype=int),
+    scalar_out: wp.array(dtype=float),
+):
+    """B11.3 follow-up — sibling of `k_scatter_alive_color` for the S2.18
+    scalar attribute (temperature). Same compaction pattern."""
+    i = wp.tid()
+    if alive[i] == 1:
+        scalar_out[prefix[i] - 1] = scalar_in[i]
+
+
 @block("S2.11.GPU", "GPU reseed orchestrator: count → rank-cull → compact → emit")
 def reseed_particles_gpu(
     pos_wp: wp.array,
@@ -237,14 +251,19 @@ def reseed_particles_gpu(
     cfg: ReseedConfig,
     rng: np.random.Generator,
     attr_color_wp: Optional[wp.array] = None,
+    attr_temperature_wp: Optional[wp.array] = None,
     device: Optional[str] = None,
-) -> Tuple[wp.array, wp.array, Optional[wp.array], int, int]:
-    """Return ``(new_pos_wp, new_vel_wp, new_color_wp, n_emitted, n_culled)``.
+) -> Tuple[wp.array, wp.array, Optional[wp.array], Optional[wp.array], int, int]:
+    """Return ``(new_pos_wp, new_vel_wp, new_color_wp, new_temperature_wp,
+    n_emitted, n_culled)``.
 
-    ``attr_color_wp`` is optional; if provided it's compacted in lockstep
-    with positions/velocities. Output Warp arrays are fresh allocations
-    (the caller's old buffers can be dropped). Velocities of emitted
-    particles are zero; their colour is white (1,1,1)."""
+    ``attr_color_wp`` / ``attr_temperature_wp`` are optional; if provided
+    they're compacted in lockstep with positions/velocities.
+    Output Warp arrays are fresh allocations (the caller's old buffers
+    can be dropped). Velocities of emitted particles are zero; their
+    colour is white (1,1,1); their temperature is 0.0 (the next G2P
+    sweep paints them from the surrounding grid temperature field).
+    """
     import warp.utils as wputils
     dev = device or default_device()
     n = pos_wp.shape[0]
@@ -280,11 +299,18 @@ def reseed_particles_gpu(
             wp.launch(k_scatter_alive_color, dim=n,
                       inputs=[attr_color_wp, alive, prefix, color_kept],
                       device=dev)
+        temp_kept = None
+        if attr_temperature_wp is not None:
+            temp_kept = wp.zeros(max(n_alive, 1), dtype=float, device=dev)
+            wp.launch(k_scatter_alive_scalar, dim=n,
+                      inputs=[attr_temperature_wp, alive, prefix, temp_kept],
+                      device=dev)
     else:
         n_alive = 0
         pos_kept = wp.zeros(0, dtype=wp.vec3, device=dev)
         vel_kept = wp.zeros(0, dtype=wp.vec3, device=dev)
         color_kept = wp.zeros(0, dtype=wp.vec3, device=dev) if attr_color_wp is not None else None
+        temp_kept = wp.zeros(0, dtype=float, device=dev) if attr_temperature_wp is not None else None
     n_culled = n - n_alive
 
     # 4) Build emit list on host (small, O(cells with deficit), not O(particles))
@@ -296,7 +322,13 @@ def reseed_particles_gpu(
     deficit[~fluid] = 0
     n_emit = int(deficit.sum())
     if n_emit == 0:
-        return pos_kept[:n_alive], vel_kept[:n_alive], (color_kept[:n_alive] if color_kept is not None else None), 0, n_culled
+        return (
+            pos_kept[:n_alive],
+            vel_kept[:n_alive],
+            (color_kept[:n_alive] if color_kept is not None else None),
+            (temp_kept[:n_alive] if temp_kept is not None else None),
+            0, n_culled,
+        )
 
     # repeat (i,j,k) by deficit count, then jitter
     idx_nz = np.argwhere(deficit > 0)
@@ -322,4 +354,14 @@ def reseed_particles_gpu(
         new_color_np = np.concatenate([color_kept_np, emit_col], axis=0)
         new_color = wp.array(new_color_np, dtype=wp.vec3, device=dev)
 
-    return new_pos, new_vel, new_color, n_emit, n_culled
+    new_temperature = None
+    if temp_kept is not None:
+        temp_kept_np = temp_kept[:n_alive].numpy() if n_alive > 0 else np.zeros(0, dtype=np.float32)
+        # Emitted particles get T=0.0 — neutral; the next G2P sweep
+        # paints them from the surrounding grid temperature field (same
+        # design as the colour path's "white" emit value).
+        emit_t = np.zeros(n_emit, dtype=np.float32)
+        new_temperature_np = np.concatenate([temp_kept_np, emit_t], axis=0)
+        new_temperature = wp.array(new_temperature_np, dtype=float, device=dev)
+
+    return new_pos, new_vel, new_color, new_temperature, n_emit, n_culled

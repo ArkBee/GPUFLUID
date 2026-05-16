@@ -504,10 +504,12 @@ Sized roughly by session-count and grouped by where they unblock.
   session — pre-B11.3 stack of 8 commits delivered with a one-shot
   PAT). B11.3 commits land on top after the user runs the Windows-side
   verification.
-- **`docs/BLOCKS.md` lags reality** — fast iteration this session added
-  S2.6.5, S2.6.6, S2.14.6_dev, S2.18.1/2/3, G1.9 plus new test rows
-  without a full BLOCKS rewrite. `gpufluid info` is the source of
-  truth for what's registered; DESIGN.md for architecture intent.
+- **`docs/BLOCKS.md` is in sync as of session end** — S2.6.5, S2.6.6,
+  S2.14.6_dev, S2.18.1/2/3, G1.9 all have rows; S2.6.3 and S2.16
+  descriptions bumped to mention the Options A / B helpers
+  (`_pcg_done`, `_n_active_dev` + `k_store_n_active`). `gpufluid info`
+  remains the source of truth (80 unique IDs / 103 callables after
+  this session — +1 callable from `k3_check_converged`).
 - **CSF S2.14.6 has TWO kernel variants now:**
   `k3_csf_subtract_bias_{u,v,w}` (legacy, takes host-computed `bias`)
   vs `_dev` siblings (read sum/count from device). `_apply_surface_tension`

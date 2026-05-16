@@ -43,7 +43,7 @@ def test_gpu_reseed_matches_cpu_counts():
     pos_wp = wp.array(pos, dtype=wp.vec3, device="cuda:0")
     vel_wp = wp.array(vel, dtype=wp.vec3, device="cuda:0")
     marker_wp = wp.array(marker, dtype=int, device="cuda:0")
-    _, _, _, ne_gpu, nc_gpu = reseed_particles_gpu(
+    _, _, _, _, ne_gpu, nc_gpu = reseed_particles_gpu(
         pos_wp, vel_wp, marker_wp, dx, cfg, np.random.default_rng(0))
     _, _, ne_cpu, nc_cpu = reseed_particles(
         pos, vel, marker, dx, cfg, np.random.default_rng(0))
@@ -60,7 +60,7 @@ def test_gpu_reseed_bounds_per_cell_counts():
     pos_wp = wp.array(pos, dtype=wp.vec3, device="cuda:0")
     vel_wp = wp.array(vel, dtype=wp.vec3, device="cuda:0")
     marker_wp = wp.array(marker, dtype=int, device="cuda:0")
-    new_pos, _, _, _, _ = reseed_particles_gpu(
+    new_pos, _, _, _, _, _ = reseed_particles_gpu(
         pos_wp, vel_wp, marker_wp, dx, cfg, np.random.default_rng(0))
     p = new_pos.numpy()
     # Bin into 32³ cells and check max count
@@ -133,7 +133,7 @@ def test_gpu_reseed_color_lockstep():
     vel_wp = wp.array(vel, dtype=wp.vec3, device="cuda:0")
     col_wp = wp.array(col, dtype=wp.vec3, device="cuda:0")
     marker_wp = wp.array(marker, dtype=int, device="cuda:0")
-    new_pos, _, new_col, n_emit, _ = reseed_particles_gpu(
+    new_pos, _, new_col, _, n_emit, _ = reseed_particles_gpu(
         pos_wp, vel_wp, marker_wp, dx, cfg, np.random.default_rng(0),
         attr_color_wp=col_wp)
     c = new_col.numpy()
@@ -144,3 +144,43 @@ def test_gpu_reseed_color_lockstep():
     kept = c[:-n_emit]
     assert (kept[:, 0] > 0.99).all() and (kept[:, 1] < 0.01).all() \
         and (kept[:, 2] < 0.01).all(), "kept particles lost their red colour"
+
+
+def test_gpu_reseed_temperature_lockstep():
+    """B11.3 follow-up: scalar attribute (temperature) compacts in lockstep
+    with positions/colours, mirroring the S2.15 `attr_color` path. Without
+    this, scenes with `reseed=true` + per-source temperature lost the
+    scalar on the first reseed pass.
+
+    Pre-fix the function didn't have `attr_temperature_wp` kwarg at all;
+    the keyword would have raised TypeError. So this test is also the
+    surface-area pin for the new API.
+    """
+    pos, vel, marker = _random_particles(60_000, 24, 1.0 / 24.0)
+    # Every input particle is hot (T=80). Emitted particles should land
+    # at T=0 (the "neutral" emit value, mirroring colour's "white" emit).
+    temps = np.full(len(pos), 80.0, dtype=np.float32)
+    cfg = ReseedConfig(min_per_cell=4, max_per_cell=16)
+    dx = 1.0 / 24.0
+
+    pos_wp = wp.array(pos, dtype=wp.vec3, device="cuda:0")
+    vel_wp = wp.array(vel, dtype=wp.vec3, device="cuda:0")
+    temp_wp = wp.array(temps, dtype=float, device="cuda:0")
+    marker_wp = wp.array(marker, dtype=int, device="cuda:0")
+    new_pos, _, _, new_temp, n_emit, _ = reseed_particles_gpu(
+        pos_wp, vel_wp, marker_wp, dx, cfg, np.random.default_rng(0),
+        attr_temperature_wp=temp_wp)
+
+    assert new_temp is not None, \
+        "reseed must return new_temperature when attr_temperature_wp is set"
+    assert new_temp.shape[0] == new_pos.shape[0], \
+        "temperature array length must match positions in lockstep"
+    t = new_temp.numpy()
+    assert n_emit > 0, "no particles emitted — pick a sparser scene"
+    # Last `n_emit` rows: neutral emit value (0.0).
+    assert np.allclose(t[-n_emit:], 0.0), \
+        "emitted particles should get the neutral T=0.0 emit value"
+    # Kept rows: T=80 preserved.
+    kept = t[:-n_emit]
+    assert np.allclose(kept, 80.0, atol=1e-4), \
+        "kept particles lost their original temperature"
