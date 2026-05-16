@@ -1593,7 +1593,10 @@ def k3_apply_A(  # A·x — same stencil as Jacobi: diag*x - sum_nb (on fluid ce
     x: wp.array3d(dtype=float),
     y: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
+    done: wp.array(dtype=int),
 ):
+    if done[0] != 0:
+        return
     i, j, k = wp.tid()
     nx = x.shape[0]; ny = x.shape[1]; nz = x.shape[2]
     if i >= nx or j >= ny or k >= nz:
@@ -1659,7 +1662,10 @@ def k3_compute_diag(marker: wp.array3d(dtype=int), diag: wp.array3d(dtype=float)
 
 @wp.kernel
 def k3_apply_invM(r: wp.array3d(dtype=float), diag: wp.array3d(dtype=float),
-                  z: wp.array3d(dtype=float), marker: wp.array3d(dtype=int)):
+                  z: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
+                  done: wp.array(dtype=int)):
+    if done[0] != 0:
+        return
     i, j, k = wp.tid()
     if i >= r.shape[0] or j >= r.shape[1] or k >= r.shape[2]:
         return
@@ -1684,7 +1690,10 @@ def k3_axpy(a: float, x: wp.array3d(dtype=float), y: wp.array3d(dtype=float),
 
 @wp.kernel
 def k3_dot_fluid(a: wp.array3d(dtype=float), b: wp.array3d(dtype=float),
-                 out: wp.array(dtype=float), marker: wp.array3d(dtype=int)):
+                 out: wp.array(dtype=float), marker: wp.array3d(dtype=int),
+                 done: wp.array(dtype=int)):
+    if done[0] != 0:
+        return
     i, j, k = wp.tid()
     if i >= a.shape[0] or j >= a.shape[1] or k >= a.shape[2]:
         return
@@ -1693,7 +1702,9 @@ def k3_dot_fluid(a: wp.array3d(dtype=float), b: wp.array3d(dtype=float),
 
 
 @wp.kernel
-def k3_zero_scalar(s: wp.array(dtype=float)):
+def k3_zero_scalar(s: wp.array(dtype=float), done: wp.array(dtype=int)):
+    if done[0] != 0:
+        return
     s[0] = 0.0
 
 
@@ -1702,8 +1713,12 @@ def k3_zero_scalar(s: wp.array(dtype=float)):
 @wp.kernel
 def k3_div_scalar(numer: wp.array(dtype=float),
                   denom: wp.array(dtype=float),
-                  out: wp.array(dtype=float)):
-    """out[0] = numer[0] / denom[0] (with epsilon to avoid div by zero)."""
+                  out: wp.array(dtype=float),
+                  done: wp.array(dtype=int)):
+    """out[0] = numer[0] / denom[0] (with epsilon to avoid div by zero).
+    No-op when the PCG `done` flag is set."""
+    if done[0] != 0:
+        return
     d = denom[0]
     if wp.abs(d) < 1.0e-30:
         out[0] = 0.0
@@ -1712,8 +1727,49 @@ def k3_div_scalar(numer: wp.array(dtype=float),
 
 
 @wp.kernel
-def k3_copy_scalar(src: wp.array(dtype=float), dst: wp.array(dtype=float)):
+def k3_copy_scalar(src: wp.array(dtype=float), dst: wp.array(dtype=float),
+                   done: wp.array(dtype=int)):
+    """dst[0] = src[0]  — no-op once the PCG `done` flag is set, so the
+    captured-graph replay short-circuits once convergence is detected.
+    Pass an always-zero `done` buffer to keep this a plain copy."""
+    if done[0] != 0:
+        return
     dst[0] = src[0]
+
+
+# B5/A — PCG graph-eligibility helpers (on-device convergence check).
+# `_pcg_done`  : single int.  0 = keep iterating, 1 = converged.
+# `_pcg_tol_sq`: single float. tol² * r0_norm² (computed on-device once
+#                per solve).
+# `k3_zero_int_scalar` zeroes _pcg_done at the start of each call.
+# `k3_set_tol_sq`      computes _pcg_tol_sq from r0_norm².
+# `k3_check_converged` sets _pcg_done = 1 when r_norm² < _pcg_tol_sq.
+# All three are 1-thread launches; the cost is dominated by launch
+# overhead (~3 µs) and disappears against the per-iter kernel sequence.
+
+@wp.kernel
+def k3_zero_int_scalar(s: wp.array(dtype=int)):
+    s[0] = 0
+
+
+@wp.kernel
+def k3_set_tol_sq(r0_norm2: wp.array(dtype=float),
+                  tol: float,
+                  tol_sq: wp.array(dtype=float)):
+    """tol_sq[0] = tol² * r0_norm²[0]."""
+    tol_sq[0] = tol * tol * r0_norm2[0]
+
+
+@wp.kernel
+def k3_check_converged(r_norm2: wp.array(dtype=float),
+                       tol_sq: wp.array(dtype=float),
+                       done: wp.array(dtype=int)):
+    """If r_norm²[0] < tol_sq[0], set done[0] = 1. Idempotent."""
+    if r_norm2[0] < tol_sq[0]:
+        done[0] = 1
+
+
+block("S2.6.3", "PCG on-device convergence-check (stop flag)")(k3_check_converged)
 
 
 # v0.6 — D4.7 GPU compaction kernels (stream compaction via prefix scan)
@@ -1764,8 +1820,12 @@ def k3_axpy_devscalar(
     a_dev: wp.array(dtype=float), sign: float,
     x: wp.array3d(dtype=float), y_in: wp.array3d(dtype=float),
     y_out: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
+    done: wp.array(dtype=int),
 ):
-    """y_out = y_in + sign * a_dev[0] * x  (on fluid cells)."""
+    """y_out = y_in + sign * a_dev[0] * x  (on fluid cells). No-op when
+    the PCG `done` flag is set."""
+    if done[0] != 0:
+        return
     i, j, k = wp.tid()
     if i >= x.shape[0] or j >= x.shape[1] or k >= x.shape[2]:
         return
@@ -2525,6 +2585,18 @@ class FlipSolver3D:
             self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
             self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
             self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
+            # A — graph-eligibility helpers (on-device convergence check).
+            self._pcg_done = wp.zeros(1, dtype=int, device=dev)
+            self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
+
+        # Reset the per-call stop flag. From this point on, every iter-
+        # body kernel below is gated on `_pcg_done` — once converged, the
+        # remaining launches early-return in their first line. That keeps
+        # the kernel SEQUENCE constant (good for CUDA-graph capture) while
+        # still respecting `tol`.
+        wp.launch(k3_zero_int_scalar, dim=1,
+                  inputs=[self._pcg_done], device=dev)
+        done = self._pcg_done
 
         wp.launch(k3_compute_diag, dim=(nx, ny, nz),
                   inputs=[self.marker, self._pcg_diag], device=dev)
@@ -2532,17 +2604,23 @@ class FlipSolver3D:
         self.p.zero_()
         wp.copy(self._pcg_r, self.div)
         wp.launch(k3_apply_invM, dim=(nx, ny, nz),
-                  inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker], device=dev)
+                  inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker, done],
+                  device=dev)
         wp.copy(self._pcg_p, self._pcg_z)
 
         def dev_dot(a, b, out):
-            wp.launch(k3_zero_scalar, dim=1, inputs=[out], device=dev)
+            wp.launch(k3_zero_scalar, dim=1, inputs=[out, done], device=dev)
             wp.launch(k3_dot_fluid, dim=(nx, ny, nz),
-                      inputs=[a, b, out, self.marker], device=dev)
+                      inputs=[a, b, out, self.marker, done], device=dev)
 
         # rz_old = r·z, r0_norm² = r·r  — both on device
         dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_old)
         dev_dot(self._pcg_r, self._pcg_r, self._pcg_r0_norm2)
+        # tol² × r0_norm² lives on the device so the per-iter convergence
+        # check (`k3_check_converged`) can read it without a host sync.
+        wp.launch(k3_set_tol_sq, dim=1,
+                  inputs=[self._pcg_r0_norm2, float(tol), self._pcg_tol_sq],
+                  device=dev)
 
         tol_sq = 0.0
         if not _no_host_sync:
@@ -2554,38 +2632,49 @@ class FlipSolver3D:
 
         for it in range(max_iter):
             wp.launch(k3_apply_A, dim=(nx, ny, nz),
-                      inputs=[self._pcg_p, self._pcg_Ap, self.marker], device=dev)
+                      inputs=[self._pcg_p, self._pcg_Ap, self.marker, done], device=dev)
             dev_dot(self._pcg_p, self._pcg_Ap, self._pcg_pAp)
             wp.launch(k3_div_scalar, dim=1,
-                      inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha], device=dev)
+                      inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha, done],
+                      device=dev)
             # x += α p
             wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
-                      inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p, self.marker],
+                      inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p, self.marker, done],
                       device=dev)
             # r -= α Ap
             wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
-                      inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r, self._pcg_r, self.marker],
+                      inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r, self._pcg_r, self.marker, done],
                       device=dev)
-            # convergence check: only when host-syncs are permitted
-            if not _no_host_sync and ((it + 1) % check_every == 0 or it == max_iter - 1):
+            # Convergence check — emitted every `check_every` iters and at
+            # the final iter. The Python `if` runs at capture time, so the
+            # graph bakes in the same cadence as the host-sync path.
+            if (it + 1) % check_every == 0 or it == max_iter - 1:
                 dev_dot(self._pcg_r, self._pcg_r, self._pcg_r_norm2)
-                if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
-                    return it + 1
+                if _no_host_sync:
+                    # Set `done` on device; subsequent iter kernels no-op.
+                    wp.launch(k3_check_converged, dim=1,
+                              inputs=[self._pcg_r_norm2, self._pcg_tol_sq, done],
+                              device=dev)
+                else:
+                    # Host-sync path keeps the early-return Python control flow.
+                    if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
+                        return it + 1
             # z = M⁻¹ r
             wp.launch(k3_apply_invM, dim=(nx, ny, nz),
-                      inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker], device=dev)
+                      inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker, done], device=dev)
             # rz_new = r·z
             dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_new)
             # β = rz_new / rz_old
             wp.launch(k3_div_scalar, dim=1,
-                      inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta], device=dev)
+                      inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta, done],
+                      device=dev)
             # p = z + β p
             wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
-                      inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z, self._pcg_p, self.marker],
+                      inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z, self._pcg_p, self.marker, done],
                       device=dev)
             # rz_old ← rz_new
             wp.launch(k3_copy_scalar, dim=1,
-                      inputs=[self._pcg_rz_new, self._pcg_rz_old], device=dev)
+                      inputs=[self._pcg_rz_new, self._pcg_rz_old, done], device=dev)
         return max_iter
 
     # ---------- internal: per-tile (block-sparse) PCG (S2.6.6 / B4.2) -------
@@ -2639,6 +2728,15 @@ class FlipSolver3D:
             self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
             self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
             self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
+            self._pcg_done = wp.zeros(1, dtype=int, device=dev)
+            self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
+
+        # Sparse PCG keeps host-sync convergence — graph capture is not
+        # enabled for the sparse path until Option B (n_active_dev) lands.
+        # Still pass the always-zero `done` buffer to the shared 1-thread
+        # scalar kernels (their signature now requires it).
+        wp.launch(k3_zero_int_scalar, dim=1, inputs=[self._pcg_done], device=dev)
+        done = self._pcg_done
 
         # Diag: still cheap, launch dense. (One-shot per step.)
         wp.launch(k3_compute_diag, dim=(nx, ny, nz),
@@ -2659,7 +2757,7 @@ class FlipSolver3D:
         wp.copy(self._pcg_p, self._pcg_z)
 
         def dev_dot(a, b, out):
-            wp.launch(k3_zero_scalar, dim=1, inputs=[out], device=dev)
+            wp.launch(k3_zero_scalar, dim=1, inputs=[out, done], device=dev)
             wp.launch(k3_dot_fluid_per_tile, dim=tile_dim,
                       inputs=[a, b, out, self.marker, coords, bs], device=dev)
 
@@ -2676,7 +2774,7 @@ class FlipSolver3D:
                               coords, bs], device=dev)
             dev_dot(self._pcg_p, self._pcg_Ap, self._pcg_pAp)
             wp.launch(k3_div_scalar, dim=1,
-                      inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha],
+                      inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha, done],
                       device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p,
@@ -2693,13 +2791,13 @@ class FlipSolver3D:
                               self.marker, coords, bs], device=dev)
             dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_new)
             wp.launch(k3_div_scalar, dim=1,
-                      inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta],
+                      inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta, done],
                       device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z,
                               self._pcg_p, self.marker, coords, bs], device=dev)
             wp.launch(k3_copy_scalar, dim=1,
-                      inputs=[self._pcg_rz_new, self._pcg_rz_old], device=dev)
+                      inputs=[self._pcg_rz_new, self._pcg_rz_old, done], device=dev)
         return max_iter
 
     # ----------------------------------------------------------- S2.14 CSF
@@ -2829,21 +2927,24 @@ class FlipSolver3D:
         `surface_tension > 0` (CSF) is now allowed — that's the biggest
         v0.8 user-facing win since most demo scenes use σ.
 
+        A (this session): **PCG** is now eligible via the on-device
+        stop-flag pattern. After each per-iter `r·r`, `k3_check_converged`
+        sets `_pcg_done = 1` on device; subsequent iter kernels early-
+        return on `done[0] != 0`. The kernel *sequence* stays constant
+        (good for graph capture) while behaviour still respects `tol`.
+        Past-convergence kernels still launch (paying ~3-5 µs each) but
+        do zero work, so net per-step time matches or beats the host-
+        sync path on scenes that converge early.
+
         Still excluded:
-          * **PCG** — the algorithm itself is sync-free under
-            `_no_host_sync=True` (refactor lives in `_pressure_pcg`),
-            but forcing `max_iter` every step regresses scenes that
-            normally converge early. Real-scene bench on `big_pcg`
-            showed a NET slowdown despite the launch-overhead saving.
-            Track upstream Warp for an on-device "early exit" idiom
-            (or implement a stop-flag pattern) and re-enable then.
           * **`pressure_block_sparse=True`** — `_build_active_blocks`
             reads `n_active.numpy()`. Fixing this needs the per-tile
-            kernels to launch at worst-case dim and cap in-kernel.
+            kernels to launch at worst-case dim and cap in-kernel
+            (Option B / `n_active_dev` device buffer).
         """
         if pressure_block_sparse:
             return False
-        return pressure_solver in ("jacobi", "gsrb")
+        return pressure_solver in ("jacobi", "gsrb", "pcg")
 
     def _cuda_graph_make_key(self, dt: float, pressure_iters: int,
                               pressure_solver: str,

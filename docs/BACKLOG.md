@@ -23,7 +23,7 @@ which milestone we're inside.
 |---------|--------------------------|--------------------------------|---------------|--------|
 | v0.7    | Solver feature complete  | (10-item original roadmap)     | done          | ✅ closed 2026-05-16 |
 | **v0.8** | **"Reachable" — Blender exposes the v0.7 features** | **Tier 1: B1, B2, B3**     | **3-5**       | **▶ next** |
-| v0.9    | "Production-fast" — hot path squeezed              | Tier 2: B4, B5, B6 + B11, B12  | 4-6           | ✅ closed 2026-05-16 (B5 ships 6/9 graph configs; sparse-graph + PCG-graph deferred to v1.x polish) |
+| v0.9    | "Production-fast" — hot path squeezed              | Tier 2: B4, B5, B6 + B11, B12  | 4-6           | ✅ closed 2026-05-16 (B5 ships 8/9 graph configs after Option A; sparse-graph deferred to v1.x polish — Option B) |
 | v1.0    | "Scale" — 256³+ scenes via sparse storage          | Tier 3: B7 (aborted, see B7.1) → B7-alt deferred-allocation | 3-5 | ⚠ pivoted 2026-05-16 |
 | v1.x+   | Research extensions      | B8 differentiable, B9 multi-GPU | open-ended    | optional |
 
@@ -138,7 +138,7 @@ pressure paths and are bigger wins at scale. Same compaction infrastructure.
 
 **Acceptance:** scenes using `pressure_solver = "gsrb"` or `"pcg"` get the block-sparse path automatically and the regression tests pass.
 
-### B5. CUDA-graphs capture for the per-step kernel sequence `risk:med value:infra` ✅ closed 2026-05-16 (6 of 9 configs eligible, including CSF)
+### B5. CUDA-graphs capture for the per-step kernel sequence `risk:med value:infra` ✅ closed 2026-05-16 (8 of 9 configs eligible after Option A)
 
 Each step() does 20+ `wp.launch` calls. CUDA graphs would record them once
 and replay each step, eliminating launch overhead. Warp supports
@@ -150,16 +150,16 @@ and replay each step, eliminating launch overhead. Warp supports
 * [x] B5.4 — Pytest: same numerical output with/without graphs. *(2026-05-16: `test_b5_2_replay_matches_direct_to_fp_precision` — two solvers from the same seed, one with `enable_cuda_graphs=True` and one without; end-state velocity fields agree to <1e-4 relative drift after 5 steps × 4 hits.)*
 * [x] B5.5 — Bench: target ≥15% speedup at 64³ (small grids = launch overhead dominates). *(2026-05-16: **real bake (two_color_drop, 90 frames, 40³, 8 substeps/frame, jacobi) — sim time 0.72 s → 0.15 s = 4.8× speedup**. Way exceeds the 1.15× target. `gpufluid simulate --enable-cuda-graphs` is the CLI flag; off by default. End-of-bake prints hit/miss tally.)*
 
-**Acceptance:** an `--enable-cuda-graphs` flag on `gpufluid simulate`. **Met for 6 of 9 solver configs** after the B5 follow-up:
+**Acceptance:** an `--enable-cuda-graphs` flag on `gpufluid simulate`. **Met for 8 of 9 solver configs** after the Option A follow-up:
 
-* `(jacobi | gsrb) × (flip | pic | apic) × no block-sparse` — 6 configs, all eligible whether `surface_tension > 0` or not.
-* PCG and `pressure_block_sparse=True` still fall through to direct.
+* `(jacobi | gsrb | pcg) × (flip | pic | apic) × no block-sparse` — 8 configs, all eligible whether `surface_tension > 0` or not.
+* `pressure_block_sparse=True` still falls through to direct (Option B in §12 of HANDOFF).
 
 B5 follow-up (this session) — what changed and what didn't:
 
 * ✅ **CSF S2.14.6 moved device-side.** New `k3_csf_subtract_bias_{u,v,w}_dev` kernels read sum + count from device buffers and compute `bias = sum/count` inside the kernel. `_apply_surface_tension` no longer calls `.numpy()` on the per-axis sums. Real-bake `surftens_on` (60 frames @ 48³, jacobi, σ=1, 38 substeps/frame): **sim 3.35s → 0.19s = 17.6×, 97% hit rate.** Biggest user-facing win this session because most v0.8 demo scenes use σ.
 
-* ⚠ **PCG plumbing added but NOT enabled.** `_pressure_pcg` now takes `_no_host_sync=True` to skip the residual host reads (forces `max_iter` every step). Capturable, parity-verified — but the real-bench on `big_pcg` (96³, 90 frames, max_iter=60) was a NET slowdown: 4.81s → 9.28s. Forcing max_iter cost more than the launch-overhead saved. Eligibility kept OFF until an on-device convergence-check idiom is implemented (stop-flag pattern that gates subsequent iters in-kernel rather than reading from host). The flag-plumbing stays so the future fix is a one-line eligibility flip + perf retest.
+* ✅ **PCG eligibility flipped (Option A, 2026-05-16 same session).** On-device stop-flag pattern landed: `_pcg_done` int + `_pcg_tol_sq` float device buffers; new 1-thread kernels `k3_zero_int_scalar`, `k3_set_tol_sq`, `k3_check_converged` (S2.6.3); all 7 PCG iter kernels (`k3_apply_A`, `k3_apply_invM`, `k3_dot_fluid`, `k3_zero_scalar`, `k3_div_scalar`, `k3_copy_scalar`, `k3_axpy_devscalar`) gain a `done: wp.array(dtype=int)` parameter and early-return when `done[0] != 0`. After each per-iter `r·r`, `k3_check_converged` sets `done = 1` if `r_norm² < tol_sq`. Kernel SEQUENCE stays constant (good for graph capture) while behaviour still respects `tol`. **Real-bake `big_pcg` (96³, PCG 60-iter, 90 frames): sim 4.21s → 1.01s = 4.17×, 88% hit rate.** Completely reverses the prior regression. Tests: `tests/test_b5_a_pcg_graph.py` (4 GPU tests) + updated `test_b5_2_ineligible_config_falls_through`. Sparse PCG inherits the same eligibility once Option B lands (`n_active_dev`).
 
 * ❌ **Block-sparse stays ineligible.** `_build_active_blocks` reads `n_active.numpy()` inside step(). Fixing this needs the per-tile kernels to launch at worst-case dim `n_blocks * 512` and cap per-thread with a device-side `n_active_dev[0]` read. Doable but invasive — touches `k3_jacobi_pressure_per_tile`, `k3_gauss_seidel_rb_per_tile`, and the 4 PCG per-tile kernels. Separate session.
 

@@ -75,17 +75,17 @@ def test_b5_2_changed_args_force_recapture():
 
 
 def test_b5_2_ineligible_config_falls_through():
-    """Jacobi/GS-RB are graph-eligible, with or without CSF. PCG and
-    `pressure_block_sparse=True` still fall through to the direct path
-    — PCG because forcing max_iter regresses early-converging scenes
-    (real-bake measured net slowdown on big_pcg), block-sparse because
-    `_build_active_blocks` reads `n_active.numpy()`."""
-    # PCG: kept ineligible after `_no_host_sync` plumbing was added but
-    # didn't pan out on real scenes — see B5 follow-up BACKLOG entry.
+    """Jacobi/GS-RB are graph-eligible, with or without CSF. PCG dense
+    is now ALSO eligible (Option A — on-device stop-flag pattern).
+    `pressure_block_sparse=True` is still excluded — `_build_active_blocks`
+    reads `n_active.numpy()`; fixing this is Option B."""
+    # PCG (dense): eligible after the on-device convergence-check landed.
+    # The `_no_host_sync` path now sets `_pcg_done` on device when
+    # `r·r < tol_sq·r0_norm²`; subsequent iter kernels early-return.
     s_pcg = _seeded(enable_cuda_graphs=True)
     s_pcg.step(0.005, pressure_iters=5, pressure_solver="pcg")
-    assert s_pcg._cuda_graph is None, \
-        "PCG should fall through pending an on-device convergence-check idiom"
+    assert s_pcg._cuda_graph is not None, \
+        "PCG dense should be graph-eligible after the stop-flag refactor"
 
     # CSF: eligible after k3_csf_subtract_bias_*_dev refactor.
     s_csf = _seeded(enable_cuda_graphs=True, surface_tension=0.1)
@@ -96,6 +96,7 @@ def test_b5_2_ineligible_config_falls_through():
     # Block-sparse: still INELIGIBLE — `_build_active_blocks` reads
     # `n_active.numpy()` inside step(). Fixing this needs a deeper change
     # (launch the per-tile kernels at worst-case dim + cap in-kernel).
+    # Tracked as Option B in §12 of HANDOFF.
     s_sparse = _seeded(enable_cuda_graphs=True)
     s_sparse.step(0.005, pressure_iters=10, pressure_solver="jacobi",
                    pressure_block_sparse=True)

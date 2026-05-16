@@ -240,13 +240,13 @@ ops/iter vs GS-RB's 2 mean per-tile dispatch overhead + one extra
 device→host sync (n_active) eats into the per-iter saving. Documented
 follow-up: cache `n_active` on-device.
 
-**§8.0b.B5 — CUDA graphs ship for 6 of 9 configurations.**
+**§8.0b.B5 — CUDA graphs ship for 8 of 9 configurations (post-A).**
 Eligibility matrix:
 ```
                        no-CSF    CSF (σ>0)
-jacobi/gsrb dense       ✅          ✅       ← 6 configs eligible
-PCG dense               ❌          ❌
-sparse (block_sparse=1) ❌          ❌
+jacobi/gsrb dense       ✅          ✅       ← 4 (B5)
+PCG dense               ✅          ✅       ← +2 (Option A, this session)
+sparse (block_sparse=1) ❌          ❌       ← +3 left for Option B
 ```
 * B5.1 spike (Jacobi, no CSF): direct 0.43 ms → graph 0.20 ms = **2.17×**
 * Real bake `two_color_drop` (90 frames, jacobi, 8 substeps): sim 0.72s
@@ -254,16 +254,17 @@ sparse (block_sparse=1) ❌          ❌
 * Real bake `surftens_on` (60 frames, σ=1, 38 substeps): sim 3.35s
   → 0.19s = **17.6×**, 97% hit rate ← CSF made eligible by moving
   S2.14.6 force-balance fully device-side
+* **Option A real bake `big_pcg` (96³, PCG 60-iter, 90 frames):** sim
+  **4.21s → 1.01s = 4.17×**, 88% hit rate. Pre-A this scene was the
+  documented regression (4.8s → 9.3s); the on-device stop-flag pattern
+  flips it into a 4.17× win. Same scene, same bench harness.
+
 CLI flag: `gpufluid simulate --enable-cuda-graphs` (off by default).
 
-PCG/`block_sparse=True` are documented follow-ups:
-* PCG: forcing `max_iter` to capture cleanly regressed `big_pcg` net
-  (4.8s → 9.3s) because that scene converges early. `_no_host_sync`
-  plumbing exists, eligibility flag stays off until an on-device
-  convergence-check idiom lands.
-* block_sparse: `_build_active_blocks` reads `n_active.numpy()`. Fix
-  needs the per-tile kernels to launch worst-case dim + cap in-kernel
-  via a `n_active_dev` device buffer. Six kernels to touch.
+`block_sparse=True` is the remaining follow-up:
+* `_build_active_blocks` reads `n_active.numpy()`. Fix needs the per-tile
+  kernels to launch worst-case dim + cap in-kernel via a `n_active_dev`
+  device buffer. Six kernels to touch. Tracked as Option B in §12.
 
 **§8.0b.B6 — APIC + CSF stable, no fix needed.** `tests/test_b6_apic_csf_interaction.py`:
 COM drift < 2%, max|v| < 35 m/s on the surftens_on parameter set with
@@ -432,10 +433,6 @@ Sized roughly by session-count and grouped by where they unblock.
 - **B3.5 — refresh step22.mp4 with the W7.7 selector turned ON.** Same
   scene config, just `whitewater_use_potential = true`. Already wired
   through CLI (B3.3).
-- **PCG graph-eligibility — on-device convergence-check (stop flag).**
-  `_no_host_sync` plumbing already in `_pressure_pcg`. Add a 1-int
-  device buffer "done", gate subsequent-iter kernels on it, drop the
-  forced max_iter trade-off. Unblocks the 7th of 9 graph configs.
 - **B11.3 follow-up — reseed propagates `attr_temperature`.** Current
   reseed paths (`sim/reseed.py:reseed_particles_gpu` + CPU sibling)
   carry `attr_color_wp` but not `attr_temperature`. Scenes with
@@ -443,16 +440,24 @@ Sized roughly by session-count and grouped by where they unblock.
   first reseed pass. Same compaction plumbing as colour. Trivial,
   ≤30 min.
 
+**Tier 1 (closed this session):**
+- ~~PCG graph-eligibility~~ — **Option A shipped**: `_pcg_done` device
+  flag + `k3_check_converged`; all 7 PCG iter kernels gated on `done`.
+  4.17× sim speedup on big_pcg (4.21s → 1.01s, 88% hit rate). Tests:
+  `tests/test_b5_a_pcg_graph.py` (4 tests, all green) + updated
+  `test_b5_2_ineligible_config_falls_through`.
+
 **Tier 2 — risk:med, 1-2 sessions each:**
 - **B7-alt spike — deferred dense allocation for 256³+.** Allocate
   `wp.array3d` lazily for the bbox of active 8³ tiles, rebuild every N
   frames with dilation. Spike at 128³/5% fill: does memory drop by ~5×
   without breaking the dense kernels? (They'd need a coord-translation
   layer with `offset_xyz`.) See BACKLOG B7 "pivot recommendation".
-- **Block-sparse + CUDA graphs.** Six per-tile kernels need an
-  `n_active_dev` device buffer + in-kernel cap so launches happen at
-  worst-case dim. Unblocks 2 more of 9 graph configs (sparse jacobi,
-  sparse gs-rb). Sparse PCG remains gated on the PCG convergence fix.
+- **Block-sparse + CUDA graphs (Option B).** Six per-tile kernels need
+  an `n_active_dev` device buffer + in-kernel cap so launches happen at
+  worst-case dim. Unblocks **all 3 remaining graph configs** (sparse
+  jacobi, sparse gs-rb, sparse PCG — the last one inherits the
+  on-device stop-flag from Option A). Brings the matrix to **9/9**.
 
 **Hygiene:**
 - `docs/BLOCKS.md` doesn't track everything that landed in S2.6.5,
