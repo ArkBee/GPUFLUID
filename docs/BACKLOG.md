@@ -24,7 +24,7 @@ which milestone we're inside.
 | v0.7    | Solver feature complete  | (10-item original roadmap)     | done          | ✅ closed 2026-05-16 |
 | **v0.8** | **"Reachable" — Blender exposes the v0.7 features** | **Tier 1: B1, B2, B3**     | **3-5**       | **▶ next** |
 | v0.9    | "Production-fast" — hot path squeezed              | Tier 2: B4, B5, B6 + B11, B12  | 4-6           | queued |
-| v1.0    | "Scale" — 256³+ scenes via sparse storage          | Tier 3: B7 (multi-session)     | 3-5           | queued |
+| v1.0    | "Scale" — 256³+ scenes via sparse storage          | Tier 3: B7 (aborted, see B7.1) → B7-alt deferred-allocation | 3-5 | ⚠ pivoted 2026-05-16 |
 | v1.x+   | Research extensions      | B8 differentiable, B9 multi-GPU | open-ended    | optional |
 
 **Why these splits:**
@@ -169,7 +169,7 @@ might break the parasitic-current bound (HANDOFF trap #11).
 
 ## Tier 3 — Architectural projects (multi-session, plan carefully)
 
-### B7. Sparse v2 — NanoVDB-backed storage for grid fields `risk:high value:infra blocks: B5 B4`
+### B7. Sparse v2 — NanoVDB-backed storage for grid fields `risk:high value:infra blocks: B5 B4` ❌ aborted 2026-05-16
 
 The big one. Replace dense `wp.array3d` allocations with `wp.Volume`
 (NanoVDB) for the MAC velocity faces, pressure, marker, density. Saves
@@ -181,16 +181,12 @@ Break by *block* — port each S2.x kernel one at a time so we can revert any
 single port if it goes wrong. Always keep the dense path as a parallel
 implementation behind a feature flag (`use_sparse_storage=False` default).
 
-* [ ] B7.1 — **Spike**: prototype a sparse marker field using `wp.Volume`. Measure read latency (`wp.volume_lookup_i`) vs dense indexing in a hot kernel. If sparse is >2× slower per-cell, abort the macro and document why.
-* [ ] B7.2 — Add `SparseSolver3D` class (parallel to `FlipSolver3D`). Replaces `self.u/v/w/p/marker` with `wp.Volume` instances. Same public API.
-* [ ] B7.3 — Port `k3_p2g` to `k3_p2g_sparse` — atomic_add into a sparse Volume. Compare numerically against dense.
-* [ ] B7.4 — Port `k3_jacobi_pressure` to sparse. Reuse the block-sparse compaction (S2.16) for the active-tile list (`wp.Volume.allocate_by_tiles`).
-* [ ] B7.5 — Port `k3_compute_divergence`, `k3_subtract_pressure_grad`, `k3_enforce_solid_bc`, `k3_g2p_*` one by one. Each port = its own micro task with its own test.
-* [ ] B7.6 — Port S2.14 CSF kernels (chi, normal, curvature) to sparse — these have a wider stencil.
-* [ ] B7.7 — Allocation strategy: per-frame `wp.Volume.allocate_by_tiles(active_tile_points)` is expensive. Investigate per-N-frames rebuild + dilation safety margin.
-* [ ] B7.8 — Add `gpufluid simulate --sparse` flag. Pytest matrix: dense vs sparse at 64³ small + 128³ large, max abs error <1e-2 in pressure field.
-* [ ] B7.9 — Bench: 256³ scene with 10% fill — memory used (target ≤200 MB grid fields) and per-step time (target ≤2× dense 128³).
-* [ ] B7.10 — Demo: step24.mp4 — 256³ scene that *would not fit* on a 16 GB GPU in dense mode.
+* [x] B7.1 — **Spike**: prototype a sparse marker field using `wp.Volume`. Measure read latency (`wp.volume_lookup_i`) vs dense indexing in a hot kernel. If sparse is >2× slower per-cell, abort the macro and document why. *(2026-05-16: **MACRO ABORTED.** Two findings in `tests/test_b7_1_spike_sparse_volume.py`: (1) Warp 1.13 has NO kernel-side `wp.volume_store_*` API — `wp.Volume` is read-only from kernels. The B7 plan (replace `self.u/v/w/p/marker` with `wp.Volume` and atomic_add into them) is physically impossible on current Warp. (2) Even read-only, `wp.volume_lookup_i` is 1.3-2.3× slower than dense `wp.array3d` indexing at 128³ ~10% fill — borderline at the BACKLOG abort threshold. Volume topology + data round-trip works (count matches exactly), so the spike validated the API surface; it just can't be wired into a mutating solver. **Pivot recommendation:** extend S2.16 block-sparse compaction (already 2× faster pressure at 128³) to additionally skip dense memory allocation for inactive tiles. That gives ~70-80% of the sparse v2 memory win without depending on Warp gaining volume_store_*.)*
+* [-] B7.2 through B7.10 — **dropped.** All depend on the NanoVDB write path that doesn't exist in Warp 1.13. Re-evaluate when `wp.volume_store_*` ships upstream (`test_b7_1_volume_is_read_only` will start failing — that's the regression-trip telling a future maintainer to revisit this macro).
+
+**Pivot — recommended path to 256³+ without NanoVDB:**
+
+A separate macro (B7-alt) using the S2.16 block-sparse compaction plus **deferred dense allocation**: allocate `wp.array3d` lazily for the bounding box of active tiles, rebuild every N frames with a dilation margin. Same per-step kernels we already have; only `_build_active_blocks` + the field allocations change. Memory cost scales with active-fill rather than `nx·ny·nz`. Gives ~70-80% of the v2 win without depending on Warp upstream. Risk: dense allocation API is grid-shape-tied, so we'd need a coordinate translation layer (offset_x/y/z) in every kernel. Worth a fresh spike before committing.
 
 **Acceptance:** can run a 256³ dam-break that the dense path OOMs on.
 
