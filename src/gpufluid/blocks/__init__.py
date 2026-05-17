@@ -1,21 +1,24 @@
 """Block registry and error-tagging.
 
 Every public callable in `gpufluid` is registered with a stable Block ID
-declared in `docs/DESIGN.md`. The decorator is a no-op at runtime apart
-from recording (id, description, callable, source location) into a
+declared in `docs/DESIGN.md` §§4-11. The decorator is a no-op at runtime
+apart from recording (id, description, callable, source location) into a
 global table — used for documentation generation and the `--check`
-command (planned C7.4 sibling).
+command (see `gpufluid.blocks.check`).
 
 Errors raised through `BlockError` carry their block ID so any failure
 message points at an exact line in DESIGN/BLOCKS.
 
 Block ID format: `<LAYER><MAJOR>.<MINOR>[.<SUB>]` e.g. `S2.6.1`.
+
+See `docs/DESIGN.md §3` for the full contract and `§3.2` for the
+`gpufluid blocks --check` enforcement spec.
 """
 from __future__ import annotations
 import inspect
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 _BLOCK_ID_RE = re.compile(r"^[A-Z][0-9]+(\.[0-9A-Z]+){1,3}$")
 
@@ -55,7 +58,6 @@ def block(block_id: str, description: str = "") -> Callable:
         raise ValueError(f"bad block_id {block_id!r}; expected like 'S2.6.1'")
 
     def wrap(fn):
-        # Resolve source location.
         try:
             src_file = inspect.getsourcefile(fn) or "?"
             _, src_line = inspect.getsourcelines(fn)
@@ -70,7 +72,6 @@ def block(block_id: str, description: str = "") -> Callable:
             source_line=src_line,
         )
         bucket = _REGISTRY.setdefault(block_id, [])
-        # Avoid re-adding the same qualname (e.g. when modules reload).
         if not any(b.qualname == info.qualname for b in bucket):
             bucket.append(info)
         fn.__block_id__ = block_id
@@ -92,7 +93,7 @@ def by_layer(layer: str) -> List[BlockInfo]:
     items: list[BlockInfo] = []
     for bucket in _REGISTRY.values():
         items.extend(b for b in bucket if b.layer == layer)
-    # Tolerate non-numeric sub-IDs (e.g. "D4.3.GPU") in sort key.
+
     def _key(b):
         out = []
         for p in b.block_id[len(layer):].lstrip(".").split("."):
@@ -126,3 +127,9 @@ def assert_block(condition: bool, block_id: str, message: str) -> None:
     """Raise BlockError with the given tag if condition is false."""
     if not condition:
         raise BlockError(block_id, message)
+
+
+__all__ = [
+    "BlockInfo", "BlockError", "block", "get_registry", "find",
+    "by_layer", "assert_block",
+]

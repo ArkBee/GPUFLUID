@@ -6,4 +6,4 @@ in v0.2. For now we re-export so callers can import from the
 ``gpufluid.solvers`` namespace.
 """
 # [BLK F3.1]
-from ..solver2d_legacy import FlipSolver2D  # noqa: F401
+from ._solver2d_legacy import FlipSolver2D  # noqa: F401

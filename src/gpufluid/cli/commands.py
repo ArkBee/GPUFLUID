@@ -481,6 +481,21 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_blocks(args: argparse.Namespace) -> int:
+    """(DESIGN.md §3.2) Registry contract enforcement entry point."""
+    from ..blocks.check import cli_main
+    sub_argv: list[str] = []
+    if args.check:
+        sub_argv.append("--check")
+    elif args.regen_index:
+        sub_argv.append("--regen-index")
+    elif args.list:
+        sub_argv.append("--list")
+        if args.layer:
+            sub_argv += ["--layer", args.layer]
+    return cli_main(sub_argv)
+
+
 # ---------------------------------------------------------------------------
 # Entry-point
 # ---------------------------------------------------------------------------
@@ -521,6 +536,20 @@ def main(argv=None) -> int:
 
     p_info = sub.add_parser("info", help="device + registry info")
     p_info.set_defaults(func=cmd_info)
+
+    p_blocks = sub.add_parser(
+        "blocks",
+        help="(DESIGN.md §3.2) verify or regenerate the block registry index")
+    p_blocks_g = p_blocks.add_mutually_exclusive_group(required=True)
+    p_blocks_g.add_argument("--check", action="store_true",
+                            help="run all 6 registry contract checks; exit 1 on any error")
+    p_blocks_g.add_argument("--regen-index", action="store_true",
+                            help="rewrite docs/BLOCKS.md from the live registry")
+    p_blocks_g.add_argument("--list", action="store_true",
+                            help="pretty-print the registry")
+    p_blocks.add_argument("--layer", default=None,
+                          help="filter --list by layer prefix (e.g. S2)")
+    p_blocks.set_defaults(func=cmd_blocks)
 
     args = p.parse_args(argv)
     try:

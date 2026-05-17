@@ -43,6 +43,8 @@ higher layers. Layer numbers correspond to the block prefix.
 ├──────────────────────────────────────────────────────────────┤
 │ M5  Meshing                (density grid, marching cubes)    │
 ├──────────────────────────────────────────────────────────────┤
+│ W7  Whitewater simulation  (foam/spray/bubble dynamics)      │
+├──────────────────────────────────────────────────────────────┤
 │ D4  Domain                 (SDF, seeders, walls, inflows)    │
 ├──────────────────────────────────────────────────────────────┤
 │ F3  Solver orchestration   (FlipSolver2D, FlipSolver3D)      │
@@ -53,17 +55,26 @@ higher layers. Layer numbers correspond to the block prefix.
 └──────────────────────────────────────────────────────────────┘
 ```
 
+Layer-number ordering: lower number = lower in the stack. Each layer
+may only import from layers with a strictly smaller number. The number
+7 in `W7` is historical — it landed before the strict naming
+convention and slots in between D4 and M5 in dependency order (W7
+consumes G1+S2 grid math but only the meshing layer M5 reads back its
+output for surface foam rendering).
+
 Allowed imports: layer N may import only layers `1..N-1`.
 
 ### 2.1 Folder mapping
 
 ```
 src/gpufluid/
-    blocks.py              # block registry + decorator (cross-cutting, no layer)
+    __init__.py            # package surface (cross-cutting, no layer)
+    blocks/                # block registry + --check tooling (cross-cutting, no layer)
     primitives/            # G1
     schemes/               # S2  (Warp kernels split by scheme)
     solvers/               # F3
     domain/                # D4
+    sim/                   # W7  (whitewater: state, emit, classify, dynamics)
     meshing/               # M5
     io/                    # I6
     cli/                   # C7
@@ -102,6 +113,138 @@ BlockError [S2.6.1 Jacobi pressure iteration]: residual did not decrease
 ```
 
 This lets you say "пиздец в S2.6.1" and we both know exactly where.
+
+### 3.2 `gpufluid blocks --check` — registry contract enforcement
+
+The block system is only useful if the three sources of truth stay in
+sync. They are:
+
+1. **DESIGN.md sections 4–11** — the authoritative declaration. Each
+   block ID appears here with a description and a layer assignment.
+2. **`@block("X.Y.Z", "...")` decorators in `src/`** — the live runtime
+   registry built at import time.
+3. **`docs/BLOCKS.md`** — the human-readable index, generated FROM the
+   registry; never hand-edit.
+
+`gpufluid blocks --check` walks all three and refuses to exit 0 if they
+disagree. It runs in CI (via `tests/test_blocks_registry.py::test_registry_is_clean`)
+so a PR that adds a block without updating DESIGN.md fails the build.
+
+#### 3.2.1 What gets checked
+
+For each check below, "fail" means non-zero exit + a line-by-line diff
+naming the offender. Checks 1–5 are hard errors; check 6 is a warning
+that doesn't fail CI (aspirational hygiene).
+
+| # | Check | Failure mode |
+|---|-------|--------------|
+| 1 | **ID format** — every registered ID matches `^[A-Z][0-9]+(\.[0-9A-Z]+){1,3}$` (already enforced at decoration; re-verified at check time so a future refactor can't silently weaken the regex). | Bad ID like `s2.6.1` or `S26.1` or `Q9.99` (no leading layer letter). |
+| 2 | **Layer declared** — the layer prefix (e.g. `G1`, `W7`) of every registered ID appears as a `## N. Layer XN — ...` heading in DESIGN.md §§4–11. New layers must be declared in §2's diagram + get their own section first. | A `@block("Z9.1", ...)` decorator with no `## ... Layer Z9 ...` heading in DESIGN.md. |
+| 3 | **BLOCKS.md mirrors the registry** — every (id, source_file) in the registry has exactly one row in BLOCKS.md with matching ID; every row with status `impl` or `impl,test` has ≥1 registry entry; every row with status `plan` has ZERO registry entries (a `plan` block that grew an impl must be flipped to `impl` and never both). | The current `F3.5` row appearing twice (one `plan`, one `impl,test`) is the canonical instance. |
+| 4 | **Cross-layer imports** — AST-scan every `.py` under `src/gpufluid/` and `addon/gpufluid_blender/`; record `import gpufluid.<sub>` / `from gpufluid.<sub> import ...`; reject when `<sub>` resolves to a layer with a higher number than the importer's layer. The folder→layer map is parsed at check time from the DESIGN.md §2.1 code block (sole source of truth — `check.py` carries no parallel dict); a malformed §2.1 or an unmapped folder fails the check loudly. | A `src/gpufluid/schemes/foo.py` (S2) doing `from gpufluid.solvers import ...` (F3 > S2). |
+| 5 | **Duplicate (id, qualname)** — multiple impls per ID are allowed and expected (e.g. `S2.6.6` covers 4 PCG per-tile kernels under one block), but two callables sharing both ID and qualname is a registration bug (module-reload double-decoration). | Decorator applied twice on the same function. |
+| 6 | **Test coverage** (warning only) — declared blocks SHOULD have a guard test. Match by file `tests/test_<id_normalised>_*.py` OR test function name `test_<id_normalised>_*`. Missing coverage prints a list but doesn't fail CI. | A new `@block("S2.99", ...)` shipped without a test file or test function whose name carries `s2_99`. |
+
+#### 3.2.2 ID normalisation rules
+
+For test-name and BLOCKS.md row matching, the canonical normalisation is:
+
+* `.` → `_`
+* uppercase → lowercase
+* hyphens (BACKLOG micro IDs like `B7-alt.3`) are NOT block IDs and are
+  ignored by `--check`. Backlog micros live in `docs/BACKLOG.md` only.
+
+So `S2.6.3` → `s2_6_3`, `D4.3.GPU.BVH` → `d4_3_gpu_bvh`.
+
+#### 3.2.3 Multi-impl blocks
+
+A block ID can map to N≥1 callables when it represents a small **family
+of cooperating Warp kernels** that ship and break together. Current
+examples: `F3.7` (4 sub-dense storage kernels), `S2.6.6` (4 per-tile
+PCG kernels), `S2.18` (3 scalar-attribute kernels). The check accepts
+this; BLOCKS.md collapses them into one row with a `(N kernels)` suffix
+in the description.
+
+#### 3.2.4 Edge cases the check explicitly handles
+
+* **`blocks.py` is cross-cutting** — exempt from check 4 (layer-import).
+  Any module may import it.
+* **`cli/` (C7) is the top of the non-addon stack** — allowed to import
+  G1…I6. Only A8 sits above C7.
+* **Folder `sim/` hosts layer W7** — folder name doesn't match the
+  layer letter (historical: whitewater landed before the strict naming
+  convention). The folder→layer map in `check.py` records the
+  exception. New layers must use matching folder names.
+* **`addon/` lives outside `src/gpufluid/`** — its blocks (A8.*) are
+  registered only when a `bpy` stub is importable. The check runs the
+  addon scan only when `bpy` (real or stubbed) is on `sys.path`;
+  otherwise A8 checks are skipped with a printed note.
+* **`plan` rows in BLOCKS.md** are allowed for blocks declared in
+  DESIGN.md but not yet implemented. They must have zero registry
+  entries; the moment a `@block(...)` decorator with that ID lands, the
+  row's status must flip to `impl` and the check enforces it.
+
+#### 3.2.4.1 Known layer-import exceptions (technical debt)
+
+The following imports violate the strict "layer N may only import from
+1..N-1" rule but are whitelisted in `check.py`. Each one is a documented
+debt with an exit plan. New exceptions require updating this list AND
+the whitelist; silent additions break the build.
+
+| Importer (layer) | Imports (layer) | Reason | Exit plan |
+|------------------|-----------------|--------|-----------|
+| `solvers/solver3d.py` (F3) | `domain/regions`, `domain/animation`, `domain/sdf`, `domain/seed`, `domain/mesh_sdf*` (D4) | F3 calls D4 per-frame helpers from inside `step_cfl`/`prepare_frame` instead of receiving pre-baked work via a hook. Pre-dates the layer contract. | Refactor F3.6 per-frame hook to fully invert the dependency: D4 pushes inflow/outflow events into a queue that F3 drains. Out of scope for v1.0; tracked as a v1.1 architecture macro. |
+| `cli/commands.py` (C7) | `sim/whitewater*` (W7), `sim/reseed` (W7), `domain/*` (D4), `meshing/*` (M5), `io/*` (I6), `solvers/*` (F3), `schemes/*` (S2) | CLI is the top-of-stack orchestrator and is allowed to touch every lower layer by design. C7 > W7, M5, I6 — no exception needed. | n/a (not a violation; listed for clarity) |
+
+If you find a NEW cross-layer import that the check flags:
+1. Prefer fixing the dependency direction (the long-term right answer).
+2. If a fix is genuinely out of scope, add a row above explaining what
+   the import is and what would make it go away.
+3. Add the (importer-module, imported-module) pair to
+   `check.py:_KNOWN_LAYER_EXCEPTIONS`.
+
+The exception list itself is asserted against in
+`tests/test_blocks_registry.py` so a row that stops being needed (the
+underlying import got fixed) starts failing the test — telling a future
+maintainer to clean up the whitelist.
+
+#### 3.2.5 CLI surface
+
+```
+gpufluid blocks --check        # run all checks; exit 1 if any fail
+gpufluid blocks --regen-index  # rewrite docs/BLOCKS.md from registry + DESIGN.md
+gpufluid blocks --list [--layer S2]  # pretty print; defaults to all layers
+```
+
+`--regen-index` is the only way BLOCKS.md should ever change after this
+spec lands. The regenerated file carries a `<!-- generated by
+gpufluid blocks --regen-index; do not edit by hand -->` header; the
+check refuses to run on a BLOCKS.md missing that header (prevents a
+hand-edit from passing checks because it happened to match by accident).
+
+#### 3.2.6 Pytest integration
+
+`tests/test_blocks_registry.py` exposes one parametrised test per check
+(1–5 are hard, 6 is `@pytest.mark.xfail(strict=False)` so warnings
+surface without failing the suite). The test imports every module under
+`src/gpufluid/` plus the addon (via the existing `tests/_bpy_stub.py`)
+to populate the registry deterministically before checking.
+
+A green `pytest` is a sufficient proxy for `gpufluid blocks --check`;
+the CLI exists for ad-hoc local runs and IDE integration.
+
+#### 3.2.7 Out of scope (intentionally)
+
+* **Block ordering inside a layer** is not enforced — `S2.18.x` can land
+  before `S2.17.x` is filled in. The numbers are stable IDs, not a
+  chronological log.
+* **Description string fidelity** between `@block(...)` and DESIGN.md is
+  not strictly checked — only the ID's existence. Drift in prose
+  descriptions is allowed (the decorator string is the source of truth
+  for end-of-line error messages; DESIGN.md elaborates).
+* **Test contents** — check 6 only verifies a test with the right name
+  EXISTS, not that it actually exercises the block. Quality is the
+  human reviewer's job.
 
 ---
 
@@ -473,6 +616,31 @@ imports the resulting mesh cache (I6.x) onto a target object.
 | A8.6  | Cache import (PLY sequence → MeshSequenceCache modifier)     | planned |
 | A8.7  | UI panels (3D-view sidebar)                                  | planned |
 | A8.8  | Helper operators (add domain, add fluid, clear cache)        | planned |
+
+---
+
+## 11.5 Layer W7 — Whitewater simulation
+
+Foam, spray, and bubble secondary-particle dynamics. Operates downstream
+of the main FLIP solver (consumes F3's velocity field + particle state)
+but writes its own particle pool that the meshing layer (M5) reads back
+for surface foam compositing. Imports allowed: G1 + S2 + F3 + D4 (sits
+between D4 and M5 in dependency order; see §2 diagram).
+
+Lives in `src/gpufluid/sim/` — the folder name predates the strict
+naming convention. The folder→layer mapping in §2.1 records this
+exception.
+
+| ID    | Block                                                  | Source                                         |
+|-------|--------------------------------------------------------|------------------------------------------------|
+| W7.1  | `WhitewaterSystem` (state container)                   | `gpufluid/sim/whitewater.py`                   |
+| W7.2  | `emit_from_fluid()` — emit secondaries from main pool  | `gpufluid/sim/whitewater.py`                   |
+| W7.3  | Ballistic advection                                    | `gpufluid/sim/whitewater.py`                   |
+| W7.4  | `classify_kinds()` — foam / spray / bubble heuristic   | `gpufluid/sim/whitewater.py`                   |
+| W7.5  | `step()` — per-class dynamics (gravity/drag/buoyancy)  | `gpufluid/sim/whitewater.py`                   |
+| W7.6  | Kind sidecar I/O (`whitewater/frame_NNNN.npy`)         | `gpufluid/cli/commands.py`                     |
+| W7.7  | Trapped-air potential (Ihmsen 2012)                    | `gpufluid/sim/whitewater_potentials.py`        |
+| W7.7.H| Host wrapper (numpy → numpy) for W7.7                  | `gpufluid/sim/whitewater_potentials.py`        |
 
 ---
 
