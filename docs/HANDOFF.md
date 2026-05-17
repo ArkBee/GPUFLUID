@@ -559,10 +559,13 @@ Estimated total: 3-5 sessions to ship B7-alt.2 … B7-alt.8 + 256³ bench.
   CC BY-NC license concern. Re-evaluate if commercial licence cost
   becomes acceptable, or write our own 2-pigment K-M solver (~50
   lines, less painterly). No urgency.
-- **Addon UI: per-source `temperature` field** — B11.3 wired TOML +
-  CLI but not the Blender N-panel. Mirror the existing per-source
-  `color` field in `addon/gpufluid_blender/properties.py` +
-  `config_builder.py`. Trivial.
+- ~~Addon UI: per-source `temperature` field~~ — **shipped 2026-05-17**.
+  Mirrors the `use_color`/`color` pair: `use_temperature: BoolProperty`
+  + `temperature: FloatProperty` on `GpufluidFluidProps`, surfaced
+  in the Fluid panel as a "Particle Temperature (S2.18 / B11)" box,
+  threaded through `bake.py:collect_scene` → `[[fluids]] temperature = X`
+  via `config_builder.py`. 2 new pure-config tests in
+  `test_a8_config_builder.py`. Addon zip rebuilt (37 KB).
 
 **Tier 1 (closed this session — for context, do NOT re-open):**
 - ~~B7-alt.2 sub-dense storage refactor + rebuild trigger~~ — **shipped 2026-05-17**.

@@ -108,6 +108,12 @@ class GPUFLUID_PT_fluid(bpy.types.Panel):
         cbox.prop(f, "use_color")
         if f.use_color:
             cbox.prop(f, "color")
+        # Per-source temperature (S2.18 / B11)
+        tbox = layout.box()
+        tbox.label(text="Particle Temperature (S2.18 / B11)")
+        tbox.prop(f, "use_temperature")
+        if f.use_temperature:
+            tbox.prop(f, "temperature")
 
 
 class GPUFLUID_PT_obstacle(bpy.types.Panel):

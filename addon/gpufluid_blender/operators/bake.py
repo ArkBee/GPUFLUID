@@ -89,6 +89,8 @@ def collect_scene(context, domain_obj):
                  "ppc": int(fprops.ppc)}
         if getattr(fprops, "use_color", False):
             entry["color"] = tuple(float(c) for c in fprops.color)
+        if getattr(fprops, "use_temperature", False):
+            entry["temperature"] = float(fprops.temperature)
         fluid_sources.append(entry)
 
     # obstacles

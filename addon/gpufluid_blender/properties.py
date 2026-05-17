@@ -157,6 +157,20 @@ class GpufluidFluidProps(bpy.types.PropertyGroup):
         default=(1.0, 1.0, 1.0), size=3, min=0.0, max=1.0, subtype="COLOR",
         description="Linear-RGB triple stamped on particles from this source when Tint is on",
     )
+    # S2.18 / B11 — per-particle temperature seeded from this source
+    use_temperature: bpy.props.BoolProperty(
+        name="Stamp Temperature (S2.18 / B11)", default=False,
+        description="Stamp this source's temperature on emitted particles. "
+                    "Enables the per-particle scalar attribute pipeline "
+                    "(used for lava drop, hot/cold mixing demos)",
+    )
+    temperature: bpy.props.FloatProperty(
+        name="Temperature",
+        default=300.0, min=0.0, max=5000.0, soft_max=2000.0,
+        description="Scalar temperature stamped on particles from this source "
+                    "when 'Stamp Temperature' is on. Mixes via P2G/G2P like "
+                    "colour (lava drop: 1500 K hot, basin: 300 K cool)",
+    )
 
 
 # [BLK A8.4]

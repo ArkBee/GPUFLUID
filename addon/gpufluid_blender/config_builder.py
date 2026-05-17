@@ -68,6 +68,8 @@ def build_toml(scene_dict: Dict[str, Any]) -> str:
         prefix_lines.append(f"ppc = {int(f.get('ppc', 8))}")
         if "color" in f and f["color"] is not None:
             prefix_lines.append(f"color = {_fmt_vec3(f['color'])}")
+        if "temperature" in f and f["temperature"] is not None:
+            prefix_lines.append(f"temperature = {float(f['temperature']):g}")
 
     if fluids:
         for f in fluids:

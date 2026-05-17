@@ -115,6 +115,36 @@ def test_b1_4_fluids_without_color_omits_field():
     assert "color" not in parsed["fluids"][0]
 
 
+def test_addon_temperature_field_round_trips_through_toml():
+    """Addon UI per-source temperature ([[fluids]] temperature = X) makes
+    it through build_toml verbatim. Mirrors the colour wiring."""
+    s = _minimal_scene()
+    s.pop("fluid")
+    s["fluids"] = [
+        {"kind": "box", "lo": (0.10, 0.10, 0.10), "hi": (0.40, 0.40, 0.40),
+         "ppc": 4, "temperature": 1500.0},  # hot lava
+        {"kind": "box", "lo": (0.60, 0.10, 0.60), "hi": (0.90, 0.40, 0.90),
+         "ppc": 4, "temperature": 300.0,
+         "color": (0.2, 0.5, 0.9)},          # cool basin, also tinted
+    ]
+    parsed = tomllib.loads(build_toml(s))
+    arr = parsed["fluids"]
+    assert len(arr) == 2
+    assert arr[0]["temperature"] == pytest.approx(1500.0)
+    assert arr[1]["temperature"] == pytest.approx(300.0)
+    assert arr[1]["color"] == [0.2, 0.5, 0.9]
+    # First source has no colour → field omitted, only temperature present.
+    assert "color" not in arr[0]
+
+
+def test_addon_temperature_omitted_when_not_set():
+    s = _minimal_scene()
+    s.pop("fluid")
+    s["fluids"] = [{"kind": "box", "lo": (0.1, 0.1, 0.1), "hi": (0.4, 0.4, 0.4), "ppc": 4}]
+    parsed = tomllib.loads(build_toml(s))
+    assert "temperature" not in parsed["fluids"][0]
+
+
 def test_b1_4_cli_loads_multi_source_with_color():
     """Config produced by addon (with [[fluids]] + color) must parse via load_scene."""
     from gpufluid.cli.config import load_scene
