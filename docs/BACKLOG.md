@@ -243,12 +243,15 @@ relocations.
   TOML-side struct. New IDs G1.15 + G1.16. `domain/animation.py`
   becomes a re-export shim. 3 of 6 whitelist entries gone after this
   + A2 — only `domain.regions` + `domain.seed` remain.)*
-* [ ] F3.6.C1 — Add `FrameEventQueue` + `FluidEmitEvent` +
+* [x] F3.6.C1 — Add `FrameEventQueue` + `FluidEmitEvent` +
   `FluidOutflowEvent` dataclasses to `primitives/frame_events.py`.
-  Pre-impl tests in `tests/test_g1_frame_events.py`. D4 inflow/
-  outflow helpers gain `publish_for_frame(queue, ...)` method but
-  remain callable in the legacy form too. Acceptance: tests pass,
-  no whitelist change yet (transitional dual-path).
+  *(2026-05-17: shipped. New blocks G1.17/G1.18/G1.19, 10 TDD tests
+  in `tests/test_g1_17_frame_events.py` including parity tests that
+  prove `InflowBox.publish_for_frame` + drain produces byte-identical
+  (pos, vel) as legacy `apply_inflows`, and same for outflows. D4
+  region helpers gained `publish_for_frame()` dual-path; legacy fns
+  still callable. Solver unchanged — that's C2. Whitelist still 2
+  entries as designed (transitional).)*
 * [ ] F3.6.C2 — Switch `solver3d.prepare_frame` to drain the queue
   instead of pulling from `domain.regions`. Delete legacy pull path.
   Verify CUDA-graph rehit rate unchanged (drain happens BEFORE

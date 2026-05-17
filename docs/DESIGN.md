@@ -428,10 +428,16 @@ Pure helpers. No domain logic.
 | G1.14 | SDF union (min of components, was D4.2.5 pre-F3.6.A1)        | impl |
 | G1.15 | Motion specs: LinearMotion + KeyframeMotion union (was D4.6) | impl |
 | G1.16 | evaluate_center — animated centre at a frame (was D4.6)      | impl |
+| G1.17 | FluidEmitEvent — per-frame inflow emission record (F3.6.C1)  | impl |
+| G1.18 | FluidOutflowEvent — per-frame cull request record (F3.6.C1) | impl |
+| G1.19 | FrameEventQueue — push/drain sink for D4→F3 events (F3.6.C1) | impl |
 
 The G1.10–G1.14 analytic SDFs relocated from D4 on 2026-05-17 (F3.6.A1);
-G1.15 + G1.16 motion utilities relocated 2026-05-17 (F3.6.B). All pure
-math/host transforms, no solver/domain coupling.
+G1.15 + G1.16 motion utilities relocated 2026-05-17 (F3.6.B). G1.17–G1.19
+event queue infrastructure landed 2026-05-17 (F3.6.C1) — D4 region
+helpers now have a `publish_for_frame()` dual-path method alongside
+the legacy `apply_inflows`/`apply_outflows` helpers. The solver
+migration to drain-only is F3.6.C2.
 
 ---
 

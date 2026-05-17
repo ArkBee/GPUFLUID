@@ -41,6 +41,23 @@ class InflowBox:
         hi = np.asarray(self.hi, dtype=np.float32)
         return lo + (hi - lo) * rng.random((n, 3)).astype(np.float32)
 
+    def publish_for_frame(self, queue, frame_idx: int, frame_dt: float,
+                          rng: np.random.Generator) -> None:
+        """F3.6.C1 dual-path: instead of returning (pos, vel), push a
+        FluidEmitEvent onto `queue`.
+
+        Semantically identical to a single iteration of the legacy
+        `apply_inflows` loop. When this box is not emitting (frame
+        outside [start, end] or rate=0), nothing is pushed.
+        """
+        from ..primitives.frame_events import FluidEmitEvent
+        pos = self.emit(frame_idx, frame_dt, rng)
+        if pos is None or len(pos) == 0:
+            return
+        vel = np.broadcast_to(np.asarray(self.velocity, dtype=np.float32),
+                              (len(pos), 3)).copy()
+        queue.push_emit(FluidEmitEvent(positions=pos, velocities=vel))
+
 
 # [BLK D4.7]
 @dataclass
@@ -50,6 +67,21 @@ class OutflowBox:
     hi: Tuple[float, float, float]
     frame_start: int = 0
     frame_end: int = 10_000
+
+    def publish_for_frame(self, queue, frame_idx: int) -> None:
+        """F3.6.C1 dual-path: push a FluidOutflowEvent describing the
+        cull bbox if this outflow is active for `frame_idx`. The solver
+        applies the cull on drain; this method does NOT touch particle
+        arrays itself.
+        """
+        if frame_idx < self.frame_start or frame_idx > self.frame_end:
+            return
+        from ..primitives.frame_events import FluidOutflowEvent
+        queue.push_outflow(FluidOutflowEvent(
+            lo=tuple(float(x) for x in self.lo),
+            hi=tuple(float(x) for x in self.hi),
+            inside=True,
+        ))
 
 
 # [BLK D4.7]

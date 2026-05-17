@@ -27,6 +27,9 @@ additionally has at least one `test_*` matching the block ID slug;
 | G1.14 | SDF union (min of components) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
 | G1.15 | Motion spec dataclasses (LinearMotion + KeyframeMotion union) | G1 | `src/gpufluid/primitives/animation.py` | impl |
 | G1.16 | Resolve animated centre at a given frame (pure host transform) | G1 | `src/gpufluid/primitives/animation.py` | impl |
+| G1.17 | FluidEmitEvent — per-frame inflow emission record | G1 | `src/gpufluid/primitives/frame_events.py` | impl,test |
+| G1.18 | FluidOutflowEvent — per-frame cull request record | G1 | `src/gpufluid/primitives/frame_events.py` | impl,test |
+| G1.19 | FrameEventQueue — one-shot push/drain sink for D4 -> F3 events | G1 | `src/gpufluid/primitives/frame_events.py` | impl,test |
 | S2.1 | P2G: scatter particle velocities → MAC faces (trilinear) | S2 | `?` | impl,test |
 | S2.2 | Normalize MAC faces and save pre-pressure copy | S2 | `?` | impl |
 | S2.3 | Add gravity g·dt to v faces | S2 | `?` | impl,test |
