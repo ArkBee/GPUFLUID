@@ -3769,6 +3769,31 @@ class FlipSolver3D:
         rebuild_one("ws", 2)
         self._sub_offset = new_lo
         self._sub_shape = new_shape
+        # B7-alt.7 — scattered-topology warning. The B7-alt.1 spike showed
+        # that bbox-based sub-dense storage is a no-op on dispersed
+        # scenes (whitewater-heavy, exploding pours, scattered droplets):
+        # the bbox covers ~the whole domain so the memory drop is ~1×.
+        # Compute the spatial extent ratio and fire a one-shot warning
+        # when the user is paying for the offset thread-through without
+        # getting any memory savings in return.
+        full_volume = float(self.nx * self.ny * self.nz)
+        sub_volume = float(new_shape[0] * new_shape[1] * new_shape[2])
+        ratio = sub_volume / max(full_volume, 1.0)
+        if ratio > 0.8 and not getattr(self, "_sub_extent_warned", False):
+            import sys
+            print(
+                f"[gpufluid] WARNING: sub-dense bbox covers "
+                f"{100.0*ratio:.1f}% of the domain (shape={new_shape} vs "
+                f"full=({self.nx},{self.ny},{self.nz})). This is the "
+                f"\"scattered topology\" pathology documented in the "
+                f"B7-alt.1 spike — for dispersed fluid (whitewater, "
+                f"many droplets) B7-alt costs more than it saves. "
+                f"Disable `enable_sub_dense` and run the dense path "
+                f"instead, OR check whether `sub_dilation`="
+                f"{self._sub_dilation} is excessive.",
+                file=sys.stderr, flush=True,
+            )
+            self._sub_extent_warned = True
 
     # --------------------------------------------------- F3.6 prepare_frame
     @block("F3.6", "Per-frame hook: rebuild marker for anim obstacles, emit "
