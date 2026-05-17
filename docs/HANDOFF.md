@@ -165,7 +165,58 @@ Tier 1 / v0.8 is now empty of open macros.
 
 Suite: 224 → 227 passed. `gpufluid blocks --check` clean.
 
-### Next default task (after B3 closure)
+### Same-session follow-up — CSF dead-code cleanup + F3.6 spec
+
+Two parallel landings in one commit:
+
+* **CSF legacy kernels removed.** `k3_csf_subtract_bias_{u,v,w}` (host-sync,
+  pre-Option-A) deleted from `solvers/solver3d.py`. Only the `_dev` variants
+  remain — they've been the sole path since 2026-05-16. CSF tests
+  (S2.14 surface tension + B6 APIC+CSF interaction) all pass; --check
+  stays clean; suite stays at 227.
+* **DESIGN.md §3.2.4.2** — formal exit-plan spec for the F3↔D4 import
+  inversion. Key insight from a fresh audit of the 6 whitelist
+  entries: they fall into THREE categories with very different fixes,
+  not one wholesale inversion:
+  * **A (mis-filed math):** `sdf_*` + `mark_solid_from_mesh_gpu` are pure
+    helpers wrongly housed in D4. MOVE to G1/S2. Eliminates 2 entries
+    for free.
+  * **B (pure utility):** `Motion` + `evaluate_center` are stateless
+    transformers. MOVE to G1. Eliminates 1 more entry.
+  * **C (real inversion):** Only `regions.apply_{in,out}flows` actually
+    needs the hook pattern. New `FrameEventQueue` in `primitives/`,
+    D4 helpers `publish_for_frame(queue, ...)`, F3 drains. Eliminates
+    the last 3 entries.
+
+  Migration phased into 6 micros (F3.6.A1, A2, B, C1, C2, C3), each
+  independently shippable. Spec covers CUDA-graph compat, pickle
+  risk, ID-rename deferral, out-of-scope items.
+
+### Multi-session plan ahead (sessions N+1 ... N+4)
+
+Session N (this) shipped: CSF cleanup + F3.6 spec.
+
+* **N+1**: F3.6.A1 — relocate `sdf_*` + `cell_centers` to `primitives/sdf.py`.
+  All imports follow. New blocks G1.10..G1.14. Expected: 1 whitelist
+  entry removed, suite green, no behaviour change.
+* **N+2**: F3.6.A2 + F3.6.B — relocate `mark_solid_from_mesh_gpu` to
+  `schemes/mesh_marker.py`, and `Motion`/`evaluate_center` to
+  `primitives/animation.py`. Expected: 2 more entries removed; 3 of
+  6 gone after this.
+* **N+3**: F3.6.C1 — `FrameEventQueue` ships with full test suite +
+  dual-path D4 helpers (still callable directly, but ALSO publish).
+  No whitelist change yet (transitional).
+* **N+4**: F3.6.C2 — switch solver to drain queue, delete legacy pull.
+  All 6 entries removed. Add hard `test_no_f3_to_d4_imports` (F3.6.C3).
+  Closure video step29 (text overlay: "6 layer violations → 0").
+
+Standing items in parallel:
+* **Push origin** when fresh PAT arrives — 29 commits queued.
+* **Skip B2 Mixbox** (license-blocked).
+* **Skip B8/B9 research** without a concrete use-case.
+* **B10 Alembic** only if a studio asks.
+
+### Next default task (after the F3.6 macro)
 
 ### Tier 4 backlog (only if user asks, in priority order)
 

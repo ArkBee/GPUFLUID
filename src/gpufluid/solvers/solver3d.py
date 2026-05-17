@@ -465,61 +465,13 @@ def k3_csf_sum_w(
     wp.atomic_add(count, 0, 1.0)
 
 
-@wp.kernel
-def k3_csf_subtract_bias_u(
-    u: wp.array3d(dtype=float),
-    marker: wp.array3d(dtype=int),
-    bias: float,
-    nx: int, ny: int, nz: int,
-):
-    i, j, k = wp.tid()
-    if i <= 0 or i >= nx or j < 0 or j >= ny or k < 0 or k >= nz:
-        return
-    if marker[i - 1, j, k] == 2 or marker[i, j, k] == 2:
-        return
-    if marker[i - 1, j, k] != 1 and marker[i, j, k] != 1:
-        return
-    u[i, j, k] = u[i, j, k] - bias
-
-
-@wp.kernel
-def k3_csf_subtract_bias_v(
-    v: wp.array3d(dtype=float),
-    marker: wp.array3d(dtype=int),
-    bias: float,
-    nx: int, ny: int, nz: int,
-):
-    i, j, k = wp.tid()
-    if i < 0 or i >= nx or j <= 0 or j >= ny or k < 0 or k >= nz:
-        return
-    if marker[i, j - 1, k] == 2 or marker[i, j, k] == 2:
-        return
-    if marker[i, j - 1, k] != 1 and marker[i, j, k] != 1:
-        return
-    v[i, j, k] = v[i, j, k] - bias
-
-
-@wp.kernel
-def k3_csf_subtract_bias_w(
-    w_: wp.array3d(dtype=float),
-    marker: wp.array3d(dtype=int),
-    bias: float,
-    nx: int, ny: int, nz: int,
-):
-    i, j, k = wp.tid()
-    if i < 0 or i >= nx or j < 0 or j >= ny or k <= 0 or k >= nz:
-        return
-    if marker[i, j, k - 1] == 2 or marker[i, j, k] == 2:
-        return
-    if marker[i, j, k - 1] != 1 and marker[i, j, k] != 1:
-        return
-    w_[i, j, k] = w_[i, j, k] - bias
-
-
 block("S2.14.6", "Force-balance CSF: subtract per-axis mean impulse over the fluid blob")(k3_csf_sum_u)
 
 
 # ----- S2.14.6 device-side variants — host-sync-free for CUDA-graph capture
+# (Legacy host-sync k3_csf_subtract_bias_{u,v,w} kernels removed 2026-05-17;
+# the _dev variants below have been the sole path since Option A device-side
+# refactor.)
 @wp.kernel
 def k3_csf_subtract_bias_u_dev(
     u: wp.array3d(dtype=float),

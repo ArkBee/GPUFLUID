@@ -208,6 +208,163 @@ The exception list itself is asserted against in
 underlying import got fixed) starts failing the test — telling a future
 maintainer to clean up the whitelist.
 
+#### 3.2.4.2 F3.6 hook refactor — exit-plan spec
+
+The 6 entries in §3.2.4.1 ALL trace back to `solvers/solver3d.py`
+calling into `domain/*` per-frame. The original BACKLOG entry framed
+this as "invert the direction via a hook", but a fresh audit of the
+actual call sites reveals **three different problems sharing one
+symptom**. Treating them as one is what makes the refactor look
+overwhelming. Splitting them cuts the work by ~60%.
+
+##### Audit of the 6 violating imports (as of 2026-05-17)
+
+| Import | Call sites in solver3d.py | Real category |
+|--------|--------------------------|---------------|
+| `domain.sdf.{sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union, cell_centers}` | analytic obstacle stamping (5+ places) | **A — mis-filed math primitives** |
+| `domain.mesh_sdf_gpu.mark_solid_from_mesh_gpu` | initial mesh obstacle + animated mesh obstacles (2 places) | **A — mis-filed GPU kernel** |
+| `domain.animation.{Motion, evaluate_center}` | obstacle position evaluation (4 places inside `_apply_animation_at_frame`) | **B — pure utility, no layer inversion needed** |
+| `domain.regions.{InflowBox, OutflowBox, apply_inflows, apply_outflows}` | inflow emit + (legacy) outflow path in `prepare_frame` | **C — actually needs the hook** |
+
+##### Category A: mis-filed (move, don't invert)
+
+`sdf_*` are analytic distance functions. They take a point and a
+shape primitive, return a scalar. Zero dependency on FlipSolver3D or
+any D4-layer concept. They're pure math, same as `clamp_int` or
+`sample3` in G1 today. Likewise `cell_centers` builds a host-side
+cell-centre grid — already declared as `[BLK G1.8]` even though it
+lives in `domain/sdf.py`. The file's location is the bug.
+
+Resolution: **move `sdf_*` + `cell_centers` to `primitives/sdf.py`
+under layer G1**, register under existing G1.8 + new G1.10..G1.14
+slots. `domain/sdf.py` keeps the `apply_sdf_as_solid` host helper
+(which TAKES a solver's marker array) but loses the math primitives.
+Eliminates the `solvers/solver3d.py → domain.sdf` whitelist entry.
+
+Similarly `mark_solid_from_mesh_gpu` is a Warp BVH kernel that takes
+a marker array as output. The "domain" content of it is the input
+triangle mesh — but that gets passed in by the caller. The kernel
+itself is layer S2/F3 infrastructure.
+
+Resolution: **move `mark_solid_from_mesh_gpu` to
+`schemes/mesh_marker.py` under layer S2**, keep its current
+`[BLK D4.3.GPU]` ID for now (rename to S2.x in a follow-up to avoid
+breaking too many references in one PR). Eliminates the
+`solvers/solver3d.py → domain.mesh_sdf_gpu` whitelist entry.
+
+**Expected reduction: 2 of 6 whitelist entries (33%) for free.**
+
+##### Category B: pure utility (one-line layer fix)
+
+`Motion` and `evaluate_center` from `domain/animation.py` are a tiny
+host-side state machine: given a base position and a motion spec,
+return the current world position. The motion specs live in scene
+config (D4), but the evaluator itself is pure data transformation.
+
+Resolution: **move `Motion` dataclass + `evaluate_center` to
+`primitives/animation.py` under layer G1**, register new
+`[BLK G1.15] Motion spec` and `[BLK G1.16] evaluate_center`. Domain
+config still PRODUCES `Motion` instances; F3 consumes them through
+the G1 helper. Eliminates the `solvers/solver3d.py → domain.animation`
+whitelist entry.
+
+**Expected reduction: 3 of 6 whitelist entries (50%) after this step.**
+
+##### Category C: real inversion (FrameEventQueue API)
+
+After A + B, only ONE genuine D4→F3 coupling remains:
+`apply_inflows` / `apply_outflows`. These really are domain logic —
+"emit fluid at this region this frame" / "delete particles leaving
+this box". F3 calling them per-step is the architectural
+inversion.
+
+Proposed API:
+
+```python
+# in primitives/frame_events.py (G1)
+@dataclass
+class FluidEmitEvent:
+    """One inflow's worth of new fluid for the current frame."""
+    positions: np.ndarray  # (N, 3) float32, in sim space
+    velocities: np.ndarray  # (N, 3) float32
+
+@dataclass
+class FluidOutflowEvent:
+    """Bounding box outside which particles must be culled."""
+    lo: tuple[float, float, float]
+    hi: tuple[float, float, float]
+    inside: bool  # True = "delete inside", False = "delete outside"
+
+class FrameEventQueue:
+    """One-shot per-frame event sink + drainer.
+
+    Populated by D4 helpers (`inflow_box.publish_for_frame(...)`) at
+    `prepare_frame` start; drained by F3 inside the same call. Empty
+    once `prepare_frame` returns. Cleared between frames — events do
+    not persist.
+    """
+    def push_emit(self, ev: FluidEmitEvent) -> None: ...
+    def push_outflow(self, ev: FluidOutflowEvent) -> None: ...
+    def drain_emits(self) -> list[FluidEmitEvent]: ...
+    def drain_outflows(self) -> list[FluidOutflowEvent]: ...
+```
+
+Migration sketch:
+
+1. Add `FrameEventQueue` + dataclasses to `primitives/frame_events.py`.
+   Cross-layer-friendly (G1, foundational).
+2. Add a new method to `InflowBox`: `publish_for_frame(queue, frame,
+   dt, rng)`. It does the same work as today's `apply_inflows` but
+   pushes to the queue instead of returning arrays.
+3. In `solver3d.prepare_frame`, replace the direct call with a
+   queue-drain loop. Solver owns a `FrameEventQueue` instance.
+4. **Critical for CUDA-graph capture compat**: the queue MUST be
+   fully drained before the per-step kernel sequence starts.
+   Inflow/outflow change `n_particles`, which already invalidates
+   the cached graph (see §B5.2). So drain at top of `prepare_frame`,
+   then capture; the queue is empty for the entire substep loop.
+5. Once both inflow + outflow are migrated, the import `from
+   ..domain.regions import ...` is gone, and the 4 corresponding
+   whitelist entries collapse to zero (regions is one file).
+
+**Expected reduction: 6 of 6 whitelist entries → 0.**
+
+##### Migration phasing (one micro per session)
+
+| Phase | Scope | Acceptance |
+|-------|-------|-----------|
+| F3.6.A1 | Move `sdf_*` + `cell_centers` to G1; update all importers | suite green, --check shows 1 fewer whitelist entry |
+| F3.6.A2 | Move `mark_solid_from_mesh_gpu` to S2 | suite green, 1 fewer entry |
+| F3.6.B | Move `Motion` + `evaluate_center` to G1 | suite green, 1 fewer entry |
+| F3.6.C1 | Add `FrameEventQueue` + tests; D4 helpers publish (but solver still pulls — dual path) | suite green, no whitelist change yet (transitional) |
+| F3.6.C2 | Switch solver to drain queue, delete legacy pull path | suite green, 3 fewer entries — whitelist now empty |
+| F3.6.C3 | Add `test_no_f3_to_d4_imports` assertion test (would fail today, passes after C2) | hard CI gate prevents future regression |
+
+Each phase is independently shippable and reversible. C1+C2 cannot
+land in the same session because C1's dual-path enables the parallel
+test infrastructure that C2 then collapses.
+
+##### Risks the spec must flag
+
+* **CUDA-graph rehit rate.** Today's inflow/outflow code already
+  invalidates the graph cache (changes `n_particles`). The queue
+  drain happens at the SAME point, so rehit rate should be
+  identical. Verify in C2 via `test_b5_3_invalidate_on_topology_change`.
+* **Animation specs reference `Motion` by type.** Moving the
+  dataclass changes `__module__`; if any pickle/checkpoint touches
+  it, the restore will fail. Audit before B phase.
+* **`mark_solid_from_mesh_gpu` block ID stays D4.3.GPU.** Renaming
+  would touch 4 test files + BLOCKS.md (auto-regen handles the
+  index; tests need slug rename). Defer to a follow-up to keep the
+  A2 PR scope minimal.
+
+##### Out of scope for the F3.6 macro
+
+* Replacing the `cell_centers` host-side allocation with a Warp
+  kernel (G1 perf concern, not architecture).
+* Generalising `FrameEventQueue` to W7 whitewater events. W7 has
+  no current cross-layer pulls; revisit if that changes.
+
 #### 3.2.5 CLI surface
 
 ```
