@@ -1128,6 +1128,37 @@ def k_store_n_active(prefix: wp.array(dtype=int), n_blocks: int,
     n_active_dev[0] = prefix[n_blocks - 1]
 
 
+# B7-alt.8 — on-device sub-dense rebuild copy. Replaces the
+# .numpy()/wp.array round-trip in `_rebuild_sub_dense` that dominated
+# rebuild cost at 256^3. Per-thread maps the NEW array index to GLOBAL
+# coords via the new offset, then to OLD array coords via the old
+# offset, bounds-checks, and copies — non-overlap cells are left at
+# zero (caller pre-zeroed via `zeros()`).
+@wp.kernel
+def k3_copy_subdense_at_offset(
+    src: wp.array3d(dtype=float),
+    dst: wp.array3d(dtype=float),
+    new_off_x: int, new_off_y: int, new_off_z: int,
+    old_off_x: int, old_off_y: int, old_off_z: int,
+):
+    i, j, k = wp.tid()
+    nx = dst.shape[0]; ny = dst.shape[1]; nz = dst.shape[2]
+    if i >= nx or j >= ny or k >= nz:
+        return
+    # global coord this dst cell represents
+    gi = i + new_off_x; gj = j + new_off_y; gk = k + new_off_z
+    # corresponding src local coord
+    si = gi - old_off_x; sj = gj - old_off_y; sk = gk - old_off_z
+    if si < 0 or sj < 0 or sk < 0:
+        return
+    if si >= src.shape[0] or sj >= src.shape[1] or sk >= src.shape[2]:
+        return
+    dst[i, j, k] = src[si, sj, sk]
+
+
+block("F3.7", "On-device sub-dense rebuild copy at offset delta (B7-alt.8)")(k3_copy_subdense_at_offset)
+
+
 @wp.kernel
 def k3_jacobi_pressure_per_tile(
     p_in: wp.array3d(dtype=float),
@@ -3731,24 +3762,24 @@ class FlipSolver3D:
         dev = self.device
 
         def rebuild_one(attr: str, face_axis):
+            # B7-alt.8: on-device copy. Pre-zero the new buffer (zeros()
+            # is already device-side) and launch one kernel per field
+            # that maps NEW (i,j,k) → GLOBAL → OLD (si,sj,sk) and
+            # copies. Boundary +1 face cells stay at zero (caller's BC
+            # pass repopulates them from the marker).
             old_arr = getattr(self, attr)
             ns = list(new_shape)
             if face_axis is not None:
                 ns[face_axis] += 1
             new_arr = zeros(tuple(ns), dev=dev)
             if has_overlap and old_arr is not None:
-                old_np = old_arr.numpy()
-                new_np = new_arr.numpy()
-                o_slo = tuple(ov_lo[a] - old_lo[a] for a in range(3))
-                o_shi = tuple(ov_hi[a] - old_lo[a] for a in range(3))
-                n_slo = tuple(ov_lo[a] - new_lo[a] for a in range(3))
-                n_shi = tuple(ov_hi[a] - new_lo[a] for a in range(3))
-                # Cell-overlap region only. Face-centered fields get the
-                # extra +1 row left at zero — the next BC pass repopulates
-                # boundary faces from the marker (same as a fresh init).
-                new_np[n_slo[0]:n_shi[0], n_slo[1]:n_shi[1], n_slo[2]:n_shi[2]] = \
-                    old_np[o_slo[0]:o_shi[0], o_slo[1]:o_shi[1], o_slo[2]:o_shi[2]]
-                new_arr = wp.array(new_np, dtype=old_arr.dtype, device=dev)
+                wp.launch(
+                    k3_copy_subdense_at_offset, dim=tuple(ns),
+                    inputs=[old_arr, new_arr,
+                            int(new_lo[0]), int(new_lo[1]), int(new_lo[2]),
+                            int(old_lo[0]), int(old_lo[1]), int(old_lo[2])],
+                    device=dev,
+                )
             setattr(self, attr, new_arr)
 
         rebuild_one("p", None)
