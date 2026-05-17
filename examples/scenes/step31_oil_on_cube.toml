@@ -1,0 +1,57 @@
+# step31 — oil pouring on cube obstacle (10 sec @ 60fps demo).
+#
+# Middle of the three "fluid families" demos. Tuning rationale:
+#   * viscosity = 0.1 + 4 iters  -> mild damping; stream stays cohesive
+#                                   but doesn't behave like a solid
+#   * surface_tension = 0.3  -> light beading on the cube, droplets
+#                               cluster but don't fully blob
+#   * pressure_solver = "pcg"  -> shared with water/honey for graph cache
+#   * transfer_mode = "apic"  -> preserves angular momentum, keeps the
+#                                stream's rotation as it bends around cube
+#   * csf_smoothing_passes = 2  -> indicator smoothing for stable σ
+
+[domain]
+resolution = [96, 96, 96]
+
+# No initial fluid pool — only the inflow jet streams from above.
+[fluid]
+type = "box"
+lo = [0.0, 0.0, 0.0]
+hi = [0.0, 0.0, 0.0]
+ppc = 0
+
+[[obstacle]]
+type = "box"
+center = [0.5, 0.4, 0.5]
+half_size = [0.15, 0.15, 0.15]
+
+[[inflow]]
+lo = [0.43, 0.85, 0.43]
+hi = [0.57, 0.95, 0.57]
+velocity = [0.0, -3.0, 0.0]
+rate_per_sec = 30000
+frame_start = 0
+frame_end = 600
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+pressure_solver = "pcg"
+flip_blend = 0.95
+gravity = -9.81
+viscosity = 0.05
+viscosity_iters = 2
+surface_tension = 0.1
+csf_smoothing_passes = 2
+transfer_mode = "apic"
+frames = 600
+fps = 60
+
+[output]
+cache_dir = "../../out/step31_oil_on_cube"
+mesh = true
+iso_level = 0.3
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2

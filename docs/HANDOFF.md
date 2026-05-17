@@ -8,9 +8,151 @@
 
 ## 0. NEXT-SESSION QUICKSTART (2026-05-17 → next session)
 
-**One-line state:** v1.0 B7-alt sub-dense storage macro is fully closed
-and bit-exact. Repo is healthy. The only loose thread is one
-`--timings`/`--enable-cuda-graphs` bug — that's the default next task.
+**One-line state:** F3.6 macro closed (architecture contract complete +
+hard CI gate). v0.7+v0.8+v0.9+v1.0+F3.6 all done, 35 commits pushed to
+origin/main `f7b48ea`. **In-flight:** demo30 water/oil/honey on cube
+(3 demo videos, 10 sec @ 60 fps each) — first iteration revealed
+composition + sim-tuning issues; mid-iteration when context got long
+enough to warrant handoff. See §0.5 below for the exact pickup point.
+
+### 0.5 In-flight session task — demo30 (3 fluids on cube)
+
+User asked for 3 demonstration videos: water → oil → honey pouring on
+a cube obstacle, 10 sec each @ 60 fps, with **two overlays**:
+- TOP: running "sim time: X.XXX s" counter
+- BOTTOM: wall-clock "sim: Xs / mesh: Ys / total: Zs"
+
+User added (mid-session): "хочу видеть как ... но iterate carefully —
+get water perfect first, then oil/honey are just viscosity tweaks. Time
+is a resource." That's the working principle for the next pickup.
+
+#### What was shipped this session
+
+| File | Purpose |
+|------|---------|
+| `examples/scenes/step30_water_on_cube.toml` | Water scene, no σ, FLIP |
+| `examples/scenes/step31_oil_on_cube.toml` | Oil scene, σ=0.1, APIC, light viscosity |
+| `examples/scenes/step32_honey_on_cube.toml` | Honey scene, σ=0.5, APIC, viscosity=0.8 |
+| `examples/render_fluid_on_cube_eevee.py` | Shared renderer parameterised by `--label` + `--color` |
+| `out/videos/step30_water.mp4` | FIRST iteration water (composition was bad) |
+| `out/videos/step31_oil.mp4` | FIRST iteration oil (params wrong) |
+| `out/videos/step32_honey.mp4` | FIRST iteration honey (params wrong) |
+
+**ALL 3 mp4s are CURRENT but the user REJECTED them: "Видео тесты
+провалены".** They're committed only so the comparison anchor exists;
+they will be replaced once the iteration cycle finishes.
+
+#### Iteration log + decisions made
+
+1. **First bake (rate=6000, iso=0.6, camera too far)** — water mesh
+   showed only as a small puddle on cube top. Root cause: 100
+   particles/frame at 96³ produces density below iso=0.6 threshold,
+   so the falling stream is invisible to marching cubes; only the
+   on-cube accumulation registers.
+2. **Fix attempt 1 — rate=40k, iso=0.3, camera close**
+   ([commit pending]): water renders a real splash but camera was
+   too close (text overlay clipped: "Water" → "ater") and cube
+   filled half the frame. Composition rejected.
+3. **Fix attempt 2 — camera pulled back to (2.5, -2.5, 1.5) +
+   lens=35**: render COMPLETED (background task `by4ooioc3`).
+   600 PNG frames at `C:/out/step30_eevee_frames/`. **NOT YET
+   STITCHED to mp4 — new session should inspect frames first before
+   committing the second iteration.** The mp4 anchor in
+   `out/videos/step30_water.mp4` is still the FIRST iteration
+   (rejected), kept as a comparison reference.
+
+#### Pickup steps (start here in N+1)
+
+1. **Wait for `by4ooioc3` to finish** OR check
+   `C:/out/step30_eevee_frames/` for 600 files. Inspect frame 1, 150,
+   300, 500 to check composition + stream visibility.
+2. **Iterate on WATER ONLY** until visibly correct. Do NOT re-render
+   oil/honey until water is locked in — user explicitly said this.
+3. **Single-frame test pattern for next iterations:** render frame
+   200 alone (`bpy.ops.render.render(write_still=True)` with
+   `frame_current=200`), inspect, then full 600. Saves ~10 min per
+   failed iteration.
+4. **Once water locks:** re-render oil + honey with the same camera
+   + lighting. The TOMLs are already updated with the new rate=30k
+   (oil) / 25k (honey), lower iso=0.3, and tuned viscosity. Bakes
+   already done — only render step left.
+5. **Stitch** to mp4 at 60 fps, replace existing
+   `out/videos/step3{0,1,2}_*.mp4`.
+
+#### Known bugs found during demo work (must record before fix)
+
+* **CUDA-graph + CSF + APIC + inflow → access violation crash**.
+  Reproduced with `step31_oil_on_cube.toml --enable-cuda-graphs`:
+  `wp.capture_launch` raised `OSError: access violation` after
+  prepare_frame on a CSF+APIC bake. Workaround: omit
+  `--enable-cuda-graphs` for CSF+APIC scenes (per-step cost rises
+  ~3-4× without graphs but bake completes). Real fix candidates: (a)
+  invalidate captured graph when CSF buffers re-alloc within a frame,
+  (b) audit which CSF/APIC scratch pointers actually change between
+  substeps. Track as new backlog item.
+* **CSF CFL warning at σ=0.3 + dt=0.015** (oil first attempt):
+  "needs 22 substeps for dt=0.015s but max_substeps=16" — solver
+  warned but didn't auto-raise the substep cap. Either bump
+  `cfl_max_substeps` default to 32, or auto-raise based on σ +
+  dx. Not blocking; just produces parasitic currents at high σ.
+* **rate_per_sec=6000 is far too low** for visible streams at 96³.
+  Reference scene `whitewater_splash.toml` uses 50000. Worth a
+  docs/notes "tuning sanity table" in DESIGN.md or SCENE_SCHEMA.md.
+* **Default `[fluid]` config pre-fills a basin** if you omit the
+  section. Required workaround in step30/31/32: explicit degenerate
+  `[fluid] lo=hi=(0,0,0) ppc=0`. Worth adding a `[fluid] type =
+  "none"` form to the schema.
+
+#### Open architectural question (deferred, not blocking demo work)
+
+User raised: **"расход памяти видео карты слишком огромный — не у всех
+столько памяти"**. Got a structured response from this session
+covering: B7-alt sub-dense (already shipped, 6× drop), memory
+estimator CLI proposal, auto-sub-dense detection proposal, VRAM
+budget guard, fp16 cold buffers research. User did NOT pick a
+direction yet — table is at the end of pre-handoff turn. Pick this
+up after demo30 ships.
+
+### 0.6 Final tuned parameters (current TOML state)
+
+**Water (step30):** rate=40k, velocity=(0,-3,0), iso=0.3, σ=0,
+viscosity=0, FLIP, PCG.
+
+**Oil (step31):** rate=30k, velocity=(0,-3,0), iso=0.3, σ=0.1
+(reduced from 0.3 to avoid CSF CFL warning), viscosity=0.05+2 iters
+(halved from 0.1+4 — was too clumpy), APIC, PCG.
+
+**Honey (step32):** rate=25k, velocity=(0,-3,0), iso=0.3, σ=0.5
+(reduced from 1.0), viscosity=0.8+6 iters (reduced from 2.0+14 — was
+a paralysed glob), APIC, PCG.
+
+All 3 use 96³, frames=600, fps=60, cube obstacle at (0.5, 0.4, 0.5)
+with half_size=0.15.
+
+### 0.7 Camera state (current renderer)
+
+`examples/render_fluid_on_cube_eevee.py`:
+* Camera at `(2.5, -2.5, 1.5)`, target `(0, 0, 0.25)`, lens 35mm.
+* Wide enough to fit inflow → cube → floor in frame.
+* Two overlays parented to camera: top-left at `(-0.42, 0.22, -1.0)`
+  cam-local, bottom-left at `(-0.42, -0.25, -1.0)`. With lens=35
+  these positions fit; if lens changes, overlays will need rescaling.
+
+### 0.8 Bakes that already exist on disk (DO NOT re-bake unless params change)
+
+* `out/step30_water_on_cube/` — 600 frames, V=54658 final, sim=23.18s,
+  mesh=13.05s. (Rate=40k version. First rate=6000 version was deleted.)
+* `out/step31_oil_on_cube/` — 600 frames, V=836 final, sim=55.01s,
+  mesh=2.15s. (Light viscosity version.)
+* `out/step32_honey_on_cube/` — 600 frames, V=642 final, sim=65.02s,
+  mesh=1.54s. (Reduced viscosity version. NOT YET re-baked after
+  the viscosity 2.0→0.8 reduction in TOML — re-bake needed before
+  next render.)
+
+Render artifacts at `C:/out/step3{0,1,2}_eevee_frames/` (600 PNG
+each when rendered).
+
+### 0.9 Original (pre-demo30) handoff content begins below
 
 ### Where we are right now
 

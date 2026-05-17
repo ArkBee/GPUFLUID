@@ -1,0 +1,62 @@
+# step32 — honey pouring on cube obstacle (10 sec @ 60fps demo).
+#
+# Heavy of the three "fluid families" demos. Tuning rationale:
+#   * viscosity = 2.0 + 14 iters  -> molasses-grade damping; flow is
+#                                    slow and rope-like (see honey.toml
+#                                    reference scene for the same range)
+#   * surface_tension = 1.0  -> strong σ, honey lands as a blob rather
+#                               than splashing
+#   * pressure_solver = "pcg"  -> consistent with water/oil
+#   * transfer_mode = "apic"  -> preserves blob cohesion better than
+#                                FLIP; APIC's affine reconstruction
+#                                handles viscous rotation cleanly
+#   * flip_blend = 0.97  -> slightly less PIC mixing (less splashy)
+#   * csf_smoothing_passes = 3  -> heavier indicator smoothing — keeps
+#                                  σ stable when the surface curves
+#                                  sharply over the cube edge
+
+[domain]
+resolution = [96, 96, 96]
+
+# No initial fluid pool — only the inflow jet streams from above.
+[fluid]
+type = "box"
+lo = [0.0, 0.0, 0.0]
+hi = [0.0, 0.0, 0.0]
+ppc = 0
+
+[[obstacle]]
+type = "box"
+center = [0.5, 0.4, 0.5]
+half_size = [0.15, 0.15, 0.15]
+
+[[inflow]]
+lo = [0.43, 0.85, 0.43]
+hi = [0.57, 0.95, 0.57]
+velocity = [0.0, -3.0, 0.0]
+rate_per_sec = 25000
+frame_start = 0
+frame_end = 600
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+pressure_solver = "pcg"
+flip_blend = 0.97
+gravity = -9.81
+viscosity = 0.8
+viscosity_iters = 6
+surface_tension = 0.5
+csf_smoothing_passes = 2
+transfer_mode = "apic"
+frames = 600
+fps = 60
+
+[output]
+cache_dir = "../../out/step32_honey_on_cube"
+mesh = true
+iso_level = 0.3
+smooth_passes = 2
+mesh_smooth_passes = 6
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2
