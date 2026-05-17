@@ -35,13 +35,25 @@ class StepProfiler:
     shared dict keyed by section name; ``summarize()`` reduces them.
     """
 
-    def __init__(self, enabled: bool = False):
+    def __init__(self, enabled: bool = False, device=None):
         self.enabled = bool(enabled)
+        self.device = device
         self._dict: dict[str, list[float]] = {}
 
     def section(self, name: str):
         if not self.enabled:
             return nullcontext()
+        # `synchronize=True` would call cudaStreamSynchronize inside a CUDA
+        # graph capture, which CUDA rejects with "operation not permitted
+        # while stream is capturing". Per-section wall-clock under graph
+        # replay is meaningless anyway (only the whole capture's time is),
+        # so no-op the section instead of crashing.
+        if self.device is not None:
+            try:
+                if self.device.is_capturing:
+                    return nullcontext()
+            except AttributeError:
+                pass
         return wp.ScopedTimer(name, dict=self._dict, synchronize=True,
                               print=False, active=True)
 

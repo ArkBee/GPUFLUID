@@ -73,6 +73,24 @@ def test_g1_9_surface_tension_section_fires_when_active():
     assert "surface_tension" in totals
 
 
+def test_g1_9_timings_with_cuda_graphs_does_not_crash():
+    """Regression: `--timings` + `--enable-cuda-graphs` used to throw
+    "operation not permitted while stream is capturing" because
+    `wp.ScopedTimer(synchronize=True)` issued a `cudaStreamSynchronize`
+    inside graph capture. The profiler must detect capture and no-op
+    those sections.
+    """
+    sol = FlipSolver3D(nx=16, ny=16, nz=16, dx=1.0 / 16,
+                       enable_timing=True, enable_cuda_graphs=True)
+    sol.seed_box((0.2, 0.2, 0.2), (0.6, 0.6, 0.6), ppc=2)
+    sol.step(dt=0.01)  # capture pass
+    sol.step(dt=0.01)  # replay pass
+    # Under capture every section is no-op'd, so the dict should be empty
+    # (or at most contain sections from outside capture, of which there
+    # are none in step()). The key guarantee is no exception.
+    assert sol._cuda_graph is not None, "graph should have been captured"
+
+
 def test_g1_9_reset_clears_state():
     p = StepProfiler(enabled=True)
     # Manually add an entry via the underlying dict to avoid Warp dep here

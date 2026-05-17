@@ -82,23 +82,30 @@ edge. `marker` stays full-dense; every kernel reads it via global
 --sub-dilation K             # default 4
 ```
 
-### Default next task
+### Default next task — DONE 2026-05-17
 
-**Fix `--timings` + `--enable-cuda-graphs` incompatibility.** Discovered
-at the step27 bake. `StepProfiler.section()` opens
-`wp.ScopedTimer(synchronize=True)`; once `step()` enters its graph-capture
-branch, the sync throws "Cannot synchronize device while graph capture is
-active." Pre-existing bug (also affects v0.9 graph-enabled bakes), not
-unique to sub-dense.
+**`--timings` + `--enable-cuda-graphs` incompatibility — fixed.**
+`StepProfiler` now takes an optional `device` and inspects
+`device.is_capturing` inside `section()`; when capture is active the
+section returns `nullcontext()` instead of `wp.ScopedTimer(synchronize=True)`
+(which would issue `cudaStreamSynchronize` and abort the capture). The
+solver constructs the profiler with `wp.get_device(self.device)` after
+`self.device` is resolved. Verified: `gpufluid simulate
+examples/scenes/big_pcg.toml --enable-cuda-graphs --timings` completes
+cleanly (sim 1.15s, mesh 4.29s, 88% graph hit rate); 214 tests green
+(new regression test `test_g1_9_timings_with_cuda_graphs_does_not_crash`
+in `tests/test_g1_9_step_profiler.py`).
 
-Recommended fix: in `src/gpufluid/primitives/profiling.py`, detect when
-the device is in graph-capture mode (via `wp.is_capturing(dev)`) and
-return `nullcontext` from `StepProfiler.section()` in that case. The
-per-section timing under graph replay isn't meaningful anyway (only the
-whole capture's wall time is) — better to no-op than crash.
+Note: under graph capture every section is no-op'd, so `--timings`
+output is empty when graphs are on (call it a documented tradeoff —
+per-section wall-clock under replay isn't meaningful anyway). The CLI
+already guards on empty timings dict, so nothing is printed in that
+case rather than something misleading. No video for this fix — it's a
+small bug fix, not a macro or milestone-level micro.
 
-Test: `gpufluid simulate examples/scenes/big_pcg.toml --enable-cuda-graphs --timings`
-should complete without error.
+### Next default task (after this fix)
+
+Pick from the Tier 4 backlog below, or wait for the user to direct.
 
 ### Tier 4 backlog (only if user asks, in priority order)
 

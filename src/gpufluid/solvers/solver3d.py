@@ -2387,7 +2387,6 @@ class FlipSolver3D:
                  sub_rebuild_every: int = 8,
                  sub_dilation: int = 4):
         from ..primitives.profiling import StepProfiler
-        self._prof = StepProfiler(enabled=enable_timing)
         # B5.2 — CUDA-graph cache. Lazily captures step() for the current
         # topology + launch args, replays until the topology changes.
         self._enable_cuda_graphs = bool(enable_cuda_graphs)
@@ -2407,6 +2406,8 @@ class FlipSolver3D:
         self.csf_smoothing_passes = max(1, int(csf_smoothing_passes))
         self.transfer_mode = transfer_mode   # "flip" | "pic" | "apic"
         self.device = device or default_device()
+        self._prof = StepProfiler(enabled=enable_timing,
+                                  device=wp.get_device(self.device))
 
         self.u  = zeros((nx + 1, ny, nz), dev=self.device)
         self.v  = zeros((nx, ny + 1, nz), dev=self.device)
