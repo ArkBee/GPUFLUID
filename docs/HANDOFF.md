@@ -4,8 +4,8 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 dense+PCG+APIC+viscosity slice shipped):**
-> 189 tests total (188 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
+> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 FULL kernel coverage shipped):**
+> 195 tests total (194 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
 > 81 unique IDs / 105 callables (`gpufluid info`), v0.7 + v0.8 + **v0.9 all
 > closed**. CUDA-graph eligibility matrix is at **9/9** (every shipped
 > pressure-solver path captures cleanly: jacobi/gs-rb/PCG × dense/sparse,
@@ -35,7 +35,13 @@
 >    `k3_apply_invM`, `k3_dot_fluid`, `k3_axpy_devscalar` + symmetric
 >    `k3_axpy`). `_pressure_pcg` lazy-resizes scratch buffers to
 >    `self.p.shape` so sub-dense rebuilds re-allocate them automatically.
->    +1 integration test; bit-exact. Suite 170→188.
+>    +1 integration test; bit-exact.
+> 6. B7-alt.3 follow-up — block-sparse (6 per-tile kernels for
+>    jacobi/gsrb/pcg) + CSF (10 kernels) + colour (3) + scalar (3).
+>    Every step()-launched kernel now sub-dense aware. step() guard
+>    reduced to belt-and-suspenders. +5 integration tests; all bit-exact.
+>    **B7-alt.3 macro CLOSED — every shipped FlipSolver3D config runs
+>    end-to-end under sub-dense storage.** Suite 170→194.
 > Previous session (2026-05-16, on `origin/main` at `adfb06c`):
 > ```
 > dcabdbe  docs/HANDOFF refresh post v1.0 spike
@@ -486,18 +492,24 @@ pytest -q tests/test_b7_alt_1_spike_deferred_dense.py -s
 
 Sized roughly by session-count and grouped by where they unblock.
 
-**Default next task** (no user direction): **B7-alt.3 follow-up** —
-extend offset-aware kernels to APIC / viscosity / CSF / PCG / GS-RB /
-block-sparse / colour / scalar. The Jacobi/dense/FLIP slice is shipped
-and bit-exact vs full dense; each remaining config is a mechanical
-port using the same off_x/y/z pattern. See `BACKLOG.md` B7-alt.3 entry
-for the full pending list of kernels to port.
+**Default next task** (no user direction): **B7-alt.4** — particle
+↔ sub-dense mapping with explicit bounds-check helper `pos_to_sub(p)`.
+Today the kernels rely on the dilation buffer to keep particle floor()
+indices inside the sub-dense bbox; a particle that escapes the bbox
+between rebuilds would silently get clamped to the edge in `sample3`
+or rejected by `scatter_face`'s bounds. Add an explicit world→local
+mapper + a one-shot warning when particles fall out of band.
 
-The spike (B7-alt.1) is committed (`tests/test_b7_alt_1_spike_deferred_dense.py`);
-the storage layer (B7-alt.2) is committed
-(`tests/test_b7_alt_2_sub_dense_storage.py`); the Jacobi-FLIP slice
-of B7-alt.3 is committed
-(`tests/test_b7_alt_3_jacobi_dense_flip.py`).
+Then **B7-alt.5** (CUDA-graph rehit rate ≥80% across rebuilds),
+**B7-alt.6** (256³ dam-break acceptance bench), **B7-alt.7** (scattered
+topology warning), **B7-alt.8** (on-device rebuild kernel).
+
+Reference tests:
+* `tests/test_b7_alt_1_spike_deferred_dense.py` — original feasibility spike
+* `tests/test_b7_alt_2_sub_dense_storage.py` — storage refactor invariants
+* `tests/test_b7_alt_3_jacobi_dense_flip.py` — 10 bit-exact integration tests
+  across every shipped config (jacobi/gsrb/pcg × dense/sparse × flip/pic/apic,
+  ± CSF, ± viscosity, ± colour, ± scalar)
 
 **v1.0 macro queue (B7-alt.3 follow-up … B7-alt.8 from BACKLOG):**
 

@@ -238,17 +238,18 @@ def test_should_rebuild_proximity_trigger():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.gpu
-def test_step_raises_with_sub_offset_active_for_unsupported_config():
-    """B7-alt.3 enables Jacobi / dense / FLIP / no-CSF / no-viscosity /
-    no-colour / no-scalar end-to-end. Other configs still need their
-    kernels threaded with off_x/y/z, so step() rejects them loudly
-    rather than launching at the wrong dimensions.
+def test_step_raises_with_sub_offset_active_for_unrecognised_solver():
+    """B7-alt.3 follow-up landed: every shipped solver knob is now
+    offset-aware (pressure × transfer × CSF × viscosity × colour ×
+    scalar × block-sparse). The step() guard remains only as a
+    belt-and-suspenders check against unrecognised solver options.
+    Verify it still fires for an unknown pressure_solver string.
 
-    The covered path is tested separately by
+    The covered configs are tested separately by
     tests/test_b7_alt_3_jacobi_dense_flip.py.
     """
     s = FlipSolver3D(nx=16, ny=16, nz=16, enable_sub_dense=True,
-                     sub_dilation=0, surface_tension=0.1)
+                     sub_dilation=0)
     s._rebuild_sub_dense((0, 0, 8), (8, 8, 16))
     assert s._sub_offset == (0, 0, 8)
     s.pos = wp.array(np.zeros((0, 3), dtype=np.float32),
@@ -256,5 +257,5 @@ def test_step_raises_with_sub_offset_active_for_unsupported_config():
     s.vel = wp.array(np.zeros((0, 3), dtype=np.float32),
                      dtype=wp.vec3, device=s.device)
     s.n_particles = 0
-    with pytest.raises(NotImplementedError, match=r"surface_tension"):
-        s.step(dt=0.01, pressure_iters=1)
+    with pytest.raises(NotImplementedError, match=r"pressure_solver"):
+        s.step(dt=0.01, pressure_iters=1, pressure_solver="multigrid_v_cycle")

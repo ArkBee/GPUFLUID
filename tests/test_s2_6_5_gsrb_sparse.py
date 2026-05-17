@@ -106,11 +106,11 @@ def test_b4_1_sparse_gsrb_kernel_speedup_at_128():
         for _ in range(iters):
             wp.launch(k3_gauss_seidel_rb_per_tile, dim=n_active * cells_per_block,
                       inputs=[s.p, s.div, s.marker, coords, BLOCK_SIZE, 0,
-                              n_active_dev],
+                              n_active_dev, 0, 0, 0],
                       device=s.device)
             wp.launch(k3_gauss_seidel_rb_per_tile, dim=n_active * cells_per_block,
                       inputs=[s.p, s.div, s.marker, coords, BLOCK_SIZE, 1,
-                              n_active_dev],
+                              n_active_dev, 0, 0, 0],
                       device=s.device)
 
     # warm both paths

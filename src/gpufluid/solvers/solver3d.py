@@ -210,12 +210,17 @@ block("S2.13", "Implicit viscosity Jacobi sweep on one MAC component")(k3_jacobi
 def k3_indicator_from_marker(
     marker: wp.array3d(dtype=int),
     chi: wp.array3d(dtype=float),
+    off_x: int, off_y: int, off_z: int,
 ):
-    """[BLK S2.14.1a] Raw fluid indicator: 1 where marker==1 (fluid), else 0."""
+    """[BLK S2.14.1a] Raw fluid indicator: 1 where marker==1 (fluid), else 0.
+
+    B7-alt.3: chi sub-dense (iterates over chi.shape, LOCAL), marker
+    full-dense (read with gi/gj/gk = LOCAL + offset)."""
     i, j, k = wp.tid()
-    if i >= marker.shape[0] or j >= marker.shape[1] or k >= marker.shape[2]:
+    if i >= chi.shape[0] or j >= chi.shape[1] or k >= chi.shape[2]:
         return
-    if marker[i, j, k] == 1:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj, gk] == 1:
         chi[i, j, k] = 1.0
     else:
         chi[i, j, k] = 0.0
@@ -313,13 +318,20 @@ def k3_csf_apply_u(
     sigma_dt_over_rho: float,
     dx: float,
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.14.4a] u-face: Δu = (σ dt/ρ) · κ_face · (∂χ̃/∂x)_face.
-    Skips domain-boundary and solid-adjacent faces."""
+
+    B7-alt.3: u/chi/kappa sub-dense (local), marker full-dense (global).
+    (nx,ny,nz) are SUB-DENSE cell extents; the i==0 / i==nx tests guard
+    the SUB-DENSE buffer edges. At a sub-dense edge that's also a
+    global wall edge the dilation buffer keeps chi=0/kappa=0, so the
+    impulse vanishes naturally."""
     i, j, k = wp.tid()
     if i <= 0 or i >= nx or j < 0 or j >= ny or k < 0 or k >= nz:
         return
-    if marker[i - 1, j, k] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi - 1, gj, gk] == 2 or marker[gi, gj, gk] == 2:
         return
     grad = (chi[i, j, k] - chi[i - 1, j, k]) / dx
     kf = 0.5 * (kappa[i, j, k] + kappa[i - 1, j, k])
@@ -335,11 +347,13 @@ def k3_csf_apply_v(
     sigma_dt_over_rho: float,
     dx: float,
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     i, j, k = wp.tid()
     if i < 0 or i >= nx or j <= 0 or j >= ny or k < 0 or k >= nz:
         return
-    if marker[i, j - 1, k] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj - 1, gk] == 2 or marker[gi, gj, gk] == 2:
         return
     grad = (chi[i, j, k] - chi[i, j - 1, k]) / dx
     kf = 0.5 * (kappa[i, j, k] + kappa[i, j - 1, k])
@@ -355,11 +369,13 @@ def k3_csf_apply_w(
     sigma_dt_over_rho: float,
     dx: float,
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     i, j, k = wp.tid()
     if i < 0 or i >= nx or j < 0 or j >= ny or k <= 0 or k >= nz:
         return
-    if marker[i, j, k - 1] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj, gk - 1] == 2 or marker[gi, gj, gk] == 2:
         return
     grad = (chi[i, j, k] - chi[i, j, k - 1]) / dx
     kf = 0.5 * (kappa[i, j, k] + kappa[i, j, k - 1])
@@ -388,14 +404,18 @@ def k3_csf_sum_u(
     sum_du: wp.array(dtype=float),
     count: wp.array(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
-    """Σ Δu and face-count over fluid-adjacent u-faces (skip walls)."""
+    """Σ Δu and face-count over fluid-adjacent u-faces (skip walls).
+
+    B7-alt.3: u_before/u_after sub-dense, marker full-dense."""
     i, j, k = wp.tid()
     if i <= 0 or i >= nx or j < 0 or j >= ny or k < 0 or k >= nz:
         return
-    if marker[i - 1, j, k] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi - 1, gj, gk] == 2 or marker[gi, gj, gk] == 2:
         return
-    if marker[i - 1, j, k] != 1 and marker[i, j, k] != 1:
+    if marker[gi - 1, gj, gk] != 1 and marker[gi, gj, gk] != 1:
         return
     wp.atomic_add(sum_du, 0, u_after[i, j, k] - u_before[i, j, k])
     wp.atomic_add(count, 0, 1.0)
@@ -409,13 +429,15 @@ def k3_csf_sum_v(
     sum_dv: wp.array(dtype=float),
     count: wp.array(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     i, j, k = wp.tid()
     if i < 0 or i >= nx or j <= 0 or j >= ny or k < 0 or k >= nz:
         return
-    if marker[i, j - 1, k] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj - 1, gk] == 2 or marker[gi, gj, gk] == 2:
         return
-    if marker[i, j - 1, k] != 1 and marker[i, j, k] != 1:
+    if marker[gi, gj - 1, gk] != 1 and marker[gi, gj, gk] != 1:
         return
     wp.atomic_add(sum_dv, 0, v_after[i, j, k] - v_before[i, j, k])
     wp.atomic_add(count, 0, 1.0)
@@ -429,13 +451,15 @@ def k3_csf_sum_w(
     sum_dw: wp.array(dtype=float),
     count: wp.array(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     i, j, k = wp.tid()
     if i < 0 or i >= nx or j < 0 or j >= ny or k <= 0 or k >= nz:
         return
-    if marker[i, j, k - 1] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj, gk - 1] == 2 or marker[gi, gj, gk] == 2:
         return
-    if marker[i, j, k - 1] != 1 and marker[i, j, k] != 1:
+    if marker[gi, gj, gk - 1] != 1 and marker[gi, gj, gk] != 1:
         return
     wp.atomic_add(sum_dw, 0, w_after[i, j, k] - w_before[i, j, k])
     wp.atomic_add(count, 0, 1.0)
@@ -503,17 +527,18 @@ def k3_csf_subtract_bias_u_dev(
     sum_dev: wp.array(dtype=float),
     count_dev: wp.array(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
-    """Same as k3_csf_subtract_bias_u but reads sum/count from device
-    instead of taking a host-computed `bias` float. Lets the host skip
-    the `s.numpy() / c.numpy()` round-trip so step() stays sync-free
-    under graph capture (B5 follow-up)."""
+    """Same as k3_csf_subtract_bias_u but reads sum/count from device.
+
+    B7-alt.3: u sub-dense, marker full-dense."""
     i, j, k = wp.tid()
     if i <= 0 or i >= nx or j < 0 or j >= ny or k < 0 or k >= nz:
         return
-    if marker[i - 1, j, k] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi - 1, gj, gk] == 2 or marker[gi, gj, gk] == 2:
         return
-    if marker[i - 1, j, k] != 1 and marker[i, j, k] != 1:
+    if marker[gi - 1, gj, gk] != 1 and marker[gi, gj, gk] != 1:
         return
     c = count_dev[0]
     if c <= 0.5:
@@ -528,13 +553,15 @@ def k3_csf_subtract_bias_v_dev(
     sum_dev: wp.array(dtype=float),
     count_dev: wp.array(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     i, j, k = wp.tid()
     if i < 0 or i >= nx or j <= 0 or j >= ny or k < 0 or k >= nz:
         return
-    if marker[i, j - 1, k] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj - 1, gk] == 2 or marker[gi, gj, gk] == 2:
         return
-    if marker[i, j - 1, k] != 1 and marker[i, j, k] != 1:
+    if marker[gi, gj - 1, gk] != 1 and marker[gi, gj, gk] != 1:
         return
     c = count_dev[0]
     if c <= 0.5:
@@ -549,13 +576,15 @@ def k3_csf_subtract_bias_w_dev(
     sum_dev: wp.array(dtype=float),
     count_dev: wp.array(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     i, j, k = wp.tid()
     if i < 0 or i >= nx or j < 0 or j >= ny or k <= 0 or k >= nz:
         return
-    if marker[i, j, k - 1] == 2 or marker[i, j, k] == 2:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj, gk - 1] == 2 or marker[gi, gj, gk] == 2:
         return
-    if marker[i, j, k - 1] != 1 and marker[i, j, k] != 1:
+    if marker[gi, gj, gk - 1] != 1 and marker[gi, gj, gk] != 1:
         return
     c = count_dev[0]
     if c <= 0.5:
@@ -584,15 +613,19 @@ def k3_p2g_color(
     cgrid_b: wp.array3d(dtype=float),
     cgrid_w: wp.array3d(dtype=float),
     dx: float, nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.15.1] Trilinear scatter of per-particle RGB into cell-centred grid.
-    Uses the same 8-corner weights as velocity P2G; cell-centred (fx = px/dx - 0.5)."""
+
+    B7-alt.3: cgrid_* are sub-dense (local coords); particle pos in world.
+    Cell-centred sample-time coords get translated by (off_*); (nx,ny,nz)
+    are SUB-DENSE extents."""
     p = wp.tid()
     pp = pos[p]
     c = color[p]
-    fx = pp[0] / dx - 0.5
-    fy = pp[1] / dx - 0.5
-    fz = pp[2] / dx - 0.5
+    fx = pp[0] / dx - 0.5 - float(off_x)
+    fy = pp[1] / dx - 0.5 - float(off_y)
+    fz = pp[2] / dx - 0.5 - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -651,14 +684,16 @@ def k3_g2p_color(
     cgrid_b: wp.array3d(dtype=float),
     cgrid_w: wp.array3d(dtype=float),
     dx: float, nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.15.3] Trilinear gather of grid RGB back to particle.
-    Particles in empty cells keep their previous color (no overwrite)."""
+
+    B7-alt.3: cgrid_* sub-dense; particle pos in world; translate to local."""
     p = wp.tid()
     pp = pos[p]
-    fx = pp[0] / dx - 0.5
-    fy = pp[1] / dx - 0.5
-    fz = pp[2] / dx - 0.5
+    fx = pp[0] / dx - 0.5 - float(off_x)
+    fy = pp[1] / dx - 0.5 - float(off_y)
+    fz = pp[2] / dx - 0.5 - float(off_z)
     # Use sample3 on each channel + check weight to decide if we update.
     r = sample3(cgrid_r, fx, fy, fz, nx, ny, nz)
     g = sample3(cgrid_g, fx, fy, fz, nx, ny, nz)
@@ -684,15 +719,18 @@ def k3_p2g_scalar(
     sgrid_v: wp.array3d(dtype=float),
     sgrid_w: wp.array3d(dtype=float),
     dx: float, nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.18.1] Trilinear scatter of per-particle scalar onto a
-    cell-centred grid. Mirrors k3_p2g_color but for one channel."""
+    cell-centred grid. Mirrors k3_p2g_color but for one channel.
+
+    B7-alt.3: sgrid_* sub-dense; pos in world; offset translates."""
     p = wp.tid()
     pp = pos[p]
     v = attr[p]
-    fx = pp[0] / dx - 0.5
-    fy = pp[1] / dx - 0.5
-    fz = pp[2] / dx - 0.5
+    fx = pp[0] / dx - 0.5 - float(off_x)
+    fy = pp[1] / dx - 0.5 - float(off_y)
+    fz = pp[2] / dx - 0.5 - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -740,14 +778,16 @@ def k3_g2p_scalar(
     sgrid_v: wp.array3d(dtype=float),
     sgrid_w: wp.array3d(dtype=float),
     dx: float, nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.18.3] Trilinear gather of grid scalar back to particle.
-    Particles in empty cells keep their previous value (no overwrite)."""
+
+    B7-alt.3: sgrid_* sub-dense; particle pos world; translate to local."""
     p = wp.tid()
     pp = pos[p]
-    fx = pp[0] / dx - 0.5
-    fy = pp[1] / dx - 0.5
-    fz = pp[2] / dx - 0.5
+    fx = pp[0] / dx - 0.5 - float(off_x)
+    fy = pp[1] / dx - 0.5 - float(off_y)
+    fz = pp[2] / dx - 0.5 - float(off_z)
     v = sample3(sgrid_v, fx, fy, fz, nx, ny, nz)
     w = sample3(sgrid_w, fx, fy, fz, nx, ny, nz)
     if w > 1.0e-6:
@@ -1097,12 +1137,19 @@ def k3_jacobi_pressure_per_tile(
     active_coords: wp.array(dtype=wp.vec3i),
     block_size: int,
     n_active_dev: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
     """Launched at worst-case `dim = n_blocks * block_size³` (constant for
     a given resolution — needed for CUDA-graph capture). Each thread
     covers one cell within an active block. Threads whose `blk` index
     lies beyond the live `n_active_dev[0]` early-return so the cost of
-    the worst-case launch is bounded to one device read + a branch."""
+    the worst-case launch is bounded to one device read + a branch.
+
+    B7-alt.3: active_coords stores GLOBAL tile coords (built by
+    _build_active_blocks scanning the full marker); p_in/p_out/div are
+    sub-dense (local). Marker reads use global (gi/gj/gk); pressure
+    reads use local (li/lj/lk = global - offset). In legacy full-dense
+    mode the offsets are 0 and global == local."""
     tid = wp.tid()
     cells_per_block = block_size * block_size * block_size
     blk = tid // cells_per_block
@@ -1114,50 +1161,52 @@ def k3_jacobi_pressure_per_tile(
     dj = rem2 // block_size
     dk = rem2 - dj * block_size
     c = active_coords[blk]
-    i = c[0] * block_size + di
-    j = c[1] * block_size + dj
-    k = c[2] * block_size + dk
-    nx = p_in.shape[0]; ny = p_in.shape[1]; nz = p_in.shape[2]
-    if i >= nx or j >= ny or k >= nz:
+    gi = c[0] * block_size + di
+    gj = c[1] * block_size + dj
+    gk = c[2] * block_size + dk
+    li = gi - off_x; lj = gj - off_y; lk = gk - off_z
+    sx = p_in.shape[0]; sy = p_in.shape[1]; sz = p_in.shape[2]
+    if li < 0 or lj < 0 or lk < 0 or li >= sx or lj >= sy or lk >= sz:
         return
-    if marker[i, j, k] != 1:
-        p_out[i, j, k] = 0.0
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if marker[gi, gj, gk] != 1:
+        p_out[li, lj, lk] = 0.0
         return
     sum_nb = float(0.0); diag = float(0.0)
-    if i > 0:
-        m = marker[i - 1, j, k]
+    if gi > 0:
+        m = marker[gi - 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i - 1, j, k]
-    if i < nx - 1:
-        m = marker[i + 1, j, k]
+            if m == 1 and li > 0: sum_nb += p_in[li - 1, lj, lk]
+    if gi < gnx - 1:
+        m = marker[gi + 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i + 1, j, k]
-    if j > 0:
-        m = marker[i, j - 1, k]
+            if m == 1 and li < sx - 1: sum_nb += p_in[li + 1, lj, lk]
+    if gj > 0:
+        m = marker[gi, gj - 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j - 1, k]
-    if j < ny - 1:
-        m = marker[i, j + 1, k]
+            if m == 1 and lj > 0: sum_nb += p_in[li, lj - 1, lk]
+    if gj < gny - 1:
+        m = marker[gi, gj + 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j + 1, k]
-    if k > 0:
-        m = marker[i, j, k - 1]
+            if m == 1 and lj < sy - 1: sum_nb += p_in[li, lj + 1, lk]
+    if gk > 0:
+        m = marker[gi, gj, gk - 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j, k - 1]
-    if k < nz - 1:
-        m = marker[i, j, k + 1]
+            if m == 1 and lk > 0: sum_nb += p_in[li, lj, lk - 1]
+    if gk < gnz - 1:
+        m = marker[gi, gj, gk + 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j, k + 1]
+            if m == 1 and lk < sz - 1: sum_nb += p_in[li, lj, lk + 1]
     if diag < 0.5:
-        p_out[i, j, k] = 0.0
+        p_out[li, lj, lk] = 0.0
         return
-    p_out[i, j, k] = (sum_nb - div[i, j, k]) / diag
+    p_out[li, lj, lk] = (sum_nb - div[li, lj, lk]) / diag
 
 
 block("S2.6.4", "Per-tile Jacobi pressure: launch only on active 8³ blocks")(k3_jacobi_pressure_per_tile)
@@ -1249,13 +1298,15 @@ def k3_gauss_seidel_rb_per_tile(
     block_size: int,
     color: int,                          # 0=red, 1=black
     n_active_dev: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
     """Launched at worst-case `dim = n_blocks * block_size³`. Threads
     whose `blk` index is beyond `n_active_dev[0]` early-return.
 
     Updates p in place — same red/black ordering as `k3_gauss_seidel_rb`.
-    Outside-active-set cells are not touched; they keep whatever value
-    they had from initialisation (zeros) or a prior sweep.
+
+    B7-alt.3: tile coords global, p/div sub-dense (local), marker
+    full-dense (global). Red/black parity keyed off GLOBAL indices.
     """
     tid = wp.tid()
     cells_per_block = block_size * block_size * block_size
@@ -1268,52 +1319,54 @@ def k3_gauss_seidel_rb_per_tile(
     dj = rem2 // block_size
     dk = rem2 - dj * block_size
     c = active_coords[blk]
-    i = c[0] * block_size + di
-    j = c[1] * block_size + dj
-    k = c[2] * block_size + dk
-    nx = p.shape[0]; ny = p.shape[1]; nz = p.shape[2]
-    if i >= nx or j >= ny or k >= nz:
+    gi = c[0] * block_size + di
+    gj = c[1] * block_size + dj
+    gk = c[2] * block_size + dk
+    li = gi - off_x; lj = gj - off_y; lk = gk - off_z
+    sx = p.shape[0]; sy = p.shape[1]; sz = p.shape[2]
+    if li < 0 or lj < 0 or lk < 0 or li >= sx or lj >= sy or lk >= sz:
         return
-    if (i + j + k) % 2 != color:
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if (gi + gj + gk) % 2 != color:
         return
-    if marker[i, j, k] != 1:
-        p[i, j, k] = 0.0
+    if marker[gi, gj, gk] != 1:
+        p[li, lj, lk] = 0.0
         return
     sum_nb = float(0.0); diag = float(0.0)
-    if i > 0:
-        m = marker[i - 1, j, k]
+    if gi > 0:
+        m = marker[gi - 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i - 1, j, k]
-    if i < nx - 1:
-        m = marker[i + 1, j, k]
+            if m == 1 and li > 0: sum_nb += p[li - 1, lj, lk]
+    if gi < gnx - 1:
+        m = marker[gi + 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i + 1, j, k]
-    if j > 0:
-        m = marker[i, j - 1, k]
+            if m == 1 and li < sx - 1: sum_nb += p[li + 1, lj, lk]
+    if gj > 0:
+        m = marker[gi, gj - 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j - 1, k]
-    if j < ny - 1:
-        m = marker[i, j + 1, k]
+            if m == 1 and lj > 0: sum_nb += p[li, lj - 1, lk]
+    if gj < gny - 1:
+        m = marker[gi, gj + 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j + 1, k]
-    if k > 0:
-        m = marker[i, j, k - 1]
+            if m == 1 and lj < sy - 1: sum_nb += p[li, lj + 1, lk]
+    if gk > 0:
+        m = marker[gi, gj, gk - 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j, k - 1]
-    if k < nz - 1:
-        m = marker[i, j, k + 1]
+            if m == 1 and lk > 0: sum_nb += p[li, lj, lk - 1]
+    if gk < gnz - 1:
+        m = marker[gi, gj, gk + 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j, k + 1]
+            if m == 1 and lk < sz - 1: sum_nb += p[li, lj, lk + 1]
     if diag < 0.5:
-        p[i, j, k] = 0.0
+        p[li, lj, lk] = 0.0
     else:
-        p[i, j, k] = (sum_nb - div[i, j, k]) / diag
+        p[li, lj, lk] = (sum_nb - div[li, lj, lk]) / diag
 
 
 block("S2.6.5", "Per-tile GS-RB: red-black sweep on active 8³ blocks only")(k3_gauss_seidel_rb_per_tile)
@@ -2006,10 +2059,15 @@ def k3_apply_A_per_tile(
     block_size: int,
     n_active_dev: wp.array(dtype=int),
     done: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.6.6] Apply Laplacian A·x on active tiles only. Capped at
     worst-case launch via `n_active_dev`; also gated by the PCG stop
-    flag `done` so the captured graph can short-circuit on convergence."""
+    flag `done` so the captured graph can short-circuit on convergence.
+
+    B7-alt.3: tile coords global, x/y sub-dense (local), marker
+    full-dense (global). See the dense `k3_apply_A` for the offset
+    pattern."""
     if done[0] != 0:
         return
     tid = wp.tid()
@@ -2017,44 +2075,46 @@ def k3_apply_A_per_tile(
     if tid // cells_per_block >= n_active_dev[0]:
         return
     ijk = _tile_to_ijk(tid, active_coords, block_size)
-    i = ijk[0]; j = ijk[1]; k = ijk[2]
-    nx = x.shape[0]; ny = x.shape[1]; nz = x.shape[2]
-    if i >= nx or j >= ny or k >= nz:
+    gi = ijk[0]; gj = ijk[1]; gk = ijk[2]
+    li = gi - off_x; lj = gj - off_y; lk = gk - off_z
+    sx = x.shape[0]; sy = x.shape[1]; sz = x.shape[2]
+    if li < 0 or lj < 0 or lk < 0 or li >= sx or lj >= sy or lk >= sz:
         return
-    if marker[i, j, k] != 1:
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if marker[gi, gj, gk] != 1:
         return  # leave y alone; per-iter caller zero-fills before use
     diag = float(0.0); sum_nb = float(0.0)
-    if i > 0:
-        m = marker[i - 1, j, k]
+    if gi > 0:
+        m = marker[gi - 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i - 1, j, k]
-    if i < nx - 1:
-        m = marker[i + 1, j, k]
+            if m == 1 and li > 0: sum_nb += x[li - 1, lj, lk]
+    if gi < gnx - 1:
+        m = marker[gi + 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i + 1, j, k]
-    if j > 0:
-        m = marker[i, j - 1, k]
+            if m == 1 and li < sx - 1: sum_nb += x[li + 1, lj, lk]
+    if gj > 0:
+        m = marker[gi, gj - 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j - 1, k]
-    if j < ny - 1:
-        m = marker[i, j + 1, k]
+            if m == 1 and lj > 0: sum_nb += x[li, lj - 1, lk]
+    if gj < gny - 1:
+        m = marker[gi, gj + 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j + 1, k]
-    if k > 0:
-        m = marker[i, j, k - 1]
+            if m == 1 and lj < sy - 1: sum_nb += x[li, lj + 1, lk]
+    if gk > 0:
+        m = marker[gi, gj, gk - 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j, k - 1]
-    if k < nz - 1:
-        m = marker[i, j, k + 1]
+            if m == 1 and lk > 0: sum_nb += x[li, lj, lk - 1]
+    if gk < gnz - 1:
+        m = marker[gi, gj, gk + 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j, k + 1]
-    y[i, j, k] = diag * x[i, j, k] - sum_nb
+            if m == 1 and lk < sz - 1: sum_nb += x[li, lj, lk + 1]
+    y[li, lj, lk] = diag * x[li, lj, lk] - sum_nb
 
 
 block("S2.6.6", "Per-tile PCG: apply A on active blocks")(k3_apply_A_per_tile)
@@ -2070,10 +2130,10 @@ def k3_apply_invM_per_tile(
     block_size: int,
     n_active_dev: wp.array(dtype=int),
     done: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
-    """[BLK S2.6.6] z = M⁻¹ r on active tiles. Non-fluid cells of an active
-    tile get zeroed (matches the dense kernel's contract); cells outside
-    the active set keep their previous (zero-init) value."""
+    """[BLK S2.6.6] z = M⁻¹ r on active tiles. B7-alt.3: r/diag/z sub-dense,
+    marker full-dense."""
     if done[0] != 0:
         return
     tid = wp.tid()
@@ -2081,13 +2141,16 @@ def k3_apply_invM_per_tile(
     if tid // cells_per_block >= n_active_dev[0]:
         return
     ijk = _tile_to_ijk(tid, active_coords, block_size)
-    i = ijk[0]; j = ijk[1]; k = ijk[2]
-    if i >= r.shape[0] or j >= r.shape[1] or k >= r.shape[2]:
+    gi = ijk[0]; gj = ijk[1]; gk = ijk[2]
+    li = gi - off_x; lj = gj - off_y; lk = gk - off_z
+    if li < 0 or lj < 0 or lk < 0:
         return
-    if marker[i, j, k] != 1:
-        z[i, j, k] = 0.0
+    if li >= r.shape[0] or lj >= r.shape[1] or lk >= r.shape[2]:
+        return
+    if marker[gi, gj, gk] != 1:
+        z[li, lj, lk] = 0.0
     else:
-        z[i, j, k] = r[i, j, k] / diag[i, j, k]
+        z[li, lj, lk] = r[li, lj, lk] / diag[li, lj, lk]
 
 
 block("S2.6.6", "Per-tile PCG: apply M⁻¹ on active blocks")(k3_apply_invM_per_tile)
@@ -2103,9 +2166,11 @@ def k3_dot_fluid_per_tile(
     block_size: int,
     n_active_dev: wp.array(dtype=int),
     done: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
     """[BLK S2.6.6] Inner product over fluid cells, per-tile dispatched.
-    Caller zeroes `out[0]` before launch."""
+    Caller zeroes `out[0]` before launch. B7-alt.3: a/b sub-dense,
+    marker full-dense."""
     if done[0] != 0:
         return
     tid = wp.tid()
@@ -2113,11 +2178,14 @@ def k3_dot_fluid_per_tile(
     if tid // cells_per_block >= n_active_dev[0]:
         return
     ijk = _tile_to_ijk(tid, active_coords, block_size)
-    i = ijk[0]; j = ijk[1]; k = ijk[2]
-    if i >= a.shape[0] or j >= a.shape[1] or k >= a.shape[2]:
+    gi = ijk[0]; gj = ijk[1]; gk = ijk[2]
+    li = gi - off_x; lj = gj - off_y; lk = gk - off_z
+    if li < 0 or lj < 0 or lk < 0:
         return
-    if marker[i, j, k] == 1:
-        wp.atomic_add(out, 0, a[i, j, k] * b[i, j, k])
+    if li >= a.shape[0] or lj >= a.shape[1] or lk >= a.shape[2]:
+        return
+    if marker[gi, gj, gk] == 1:
+        wp.atomic_add(out, 0, a[li, lj, lk] * b[li, lj, lk])
 
 
 block("S2.6.6", "Per-tile PCG: fluid-cell dot product on active blocks")(k3_dot_fluid_per_tile)
@@ -2132,8 +2200,10 @@ def k3_axpy_devscalar_per_tile(
     block_size: int,
     n_active_dev: wp.array(dtype=int),
     done: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
-    """[BLK S2.6.6] y_out = y_in + sign · a_dev[0] · x on active tiles."""
+    """[BLK S2.6.6] y_out = y_in + sign · a_dev[0] · x on active tiles.
+    B7-alt.3: x/y_in/y_out sub-dense, marker full-dense."""
     if done[0] != 0:
         return
     tid = wp.tid()
@@ -2141,14 +2211,17 @@ def k3_axpy_devscalar_per_tile(
     if tid // cells_per_block >= n_active_dev[0]:
         return
     ijk = _tile_to_ijk(tid, active_coords, block_size)
-    i = ijk[0]; j = ijk[1]; k = ijk[2]
-    if i >= x.shape[0] or j >= x.shape[1] or k >= x.shape[2]:
+    gi = ijk[0]; gj = ijk[1]; gk = ijk[2]
+    li = gi - off_x; lj = gj - off_y; lk = gk - off_z
+    if li < 0 or lj < 0 or lk < 0:
         return
-    if marker[i, j, k] != 1:
-        y_out[i, j, k] = 0.0
+    if li >= x.shape[0] or lj >= x.shape[1] or lk >= x.shape[2]:
+        return
+    if marker[gi, gj, gk] != 1:
+        y_out[li, lj, lk] = 0.0
         return
     a = a_dev[0] * sign
-    y_out[i, j, k] = y_in[i, j, k] + a * x[i, j, k]
+    y_out[li, lj, lk] = y_in[li, lj, lk] + a * x[li, lj, lk]
 
 
 block("S2.6.6", "Per-tile PCG: AXPY with device-side scalar on active blocks")(k3_axpy_devscalar_per_tile)
@@ -2945,43 +3018,49 @@ class FlipSolver3D:
         idiom as the dense path). On-device convergence detection sets
         `_pcg_done = 1`; subsequent iter kernels early-return.
         """
-        nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
-        if not hasattr(self, "_pcg_r"):
-            self._pcg_r = zeros((nx, ny, nz), dev=dev)
-            self._pcg_z = zeros((nx, ny, nz), dev=dev)
-            self._pcg_p = zeros((nx, ny, nz), dev=dev)
-            self._pcg_Ap = zeros((nx, ny, nz), dev=dev)
-            self._pcg_diag = zeros((nx, ny, nz), dev=dev)
-            self._pcg_alpha = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_beta = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_rz_old = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_rz_new = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_done = wp.zeros(1, dtype=int, device=dev)
-            self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
+        # B7-alt.3: scratch is sub-dense-aware via self.p.shape; nbx/nby/nbz
+        # are derived from the FULL marker (active tiles live in global cell
+        # space). The kernels translate global → local via off_x/y/z.
+        dev = self.device
+        target_shape = tuple(self.p.shape)
+        ox, oy, oz = self._sub_offset
+        if (not hasattr(self, "_pcg_r")
+                or tuple(self._pcg_r.shape) != target_shape):
+            self._pcg_r = zeros(target_shape, dev=dev)
+            self._pcg_z = zeros(target_shape, dev=dev)
+            self._pcg_p = zeros(target_shape, dev=dev)
+            self._pcg_Ap = zeros(target_shape, dev=dev)
+            self._pcg_diag = zeros(target_shape, dev=dev)
+            if not hasattr(self, "_pcg_alpha"):
+                self._pcg_alpha = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_beta = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_rz_old = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_rz_new = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_done = wp.zeros(1, dtype=int, device=dev)
+                self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
 
         # Reset per-call stop flag (mirrors dense `_pressure_pcg`).
         wp.launch(k3_zero_int_scalar, dim=1, inputs=[self._pcg_done], device=dev)
         done = self._pcg_done
 
-        # Diag: still cheap, launch dense. (One-shot per step.)
-        # Sparse PCG (block-sparse per-tile variants) hasn't been ported
-        # to sub-dense yet — guard in step() rejects this combo — so we
-        # always pass full-dense offsets here.
-        wp.launch(k3_compute_diag, dim=(nx, ny, nz),
-                  inputs=[self.marker, self._pcg_diag, 0, 0, 0], device=dev)
+        # Diag at sub-dense shape; offsets passed so marker lookups translate.
+        wp.launch(k3_compute_diag, dim=target_shape,
+                  inputs=[self.marker, self._pcg_diag, ox, oy, oz], device=dev)
 
-        # `coords` device array + `_n_active_dev` are populated here.
+        # `coords` device array + `_n_active_dev` are populated here from
+        # the FULL marker — active tile coords are GLOBAL cell coords.
         n_active, coords = self._build_active_blocks(_no_host_sync=_no_host_sync)
         if not _no_host_sync and n_active == 0:
             self.p.zero_()
             return 0
         bs = BLOCK_SIZE
-        nbx = (nx + bs - 1) // bs
-        nby = (ny + bs - 1) // bs
-        nbz = (nz + bs - 1) // bs
+        gnx, gny, gnz = self.nx, self.ny, self.nz
+        nbx = (gnx + bs - 1) // bs
+        nby = (gny + bs - 1) // bs
+        nbz = (gnz + bs - 1) // bs
         n_blocks = nbx * nby * nbz
         # Worst-case launch dim — constant for the lifetime of this solver.
         # Threads with `blk >= n_active_dev[0]` early-return inside the kernel.
@@ -2992,13 +3071,14 @@ class FlipSolver3D:
         wp.copy(self._pcg_r, self.div)
         wp.launch(k3_apply_invM_per_tile, dim=tile_dim,
                   inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker,
-                          coords, bs, n_active_dev, done], device=dev)
+                          coords, bs, n_active_dev, done, ox, oy, oz], device=dev)
         wp.copy(self._pcg_p, self._pcg_z)
 
         def dev_dot(a, b, out):
             wp.launch(k3_zero_scalar, dim=1, inputs=[out, done], device=dev)
             wp.launch(k3_dot_fluid_per_tile, dim=tile_dim,
-                      inputs=[a, b, out, self.marker, coords, bs, n_active_dev, done],
+                      inputs=[a, b, out, self.marker, coords, bs, n_active_dev,
+                              done, ox, oy, oz],
                       device=dev)
 
         dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_old)
@@ -3017,17 +3097,20 @@ class FlipSolver3D:
         for it in range(max_iter):
             wp.launch(k3_apply_A_per_tile, dim=tile_dim,
                       inputs=[self._pcg_p, self._pcg_Ap, self.marker,
-                              coords, bs, n_active_dev, done], device=dev)
+                              coords, bs, n_active_dev, done, ox, oy, oz],
+                      device=dev)
             dev_dot(self._pcg_p, self._pcg_Ap, self._pcg_pAp)
             wp.launch(k3_div_scalar, dim=1,
                       inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha, done],
                       device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p,
-                              self.marker, coords, bs, n_active_dev, done], device=dev)
+                              self.marker, coords, bs, n_active_dev, done,
+                              ox, oy, oz], device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r,
-                              self._pcg_r, self.marker, coords, bs, n_active_dev, done],
+                              self._pcg_r, self.marker, coords, bs, n_active_dev,
+                              done, ox, oy, oz],
                       device=dev)
             if (it + 1) % check_every == 0 or it == max_iter - 1:
                 dev_dot(self._pcg_r, self._pcg_r, self._pcg_r_norm2)
@@ -3040,14 +3123,16 @@ class FlipSolver3D:
                         return it + 1
             wp.launch(k3_apply_invM_per_tile, dim=tile_dim,
                       inputs=[self._pcg_r, self._pcg_diag, self._pcg_z,
-                              self.marker, coords, bs, n_active_dev, done], device=dev)
+                              self.marker, coords, bs, n_active_dev, done,
+                              ox, oy, oz], device=dev)
             dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_new)
             wp.launch(k3_div_scalar, dim=1,
                       inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta, done],
                       device=dev)
             wp.launch(k3_axpy_devscalar_per_tile, dim=tile_dim,
                       inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z,
-                              self._pcg_p, self.marker, coords, bs, n_active_dev, done],
+                              self._pcg_p, self.marker, coords, bs, n_active_dev,
+                              done, ox, oy, oz],
                       device=dev)
             wp.launch(k3_copy_scalar, dim=1,
                       inputs=[self._pcg_rz_new, self._pcg_rz_old, done], device=dev)
@@ -3056,33 +3141,44 @@ class FlipSolver3D:
     # ----------------------------------------------------------- S2.14 CSF
     @block("S2.14", "Surface tension: build χ̃, normal, curvature; apply CSF impulse")
     def _apply_surface_tension(self, dt: float):
-        nx, ny, nz, dx = self.nx, self.ny, self.nz, self.dx
+        # B7-alt.3: CSF scratch (chi/tmp/n_*/kappa/u_pre/v_pre/w_pre) is
+        # sized to self.p / self.u / self.v / self.w so a sub-dense
+        # rebuild auto-resizes them on the next call. ox/oy/oz translate
+        # local sub-dense indices → global marker indices in every kernel.
+        nx, ny, nz = self._sub_shape
+        ox, oy, oz = self._sub_offset
+        dx = self.dx
         dev = self.device
-        if self._csf_chi is None:
-            self._csf_chi   = zeros((nx, ny, nz), dev=dev)
-            self._csf_tmp   = zeros((nx, ny, nz), dev=dev)
-            self._csf_nx    = zeros((nx, ny, nz), dev=dev)
-            self._csf_ny    = zeros((nx, ny, nz), dev=dev)
-            self._csf_nz    = zeros((nx, ny, nz), dev=dev)
-            self._csf_kappa = zeros((nx, ny, nz), dev=dev)
-            self._csf_u_pre = zeros((nx + 1, ny, nz), dev=dev)
-            self._csf_v_pre = zeros((nx, ny + 1, nz), dev=dev)
-            self._csf_w_pre = zeros((nx, ny, nz + 1), dev=dev)
-            self._csf_sum   = zeros((1,), dev=dev)
-            self._csf_count = zeros((1,), dev=dev)
+        cell_shape = tuple(self.p.shape)
+        u_shape = tuple(self.u.shape)
+        v_shape = tuple(self.v.shape)
+        w_shape = tuple(self.w.shape)
+        if self._csf_chi is None or tuple(self._csf_chi.shape) != cell_shape:
+            self._csf_chi   = zeros(cell_shape, dev=dev)
+            self._csf_tmp   = zeros(cell_shape, dev=dev)
+            self._csf_nx    = zeros(cell_shape, dev=dev)
+            self._csf_ny    = zeros(cell_shape, dev=dev)
+            self._csf_nz    = zeros(cell_shape, dev=dev)
+            self._csf_kappa = zeros(cell_shape, dev=dev)
+            self._csf_u_pre = zeros(u_shape, dev=dev)
+            self._csf_v_pre = zeros(v_shape, dev=dev)
+            self._csf_w_pre = zeros(w_shape, dev=dev)
+            if not hasattr(self, "_csf_sum") or self._csf_sum is None:
+                self._csf_sum   = zeros((1,), dev=dev)
+                self._csf_count = zeros((1,), dev=dev)
         # S2.14.1 — raw indicator + smoothing passes (ping-pong)
-        wp.launch(k3_indicator_from_marker, dim=(nx, ny, nz),
-                  inputs=[self.marker, self._csf_chi], device=dev)
+        wp.launch(k3_indicator_from_marker, dim=cell_shape,
+                  inputs=[self.marker, self._csf_chi, ox, oy, oz], device=dev)
         for _ in range(self.csf_smoothing_passes):
-            wp.launch(k3_box_blur_centred, dim=(nx, ny, nz),
+            wp.launch(k3_box_blur_centred, dim=cell_shape,
                       inputs=[self._csf_chi, self._csf_tmp], device=dev)
             self._csf_chi, self._csf_tmp = self._csf_tmp, self._csf_chi
         # S2.14.2 — unit normal
-        wp.launch(k3_csf_normal, dim=(nx, ny, nz),
+        wp.launch(k3_csf_normal, dim=cell_shape,
                   inputs=[self._csf_chi, self._csf_nx, self._csf_ny, self._csf_nz, dx],
                   device=dev)
         # S2.14.3 — curvature
-        wp.launch(k3_csf_curvature, dim=(nx, ny, nz),
+        wp.launch(k3_csf_curvature, dim=cell_shape,
                   inputs=[self._csf_nx, self._csf_ny, self._csf_nz, self._csf_kappa, dx],
                   device=dev)
         # snapshot pre-CSF face velocities (for S2.14.6 balancing)
@@ -3091,20 +3187,16 @@ class FlipSolver3D:
         wp.copy(self._csf_w_pre, self.w)
         # S2.14.4 — apply σ·κ·∇χ̃·dt/ρ to each MAC component
         coeff = self.surface_tension * dt / max(self.rho, 1.0e-8)
-        wp.launch(k3_csf_apply_u, dim=self.u.shape,
+        wp.launch(k3_csf_apply_u, dim=u_shape,
                   inputs=[self.u, self._csf_chi, self._csf_kappa, self.marker,
-                          coeff, dx, nx, ny, nz], device=dev)
-        wp.launch(k3_csf_apply_v, dim=self.v.shape,
+                          coeff, dx, nx, ny, nz, ox, oy, oz], device=dev)
+        wp.launch(k3_csf_apply_v, dim=v_shape,
                   inputs=[self.v, self._csf_chi, self._csf_kappa, self.marker,
-                          coeff, dx, nx, ny, nz], device=dev)
-        wp.launch(k3_csf_apply_w, dim=self.w.shape,
+                          coeff, dx, nx, ny, nz, ox, oy, oz], device=dev)
+        wp.launch(k3_csf_apply_w, dim=w_shape,
                   inputs=[self.w, self._csf_chi, self._csf_kappa, self.marker,
-                          coeff, dx, nx, ny, nz], device=dev)
+                          coeff, dx, nx, ny, nz, ox, oy, oz], device=dev)
         # S2.14.6 — subtract per-axis mean impulse (kills parasitic drift).
-        # Device-side variant: sum + count stay on device, the subtract
-        # kernel reads both and computes bias = sum / count internally.
-        # No `.numpy()` round-trip → step() remains capturable into a
-        # CUDA graph (B5 follow-up to make σ scenes graph-eligible).
         for sum_kern, sub_kern, vel, vel_pre in [
             (k3_csf_sum_u, k3_csf_subtract_bias_u_dev, self.u, self._csf_u_pre),
             (k3_csf_sum_v, k3_csf_subtract_bias_v_dev, self.v, self._csf_v_pre),
@@ -3114,11 +3206,11 @@ class FlipSolver3D:
             wp.launch(sum_kern, dim=vel.shape,
                       inputs=[vel_pre, vel, self.marker,
                               self._csf_sum, self._csf_count,
-                              nx, ny, nz], device=dev)
+                              nx, ny, nz, ox, oy, oz], device=dev)
             wp.launch(sub_kern, dim=vel.shape,
                       inputs=[vel, self.marker,
                               self._csf_sum, self._csf_count,
-                              nx, ny, nz], device=dev)
+                              nx, ny, nz, ox, oy, oz], device=dev)
 
     # ----------------------------------------------------------- S2.18 scalar attrs (B11)
     @block("S2.18", "Per-particle scalar attribute: P2G → normalize → G2P (B11)")
@@ -3131,44 +3223,52 @@ class FlipSolver3D:
         """
         if attr_wp is None or self.n_particles == 0:
             return
-        nx, ny, nz, dx, dev = self.nx, self.ny, self.nz, self.dx, self.device
-        if self._sgrid_t is None:
-            self._sgrid_t = zeros((nx, ny, nz), dev=dev)
-            self._sgrid_tw = zeros((nx, ny, nz), dev=dev)
+        # B7-alt.3: sgrid_* sized to self.p.shape (sub-dense aware).
+        nx, ny, nz = self._sub_shape
+        ox, oy, oz = self._sub_offset
+        dx, dev = self.dx, self.device
+        cell_shape = tuple(self.p.shape)
+        if self._sgrid_t is None or tuple(self._sgrid_t.shape) != cell_shape:
+            self._sgrid_t = zeros(cell_shape, dev=dev)
+            self._sgrid_tw = zeros(cell_shape, dev=dev)
         self._sgrid_t.zero_(); self._sgrid_tw.zero_()
         wp.launch(k3_p2g_scalar, dim=self.n_particles,
                   inputs=[self.pos, attr_wp, self._sgrid_t, self._sgrid_tw,
-                          dx, nx, ny, nz], device=dev)
-        wp.launch(k3_normalize_scalar, dim=(nx, ny, nz),
+                          dx, nx, ny, nz, ox, oy, oz], device=dev)
+        wp.launch(k3_normalize_scalar, dim=cell_shape,
                   inputs=[self._sgrid_t, self._sgrid_tw], device=dev)
         wp.launch(k3_g2p_scalar, dim=self.n_particles,
                   inputs=[self.pos, attr_wp, self._sgrid_t, self._sgrid_tw,
-                          dx, nx, ny, nz], device=dev)
+                          dx, nx, ny, nz, ox, oy, oz], device=dev)
 
     # ----------------------------------------------------------- S2.15 color
     @block("S2.15", "Per-particle color: P2G → normalize → G2P (linear RGB blend)")
     def _apply_color_transfer(self):
         if self.attr_color is None or self.n_particles == 0:
             return
-        nx, ny, nz, dx, dev = self.nx, self.ny, self.nz, self.dx, self.device
-        if self._cgrid_r is None:
-            self._cgrid_r = zeros((nx, ny, nz), dev=dev)
-            self._cgrid_g = zeros((nx, ny, nz), dev=dev)
-            self._cgrid_b = zeros((nx, ny, nz), dev=dev)
-            self._cgrid_w = zeros((nx, ny, nz), dev=dev)
+        # B7-alt.3: cgrid_* sized to self.p.shape (sub-dense aware).
+        nx, ny, nz = self._sub_shape
+        ox, oy, oz = self._sub_offset
+        dx, dev = self.dx, self.device
+        cell_shape = tuple(self.p.shape)
+        if self._cgrid_r is None or tuple(self._cgrid_r.shape) != cell_shape:
+            self._cgrid_r = zeros(cell_shape, dev=dev)
+            self._cgrid_g = zeros(cell_shape, dev=dev)
+            self._cgrid_b = zeros(cell_shape, dev=dev)
+            self._cgrid_w = zeros(cell_shape, dev=dev)
         self._cgrid_r.zero_(); self._cgrid_g.zero_()
         self._cgrid_b.zero_(); self._cgrid_w.zero_()
         wp.launch(k3_p2g_color, dim=self.n_particles,
                   inputs=[self.pos, self.attr_color,
                           self._cgrid_r, self._cgrid_g, self._cgrid_b, self._cgrid_w,
-                          dx, nx, ny, nz], device=dev)
-        wp.launch(k3_normalize_color, dim=(nx, ny, nz),
+                          dx, nx, ny, nz, ox, oy, oz], device=dev)
+        wp.launch(k3_normalize_color, dim=cell_shape,
                   inputs=[self._cgrid_r, self._cgrid_g, self._cgrid_b, self._cgrid_w],
                   device=dev)
         wp.launch(k3_g2p_color, dim=self.n_particles,
                   inputs=[self.pos, self.attr_color,
                           self._cgrid_r, self._cgrid_g, self._cgrid_b, self._cgrid_w,
-                          dx, nx, ny, nz], device=dev)
+                          dx, nx, ny, nz, ox, oy, oz], device=dev)
 
     # ----------------------------------------------------------- B5.2 graph cache
     def _cuda_graph_eligible(self, pressure_solver: str,
@@ -3226,37 +3326,21 @@ class FlipSolver3D:
     def step(self, dt: float, pressure_iters: int = 80,
              pressure_solver: str = "jacobi",
              pressure_block_sparse: bool = False):
-        # B7-alt.3 guard. Sub-dense storage now works end-to-end for the
-        # Jacobi / dense / FLIP / no-CSF / no-viscosity / no-color /
-        # no-scalar-attribute config — that's the only path with
-        # offset-aware kernels so far. The other configs still launch
-        # legacy kernels at (nx, ny, nz) which would silently miss the
-        # sub-dense bbox; reject them loudly until follow-up micros
-        # extend coverage (APIC, viscosity, CSF, PCG, GS-RB, sparse,
-        # colour, temperature).
+        # B7-alt.3 guard. Sub-dense storage now covers EVERY shipped
+        # solver config — pressure × transfer × CSF × viscosity × colour
+        # × scalar × block-sparse. The guard remains only as a
+        # belt-and-suspenders check against unrecognised options.
         if self._sub_offset != (0, 0, 0):
             unsupported = []
             if pressure_solver not in ("jacobi", "gsrb", "pcg"):
                 unsupported.append(f"pressure_solver={pressure_solver!r}")
-            if pressure_block_sparse:
-                unsupported.append("pressure_block_sparse=True")
             if self.transfer_mode not in ("flip", "pic", "apic"):
                 unsupported.append(f"transfer_mode={self.transfer_mode!r}")
-            if self.surface_tension > 0.0:
-                unsupported.append("surface_tension>0")
-            if self.attr_color is not None:
-                unsupported.append("attr_color (per-particle colour)")
-            if self.attr_temperature is not None:
-                unsupported.append("attr_temperature (per-particle scalar)")
             if unsupported:
                 raise NotImplementedError(
-                    "FlipSolver3D.step() with sub-dense storage active "
-                    "currently supports jacobi|gsrb / dense / FLIP / "
-                    "with-or-without viscosity / no-CSF / no-colour / "
-                    "no-scalar configs. Unsupported: "
+                    "FlipSolver3D.step() with sub-dense storage rejects: "
                     + ", ".join(unsupported)
-                    + ". Either disable enable_sub_dense or wait for the "
-                    "follow-up micros that extend coverage."
+                    + ". Disable enable_sub_dense or extend kernel coverage."
                 )
         # B5.2 — auto-replay through a captured graph when the config is
         # eligible AND the cached graph's key still matches. First call
@@ -3407,7 +3491,8 @@ class FlipSolver3D:
                         wp.launch(k3_jacobi_pressure_per_tile,
                                   dim=worst_dim,
                                   inputs=[self.p, self.p_tmp, self.div, self.marker,
-                                          coords, BLOCK_SIZE, self._n_active_dev],
+                                          coords, BLOCK_SIZE, self._n_active_dev,
+                                          ox, oy, oz],
                                   device=dev)
                         self.p, self.p_tmp = self.p_tmp, self.p
                 else:
@@ -3431,12 +3516,14 @@ class FlipSolver3D:
                         wp.launch(k3_gauss_seidel_rb_per_tile,
                                   dim=worst_dim,
                                   inputs=[self.p, self.div, self.marker,
-                                          coords, BLOCK_SIZE, 0, self._n_active_dev],
+                                          coords, BLOCK_SIZE, 0, self._n_active_dev,
+                                          ox, oy, oz],
                                   device=dev)
                         wp.launch(k3_gauss_seidel_rb_per_tile,
                                   dim=worst_dim,
                                   inputs=[self.p, self.div, self.marker,
-                                          coords, BLOCK_SIZE, 1, self._n_active_dev],
+                                          coords, BLOCK_SIZE, 1, self._n_active_dev,
+                                          ox, oy, oz],
                                   device=dev)
                 else:
                     for _ in range(pressure_iters):

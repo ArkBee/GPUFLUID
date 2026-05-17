@@ -26,12 +26,15 @@ from gpufluid.solvers.solver3d import FlipSolver3D
 def _seed_pair(N=32, lo=(0.40, 0.40, 0.40), hi=(0.60, 0.60, 0.60),
                ppc=4, rho=1.0, gravity=-9.81, flip_blend=0.95,
                viscosity=0.0, viscosity_iters=12, transfer_mode="flip",
+               surface_tension=0.0, csf_smoothing_passes=2,
                enable_sub_dense_b=True, sub_dilation=4):
     """Build two FlipSolver3Ds with identical seeds, one full-dense and
     one sub-dense-capable."""
     common = dict(nx=N, ny=N, nz=N, rho=rho, gravity=gravity,
                   flip_blend=flip_blend, transfer_mode=transfer_mode,
-                  viscosity=viscosity, viscosity_iters=viscosity_iters)
+                  viscosity=viscosity, viscosity_iters=viscosity_iters,
+                  surface_tension=surface_tension,
+                  csf_smoothing_passes=csf_smoothing_passes)
     a = FlipSolver3D(**common, enable_sub_dense=False)
     b = FlipSolver3D(**common, enable_sub_dense=True,
                      sub_rebuild_every=1000, sub_dilation=sub_dilation)
@@ -253,3 +256,146 @@ def test_b7_alt_3_sub_dense_matches_dense_pcg():
     # a touch wider than the single-pass Jacobi/GS-RB to absorb
     # atomic-add ordering across multiple reductions per iter.
     assert rel < 1e-3, f"PCG sub-dense drift {rel:.3e} exceeds tolerance"
+
+
+def _step_sparse(s, **kwargs):
+    s.step(pressure_block_sparse=True, **kwargs)
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_jacobi_sparse():
+    """Block-sparse Jacobi (per-tile) in sub-dense mode. Active tile
+    coords are GLOBAL cell coords (built from full marker); the per-tile
+    kernel translates global → local via off_x/y/z. This is the path
+    that gives B7-alt its memory + perf win at 256³ low-fill scenes."""
+    a, b = _seed_pair(sub_dilation=6)
+    _step_sparse(a, dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    _step_sparse(b, dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    _step_sparse(a, dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    _step_sparse(b, dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 jacobi_sparse] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    assert rel < 1e-4, f"sparse Jacobi sub-dense drift {rel:.3e}"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_gsrb_sparse():
+    a, b = _seed_pair(sub_dilation=6)
+    _step_sparse(a, dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    _step_sparse(b, dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    _step_sparse(a, dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    _step_sparse(b, dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 gsrb_sparse] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    assert rel < 1e-4, f"sparse GS-RB sub-dense drift {rel:.3e}"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_pcg_sparse():
+    a, b = _seed_pair(sub_dilation=6)
+    _step_sparse(a, dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    _step_sparse(b, dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    _step_sparse(a, dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    _step_sparse(b, dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 pcg_sparse] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    assert rel < 1e-3, f"sparse PCG sub-dense drift {rel:.3e}"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_with_csf():
+    """Surface tension (Brackbill-Kothe CSF) in sub-dense mode. The CSF
+    pipeline (indicator → blur → normal → curvature → impulse →
+    force-balance) has the most kernels touched in one step; this is
+    the canonical "v0.8 demo" path (lava drop, surface tension cube)."""
+    a, b = _seed_pair(surface_tension=0.1, csf_smoothing_passes=2,
+                      sub_dilation=6)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 csf] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    # CSF adds finite-difference normal/curvature on the sub-dense
+    # buffer; with dilation>=2 the active fluid is far enough from the
+    # sub-dense edge that the zero-padding on the chi field outside the
+    # active region matches the dense baseline.
+    assert rel < 1e-3, f"CSF sub-dense drift {rel:.3e} exceeds tolerance"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_with_colour():
+    """Per-particle RGB colour transfer (S2.15) under sub-dense. Same
+    cell-centred P2G→normalize→G2P pattern as scalar; lazy alloc of
+    cgrid_* tracks self.p.shape."""
+    a, b = _seed_pair(sub_dilation=6)
+    # Tint the particles a recognisable colour so the transfer has work.
+    n = a.n_particles
+    rgb = np.zeros((n, 3), dtype=np.float32)
+    rgb[:, 0] = np.linspace(0.0, 1.0, n)  # gradient red
+    rgb[:, 1] = 0.5
+    a.attr_color = wp.array(rgb, dtype=wp.vec3, device=a.device)
+    b.attr_color = wp.array(rgb.copy(), dtype=wp.vec3, device=b.device)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_rel = float(np.abs(a.pos.numpy() - b.pos.numpy()).max()) / max(
+        float(np.abs(a.pos.numpy()).max()), 1e-9)
+    col_a = a.attr_color.numpy()
+    col_b = b.attr_color.numpy()
+    col_rel = float(np.abs(col_a - col_b).max()) / max(
+        float(np.abs(col_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 colour] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos rel={pos_rel:.3e}, col rel={col_rel:.3e}")
+    assert pos_rel < 1e-4 and col_rel < 1e-3
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_with_scalar_temperature():
+    """Per-particle scalar attribute (S2.18 / B11) under sub-dense."""
+    a, b = _seed_pair(sub_dilation=6)
+    n = a.n_particles
+    temp = np.linspace(300.0, 1500.0, n).astype(np.float32)
+    a.attr_temperature = wp.array(temp, dtype=float, device=a.device)
+    b.attr_temperature = wp.array(temp.copy(), dtype=float, device=b.device)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_rel = float(np.abs(a.pos.numpy() - b.pos.numpy()).max()) / max(
+        float(np.abs(a.pos.numpy()).max()), 1e-9)
+    t_a = a.attr_temperature.numpy()
+    t_b = b.attr_temperature.numpy()
+    t_rel = float(np.abs(t_a - t_b).max()) / max(float(np.abs(t_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 scalar] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos rel={pos_rel:.3e}, temp rel={t_rel:.3e}")
+    assert pos_rel < 1e-4 and t_rel < 1e-3
