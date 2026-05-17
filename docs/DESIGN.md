@@ -193,7 +193,7 @@ the whitelist; silent additions break the build.
 
 | Importer (layer) | Imports (layer) | Reason | Exit plan |
 |------------------|-----------------|--------|-----------|
-| `solvers/solver3d.py` (F3) | `domain/regions`, `domain/animation`, `domain/seed`, `domain/mesh_sdf*` (D4) | F3 calls D4 per-frame helpers from inside `step_cfl`/`prepare_frame` instead of receiving pre-baked work via a hook. Pre-dates the layer contract. Active F3.6 refactor — see §3.2.4.2. `domain/sdf` removed from this list on 2026-05-17 by F3.6.A1 (math primitives relocated to `primitives/sdf.py`). | Phased F3.6 refactor (A1/A2/B/C1/C2/C3) — see §3.2.4.2. |
+| `solvers/solver3d.py` (F3) | `domain/regions`, `domain/seed` (D4) | F3 calls D4 per-frame helpers from inside `step_cfl`/`prepare_frame` instead of receiving pre-baked work via a hook. Active F3.6 refactor — see §3.2.4.2. Removed by phase: `domain/sdf` (F3.6.A1, 2026-05-17), `domain/mesh_sdf*` (F3.6.A2, 2026-05-17), `domain/animation` (F3.6.B, 2026-05-17). One genuine inversion remaining (regions inflow/outflow); to be fixed by F3.6.C1+C2. | Phased F3.6 refactor (A1✅/A2✅/B✅/C1/C2/C3) — see §3.2.4.2. |
 | `cli/commands.py` (C7) | `sim/whitewater*` (W7), `sim/reseed` (W7), `domain/*` (D4), `meshing/*` (M5), `io/*` (I6), `solvers/*` (F3), `schemes/*` (S2) | CLI is the top-of-stack orchestrator and is allowed to touch every lower layer by design. C7 > W7, M5, I6 — no exception needed. | n/a (not a violation; listed for clarity) |
 
 If you find a NEW cross-layer import that the check flags:
@@ -426,9 +426,12 @@ Pure helpers. No domain logic.
 | G1.12 | SDF cylinder Y-axis (was D4.2.3 pre-F3.6.A1)                 | impl |
 | G1.13 | SDF plane (was D4.2.4 pre-F3.6.A1)                           | impl |
 | G1.14 | SDF union (min of components, was D4.2.5 pre-F3.6.A1)        | impl |
+| G1.15 | Motion specs: LinearMotion + KeyframeMotion union (was D4.6) | impl |
+| G1.16 | evaluate_center — animated centre at a frame (was D4.6)      | impl |
 
-The G1.10–G1.14 analytic SDFs relocated from D4 on 2026-05-17 — see
-§3.2.4.2 F3.6.A1 phase. Pure math, no solver/domain coupling.
+The G1.10–G1.14 analytic SDFs relocated from D4 on 2026-05-17 (F3.6.A1);
+G1.15 + G1.16 motion utilities relocated 2026-05-17 (F3.6.B). All pure
+math/host transforms, no solver/domain coupling.
 
 ---
 
@@ -596,11 +599,13 @@ Geometry of the simulation domain: walls, obstacles, fluid seeders.
 | D4.1    | Solid wall shell (init marker boundary)                       | impl |
 | D4.2    | SDF analytic primitives — RELOCATED to G1.10–G1.14 on 2026-05-17 (F3.6.A1). See §4. | moved |
 | D4.3    | Mesh → SDF (triangle-soup distance)                           | impl |
+| D4.3.GPU | GPU triangle ray-cast inside test — RELOCATED to schemes/mesh_marker.py 2026-05-17 (F3.6.A2). ID kept for now. | moved |
+| D4.3.GPU.BVH | BVH-accelerated wp.Mesh winding inside test — RELOCATED 2026-05-17 (F3.6.A2). ID kept. | moved |
 | D4.4    | Apply SDF as solid markers (mutates solver marker, stays D4)  | impl |
 | D4.5    | Fluid seeders                                                 | —    |
 | D4.5.1  |   Box seeder (uniform jittered)                               | impl |
 | D4.5.2  |   Mesh seeder (volumetric fill)                               | planned |
-| D4.6    | Animated obstacles (rebuild SDF per frame)                    | planned |
+| D4.6    | Animated obstacles — motion specs RELOCATED to G1.15/G1.16 (F3.6.B). What's left in D4: register/refresh hooks that mutate solver marker. | impl |
 | D4.7    | Inflow / outflow regions                                      | planned |
 
 ---

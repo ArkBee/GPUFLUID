@@ -1,8 +1,14 @@
-"""Tests for D4.6 animated obstacles (motion descriptors + solver integration)."""
+"""Tests for animated obstacles.
+
+After F3.6.B (2026-05-17): motion specs and the centre evaluator
+moved to G1. Covers [BLK G1.15] Motion specs, [BLK G1.16]
+evaluate_center, and [BLK D4.6] register_animated_obstacle (still D4
+— mutates solver state via per-frame hooks).
+"""
 import numpy as np
 import pytest
 
-from gpufluid.domain.animation import LinearMotion, KeyframeMotion, evaluate_center
+from gpufluid.primitives.animation import LinearMotion, KeyframeMotion, evaluate_center
 
 
 def test_d4_6_linear_motion_advances_centre():

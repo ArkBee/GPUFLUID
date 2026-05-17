@@ -46,11 +46,12 @@ _KNOWN_LAYER_EXCEPTIONS: List[Tuple[str, str]] = [
     # F3 solver imports D4 domain helpers for per-frame inflow/outflow hooks.
     # Pre-dates the layer contract; exit plan in DESIGN.md §3.2.4.1.
     ("solvers.solver3d", "domain.regions"),
-    ("solvers.solver3d", "domain.animation"),
-    # ("solvers.solver3d", "domain.sdf"),  — F3.6.A1 closed 2026-05-17: math
-    #                                         primitives moved to primitives/sdf.py
+    # F3.6.A1 closed 2026-05-17: math primitives moved to primitives/sdf.py
+    # F3.6.A2 closed 2026-05-17: mark_solid_from_mesh_gpu moved to
+    #                            schemes/mesh_marker.py
+    # F3.6.B  closed 2026-05-17: Motion + evaluate_center moved to
+    #                            primitives/animation.py
     ("solvers.solver3d", "domain.seed"),
-    ("solvers.solver3d", "domain.mesh_sdf"),
     ("solvers.solver3d", "domain.mesh_sdf_gpu"),
 ]
 

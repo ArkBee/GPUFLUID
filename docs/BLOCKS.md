@@ -25,6 +25,8 @@ additionally has at least one `test_*` matching the block ID slug;
 | G1.12 | SDF cylinder aligned with Y (gravity) axis | G1 | `src/gpufluid/primitives/sdf.py` | impl |
 | G1.13 | SDF plane (signed distance to half-space) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
 | G1.14 | SDF union (min of components) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
+| G1.15 | Motion spec dataclasses (LinearMotion + KeyframeMotion union) | G1 | `src/gpufluid/primitives/animation.py` | impl |
+| G1.16 | Resolve animated centre at a given frame (pure host transform) | G1 | `src/gpufluid/primitives/animation.py` | impl |
 | S2.1 | P2G: scatter particle velocities → MAC faces (trilinear) | S2 | `?` | impl,test |
 | S2.2 | Normalize MAC faces and save pre-pressure copy | S2 | `?` | impl |
 | S2.3 | Add gravity g·dt to v faces | S2 | `?` | impl,test |
@@ -67,12 +69,12 @@ additionally has at least one `test_*` matching the block ID slug;
 | F3.6 | Per-frame hook: rebuild marker for anim obstacles, emit inflow particles, drop outflow particles | F3 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | F3.7 | Compute the 8³-tile bbox of active fluid cells, dilated by sub_dilation and clamped to the domain. (4 kernels) | F3 | `?`, `src/gpufluid/solvers/solver3d.py` | impl |
 | D4.3 | Mesh → SDF convenience: load + cell-centres in one call (2 kernels) | D4 | `src/gpufluid/domain/mesh_sdf.py` | impl,test |
-| D4.3.GPU | Compute solid-cell mask of a triangle mesh on GPU (auto-selects BVH for ≥256 triangles) (2 kernels) | D4 | `?`, `src/gpufluid/domain/mesh_sdf_gpu.py` | impl,test |
-| D4.3.GPU.BVH | BVH-backed inside test via wp.Mesh + winding query (2 kernels) | D4 | `?`, `src/gpufluid/domain/mesh_sdf_gpu.py` | impl,test |
+| D4.3.GPU | Compute solid-cell mask of a triangle mesh on GPU (auto-selects BVH for >=256 triangles) (2 kernels) | D4 | `?`, `src/gpufluid/schemes/mesh_marker.py` | impl,test |
+| D4.3.GPU.BVH | BVH-backed inside test via wp.Mesh + winding query (2 kernels) | D4 | `?`, `src/gpufluid/schemes/mesh_marker.py` | impl,test |
 | D4.4 | Apply SDF as solid marker (marker=2 where sdf<=padding) (2 kernels) | D4 | `src/gpufluid/domain/sdf.py`, `src/gpufluid/solvers/solver3d.py` | impl,test |
 | D4.5.1 | Box seeder (uniform jittered, ppc particles per cell) | D4 | `src/gpufluid/solvers/solver3d.py` | impl |
 | D4.5.2 | Mesh volumetric seeder (fill arbitrary triangle mesh with particles) | D4 | `src/gpufluid/solvers/solver3d.py` | impl |
-| D4.6 | Register an analytic obstacle that moves per frame (3 kernels) | D4 | `?`, `src/gpufluid/domain/animation.py`, `src/gpufluid/solvers/solver3d.py` | impl,test |
+| D4.6 | Register an analytic obstacle that moves per frame (2 kernels) | D4 | `?`, `src/gpufluid/solvers/solver3d.py` | impl,test |
 | D4.7 | Emit particles from all inflow boxes for this frame (4 kernels) | D4 | `src/gpufluid/domain/regions.py`, `src/gpufluid/solvers/solver3d.py` | impl,test |
 | D4.7.GPU | GPU outflow compaction (mark + scan + scatter) (2 kernels) | D4 | `?`, `src/gpufluid/solvers/solver3d.py` | impl |
 | M5.1 | Particle density scatter (trilinear, atomic) | M5 | `?` | impl |

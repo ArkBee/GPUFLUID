@@ -82,35 +82,50 @@ edge. `marker` stays full-dense; every kernel reads it via global
 --sub-dilation K             # default 4
 ```
 
-### Default next task — **F3.6.A2 + F3.6.B** (start here in N+2 session)
+### Default next task — **F3.6.C1** (start here in N+3 session)
 
-F3.6.A1 closed 2026-05-17 — analytic SDFs (`sdf_sphere/box/cylinder_y/
-plane/union` + `cell_centers`) now live in `primitives/sdf.py` under
-G1.10–G1.14; `domain/sdf.py` keeps only D4.4 `mark_solid_from_sdf` +
-back-compat re-exports. 7 importers updated; whitelist down to 4
-entries (`regions`, `animation`, `seed`, `mesh_sdf*`).
+F3.6.A1/A2/B all closed 2026-05-17 — 3 of 6 whitelist entries gone.
+What's left: `domain.regions` (the only TRUE inversion — inflow/
+outflow per-frame) + `domain.seed` (used by `seed_mesh` path).
 
-Next two micros are similar in flavour:
+**F3.6.C1 — implement `FrameEventQueue` + dual-path D4 helpers.**
 
-**F3.6.A2 — relocate `mark_solid_from_mesh_gpu` to S2.**
-* From `domain/mesh_sdf_gpu.py` to `schemes/mesh_marker.py`.
-* Keep D4.3.GPU ID for now (rename deferred — too many test name
-  ripples for one PR). The check passes regardless because layer
-  membership comes from the ID prefix, not the file path.
-* Acceptance: whitelist loses `solvers.solver3d → domain.mesh_sdf*`
-  entry; suite green.
+Read DESIGN.md §3.2.4.2 first. Concrete steps:
 
-**F3.6.B — relocate `Motion` + `evaluate_center` to G1.**
-* From `domain/animation.py` to `primitives/animation.py`.
-* New blocks G1.15 (`Motion` dataclass) + G1.16 (`evaluate_center`).
-* Audit pickle paths first — `checkpoint` may serialise `Motion`
-  instances. If so, write a one-time migration helper or accept
-  that old checkpoints break (document in HANDOFF).
-* Acceptance: whitelist loses `domain.animation` entry. After this,
-  3 of 6 violations gone.
+1. Create `src/gpufluid/primitives/frame_events.py` with:
+   * `@dataclass FluidEmitEvent` (positions, velocities arrays).
+   * `@dataclass FluidOutflowEvent` (bbox + inside/outside flag).
+   * `class FrameEventQueue` (push_emit, push_outflow, drain_* methods).
+   * Register under new G1.17 + G1.18 + G1.19 block IDs.
+2. Write TDD tests in `tests/test_g1_17_frame_events.py`:
+   * push then drain → returns same data
+   * drain twice → second call is empty
+   * cross-event push order preserved
+3. Add `publish_for_frame(queue, frame_idx, frame_dt, rng)` method to
+   `InflowBox` and `OutflowBox` in `domain/regions.py`. Keep the
+   existing `apply_inflows`/`apply_outflows` functional API
+   side-by-side — transitional dual-path.
+4. NO solver-side changes yet. The check still fails (1 whitelist
+   entry remains) until C2 lands.
 
-Read `docs/DESIGN.md §3.2.4.2` before starting — has the full plan
-+ the 3-category insight that makes the refactor tractable.
+Acceptance: `gpufluid blocks --check` still has the `domain.regions`
+whitelist entry but the new G1 blocks are registered and tested;
+suite stays green. No behavioural change visible to existing scenes.
+
+### Multi-session ahead
+
+* **N+4: F3.6.C2** — switch `solver3d.prepare_frame` to drain the
+  queue; delete the legacy pull path. Whitelist loses 3 entries
+  (`regions` covers inflow + outflow + emit; `seed` follows since
+  seed_mesh is the same pattern). The `_KNOWN_LAYER_EXCEPTIONS`
+  list becomes empty.
+* **N+5: F3.6.C3** — add hard `test_no_f3_to_d4_imports` assertion
+  test + closure video step29.mp4 (text overlay
+  "6 layer violations → 0"). Macro CLOSED.
+
+Standing items: push origin when fresh PAT arrives (33+ commits),
+skip B2 Mixbox (license), skip B8/B9 research (no use-case), B10
+Alembic only on request.
 
 ### Earlier default task — DONE 2026-05-17
 

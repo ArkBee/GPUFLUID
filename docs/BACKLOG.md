@@ -229,15 +229,20 @@ relocations.
   updated (3 src, 4 tests), `_KNOWN_LAYER_EXCEPTIONS` lost the
   `solvers.solver3d → domain.sdf` entry — whitelist down 1.
   Suite stayed at 227 passed, `--check` clean.)*
-* [ ] F3.6.A2 — Move `mark_solid_from_mesh_gpu` from
-  `domain/mesh_sdf_gpu.py` to `schemes/mesh_marker.py` (S2). Keep
-  current `D4.3.GPU` block IDs for now (rename deferred to avoid
-  blast radius). Acceptance: 1 fewer whitelist entry, suite green.
-* [ ] F3.6.B — Move `Motion` dataclass + `evaluate_center` from
-  `domain/animation.py` to `primitives/animation.py`. Audit pickle
-  paths first — checkpoint round-trip stores Motion specs. Register
-  under G1.15 + G1.16. Acceptance: 1 fewer entry. 3 of 6 whitelist
-  entries gone after this.
+* [x] F3.6.A2 — Move `mark_solid_from_mesh_gpu` from
+  `domain/mesh_sdf_gpu.py` to `schemes/mesh_marker.py` (S2). *(2026-05-17:
+  shipped. Whole-file move including `_MeshCache` + both kernels;
+  `domain/mesh_sdf_gpu.py` becomes a back-compat shim. IDs
+  D4.3.GPU/D4.3.GPU.BVH preserved per spec — rename to S2.20.* deferred
+  to a follow-up. `solvers/solver3d.py` lazy imports now point at
+  `schemes.mesh_marker`; `test_d4_3_gpu_bvh.py` updated.)*
+* [x] F3.6.B — Move `Motion` dataclass + `evaluate_center` from
+  `domain/animation.py` to `primitives/animation.py`. *(2026-05-17:
+  shipped. Pickle audit confirmed F3.5 checkpoint stores only numpy
+  arrays + scalars; `MotionCfg` in `cli/config.py` is a separate
+  TOML-side struct. New IDs G1.15 + G1.16. `domain/animation.py`
+  becomes a re-export shim. 3 of 6 whitelist entries gone after this
+  + A2 — only `domain.regions` + `domain.seed` remain.)*
 * [ ] F3.6.C1 — Add `FrameEventQueue` + `FluidEmitEvent` +
   `FluidOutflowEvent` dataclasses to `primitives/frame_events.py`.
   Pre-impl tests in `tests/test_g1_frame_events.py`. D4 inflow/

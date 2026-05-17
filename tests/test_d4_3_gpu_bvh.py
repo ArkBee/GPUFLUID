@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import warp as wp
 
-from gpufluid.domain.mesh_sdf_gpu import mark_solid_from_mesh_gpu
+from gpufluid.schemes.mesh_marker import mark_solid_from_mesh_gpu
 from gpufluid.primitives.runtime import init as warp_init, device as default_device
 
 warp_init()
@@ -116,7 +116,7 @@ def test_bvh_mesh_cache_reuses_for_animated_obstacle():
 
     Verified indirectly: the cache dict should keep ≤1 entry for one key
     even after multiple calls with different vertex positions."""
-    from gpufluid.domain.mesh_sdf_gpu import _MESH_CACHE
+    from gpufluid.schemes.mesh_marker import _MESH_CACHE
     tris = _icosphere(3)
     N = 32
     g = _cell_centres(N, 1.0 / N)

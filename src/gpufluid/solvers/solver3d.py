@@ -26,7 +26,7 @@ from ..blocks import block
 from ..primitives.runtime import init as warp_init, device as default_device, zeros, zeros_int
 from ..primitives.gridmath import clamp_int, sample3, scatter_face
 from ..domain.regions import InflowBox, OutflowBox, apply_inflows, apply_outflows
-from ..domain.animation import Motion, evaluate_center
+from ..primitives.animation import Motion, evaluate_center
 from ..primitives.sdf import sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union
 
 warp_init()
@@ -2543,7 +2543,7 @@ class FlipSolver3D:
         """Mark cells inside each animated mesh obstacle as solid + write the
         obstacle's velocity into the surrounding solid faces (moving-boundary BC)."""
         import trimesh
-        from ..domain.mesh_sdf_gpu import mark_solid_from_mesh_gpu
+        from ..schemes.mesh_marker import mark_solid_from_mesh_gpu
         marker_before = self.marker.numpy()
         for entry in mesh_specs:
             spec, c, vel = entry  # may be 3-tuple from the new path
@@ -2647,7 +2647,7 @@ class FlipSolver3D:
         a jittered cube of particles per inside cell.
         """
         import trimesh
-        from ..domain.mesh_sdf_gpu import mark_solid_from_mesh_gpu
+        from ..schemes.mesh_marker import mark_solid_from_mesh_gpu
         mesh = trimesh.load(str(mesh_path), force="mesh", process=False)
         if rotate_deg is not None:
             from trimesh.transformations import euler_matrix

@@ -20,7 +20,7 @@ from ..primitives.sdf import (
     sdf_sphere, sdf_box, sdf_cylinder_y, sdf_plane, sdf_union,
 )
 from ..domain.regions import InflowBox, OutflowBox
-from ..domain.animation import LinearMotion, KeyframeMotion
+from ..primitives.animation import LinearMotion, KeyframeMotion
 from .config import (
     SceneCfg, load_scene, MotionCfg,
     ObstacleSphereCfg, ObstacleBoxCfg, ObstacleCylinderYCfg, ObstacleMeshCfg, ObstaclePlaneCfg,
