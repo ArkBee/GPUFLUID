@@ -211,6 +211,51 @@ A separate macro (B7-alt) using the S2.16 block-sparse compaction plus **deferre
 
 **Acceptance:** can run a 256³ dam-break that the dense path OOMs on.
 
+### F3.6. Hook refactor — eliminate F3↔D4 layer inversion `risk:med value:infra` ▶ next macro
+
+`solvers/solver3d.py` (layer F3) currently imports from `domain/*`
+(layer D4), which violates the §2 import rule. The 6 whitelist
+exceptions in `DESIGN.md §3.2.4.1` are the symptom. **Spec for the
+fix lives in `DESIGN.md §3.2.4.2`** — read it BEFORE picking any
+micro. The key insight: the 6 violations are 3 different problems,
+not one wholesale inversion. ~60% of the work is mechanical
+relocations.
+
+* [ ] F3.6.A1 — Move `sdf_sphere/box/cylinder_y/plane/union` +
+  `cell_centers` from `domain/sdf.py` to `primitives/sdf.py`. Pure
+  math, belongs in G1. Register under G1.10..G1.14 (or co-locate
+  with existing G1.8 `cell_centers`). Update all import sites.
+  Acceptance: `gpufluid blocks --check` shows 1 fewer whitelist
+  entry, suite green. *(Estimated: 1 session, 1-2 hours, mechanical.)*
+* [ ] F3.6.A2 — Move `mark_solid_from_mesh_gpu` from
+  `domain/mesh_sdf_gpu.py` to `schemes/mesh_marker.py` (S2). Keep
+  current `D4.3.GPU` block IDs for now (rename deferred to avoid
+  blast radius). Acceptance: 1 fewer whitelist entry, suite green.
+* [ ] F3.6.B — Move `Motion` dataclass + `evaluate_center` from
+  `domain/animation.py` to `primitives/animation.py`. Audit pickle
+  paths first — checkpoint round-trip stores Motion specs. Register
+  under G1.15 + G1.16. Acceptance: 1 fewer entry. 3 of 6 whitelist
+  entries gone after this.
+* [ ] F3.6.C1 — Add `FrameEventQueue` + `FluidEmitEvent` +
+  `FluidOutflowEvent` dataclasses to `primitives/frame_events.py`.
+  Pre-impl tests in `tests/test_g1_frame_events.py`. D4 inflow/
+  outflow helpers gain `publish_for_frame(queue, ...)` method but
+  remain callable in the legacy form too. Acceptance: tests pass,
+  no whitelist change yet (transitional dual-path).
+* [ ] F3.6.C2 — Switch `solver3d.prepare_frame` to drain the queue
+  instead of pulling from `domain.regions`. Delete legacy pull path.
+  Verify CUDA-graph rehit rate unchanged (drain happens BEFORE
+  capture, queue empty during substep loop). Acceptance: all 6
+  whitelist entries removed, §3.2.4.1 table empty.
+* [ ] F3.6.C3 — Add hard test `tests/test_no_f3_to_d4_imports.py`
+  asserting `_KNOWN_LAYER_EXCEPTIONS == []` in `blocks/check.py`.
+  Future regressions fail CI immediately. Closure video `step29.mp4`
+  with text overlay "F3↔D4 hook refactor: 6 layer violations → 0".
+
+**Acceptance:** `gpufluid blocks --check` clean with zero whitelist
+entries. The `_KNOWN_LAYER_EXCEPTIONS` list in `check.py` is empty.
+Step29 closure video shipped.
+
 ### B8. Differentiable solver via Warp gradients `risk:high value:research`
 
 Warp 1.13 has `wp.Tape` for backprop. The FLIP pipeline is conceptually

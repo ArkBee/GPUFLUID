@@ -82,7 +82,33 @@ edge. `marker` stays full-dense; every kernel reads it via global
 --sub-dilation K             # default 4
 ```
 
-### Default next task — DONE 2026-05-17
+### Default next task — **F3.6.A1 micro** (start here in N+1 session)
+
+**Relocate analytic SDF primitives from D4 to G1** — the first
+mechanical micro of the F3.6 hook refactor macro. Self-contained,
+no architectural decisions needed (spec is already written).
+
+* **Read first:** `docs/DESIGN.md §3.2.4.2` for the full F3.6 plan +
+  why this micro exists. The 3-category split (A/B/C) is the key
+  insight — without it the refactor looks unmanageable.
+* **What to do:** move `sdf_sphere`, `sdf_box`, `sdf_cylinder_y`,
+  `sdf_plane`, `sdf_union`, and `cell_centers` from
+  `src/gpufluid/domain/sdf.py` to a new
+  `src/gpufluid/primitives/sdf.py` (layer G1). Re-register them
+  under new G1.10..G1.14 block IDs (`cell_centers` already has
+  `[BLK G1.8]`). Keep `domain/sdf.py` for the `apply_sdf_as_solid`
+  host helper — that one TAKES a solver marker array and is rightly
+  D4. Update every import site to the new module path.
+* **Acceptance:** `gpufluid blocks --check` shows 1 fewer whitelist
+  entry (the `solvers/solver3d.py → domain.sdf` row); `pytest -q`
+  green; no behavioural change visible to scenes/tests.
+* **Estimated effort:** 1 session, 1–2 hours. Mechanical. No video
+  needed (architectural micro, not feature).
+
+Continuing from here: see **"Multi-session plan ahead"** below for
+phases F3.6.A2..F3.6.C3.
+
+### Earlier default task — DONE 2026-05-17
 
 **`--timings` + `--enable-cuda-graphs` incompatibility — fixed.**
 `StepProfiler` now takes an optional `device` and inspects
