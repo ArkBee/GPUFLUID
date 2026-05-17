@@ -4,8 +4,8 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 Jacobi/GS-RB/APIC/FLIP/PIC/viscosity slice shipped):**
-> 188 tests total (187 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
+> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 dense+PCG+APIC+viscosity slice shipped):**
+> 189 tests total (188 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
 > 81 unique IDs / 105 callables (`gpufluid info`), v0.7 + v0.8 + **v0.9 all
 > closed**. CUDA-graph eligibility matrix is at **9/9** (every shipped
 > pressure-solver path captures cleanly: jacobi/gs-rb/PCG × dense/sparse,
@@ -31,7 +31,11 @@
 >    Sample-time floor uses LOCAL coords; affine C-reconstruction
 >    face-to-particle offsets use WORLD positions so C stays a world-frame
 >    gradient. +2 integration tests (APIC, PIC); both bit-exact.
->    Suite 170→187.
+> 5. B7-alt.3 follow-up — PCG dense ported (`k3_apply_A`, `k3_compute_diag`,
+>    `k3_apply_invM`, `k3_dot_fluid`, `k3_axpy_devscalar` + symmetric
+>    `k3_axpy`). `_pressure_pcg` lazy-resizes scratch buffers to
+>    `self.p.shape` so sub-dense rebuilds re-allocate them automatically.
+>    +1 integration test; bit-exact. Suite 170→188.
 > Previous session (2026-05-16, on `origin/main` at `adfb06c`):
 > ```
 > dcabdbe  docs/HANDOFF refresh post v1.0 spike
@@ -571,6 +575,13 @@ Estimated total: 3-5 sessions to ship B7-alt.2 … B7-alt.8 + 256³ bench.
   GLOBAL face positions (`(ii + off_x) * dx`) so the C matrix stays a
   world-frame gradient — getting it wrong drifts within one step.
   +2 GPU integration tests (APIC, PIC), both bit-exact.
+- ~~B7-alt.3 PCG dense coverage~~ — **shipped 2026-05-17**.
+  `k3_apply_A`, `k3_compute_diag`, `k3_apply_invM`, `k3_dot_fluid`,
+  `k3_axpy_devscalar`, `k3_axpy` ported. `_pressure_pcg` lazy-resizes
+  `_pcg_r/z/p/Ap/diag` to `self.p.shape` so sub-dense rebuild
+  auto-reallocates scratch. Sparse PCG (per-tile path) stays full-dense
+  for now; it passes `0,0,0` to the shared `k3_compute_diag` launch.
+  +1 GPU integration test, bit-exact.
 
 **Tier 1 (closed prior session — for context, do NOT re-open):**
 - ~~PCG graph-eligibility~~ — **Option A shipped** (`91e35b4`, 4.17× on big_pcg).

@@ -227,3 +227,29 @@ def test_b7_alt_3_sub_dense_matches_dense_pic():
     print(f"\n[B7-alt.3 pic] sub_offset={b._sub_offset}, "
           f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
     assert rel < 1e-4, f"PIC sub-dense drift {rel:.3e} exceeds fp32 noise"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_pcg():
+    """PCG dense pressure solver in sub-dense mode. The PCG scratch
+    (_pcg_r/z/p/Ap/diag) is allocated lazily at self.p.shape, so a
+    sub-dense rebuild on solver B re-sizes them on the next call.
+    Five grid kernels (k3_apply_A, k3_compute_diag, k3_apply_invM,
+    k3_dot_fluid, k3_axpy_devscalar) take the new off_x/y/z."""
+    a, b = _seed_pair(sub_dilation=6)
+    a.step(dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    b.step(dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    b.step(dt=0.005, pressure_iters=30, pressure_solver="pcg")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 pcg] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    # PCG accumulates many fp32 dot products + axpy operations; tolerance
+    # a touch wider than the single-pass Jacobi/GS-RB to absorb
+    # atomic-add ordering across multiple reductions per iter.
+    assert rel < 1e-3, f"PCG sub-dense drift {rel:.3e} exceeds tolerance"

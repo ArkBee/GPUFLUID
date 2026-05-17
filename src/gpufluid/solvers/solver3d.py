@@ -1708,47 +1708,54 @@ def k3_apply_A(  # A·x — same stencil as Jacobi: diag*x - sum_nb (on fluid ce
     y: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
     done: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: x/y sub-dense (local), marker full-dense (gi/gj/gk).
+    # Neighbour pressure reads stay in LOCAL coords (sub-dense + dilation
+    # treats "past sub-dense edge" as non-fluid zero-pressure). Pass zero
+    # offsets for legacy full-dense behaviour.
     if done[0] != 0:
         return
     i, j, k = wp.tid()
     nx = x.shape[0]; ny = x.shape[1]; nz = x.shape[2]
     if i >= nx or j >= ny or k >= nz:
         return
-    if marker[i, j, k] != 1:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if marker[gi, gj, gk] != 1:
         y[i, j, k] = 0.0
         return
     diag = float(0.0); sum_nb = float(0.0)
-    if i > 0:
-        m = marker[i - 1, j, k]
+    if gi > 0:
+        m = marker[gi - 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i - 1, j, k]
-    if i < nx - 1:
-        m = marker[i + 1, j, k]
+            if m == 1 and i > 0: sum_nb += x[i - 1, j, k]
+    if gi < gnx - 1:
+        m = marker[gi + 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i + 1, j, k]
-    if j > 0:
-        m = marker[i, j - 1, k]
+            if m == 1 and i < nx - 1: sum_nb += x[i + 1, j, k]
+    if gj > 0:
+        m = marker[gi, gj - 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j - 1, k]
-    if j < ny - 1:
-        m = marker[i, j + 1, k]
+            if m == 1 and j > 0: sum_nb += x[i, j - 1, k]
+    if gj < gny - 1:
+        m = marker[gi, gj + 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j + 1, k]
-    if k > 0:
-        m = marker[i, j, k - 1]
+            if m == 1 and j < ny - 1: sum_nb += x[i, j + 1, k]
+    if gk > 0:
+        m = marker[gi, gj, gk - 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j, k - 1]
-    if k < nz - 1:
-        m = marker[i, j, k + 1]
+            if m == 1 and k > 0: sum_nb += x[i, j, k - 1]
+    if gk < gnz - 1:
+        m = marker[gi, gj, gk + 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += x[i, j, k + 1]
+            if m == 1 and k < nz - 1: sum_nb += x[i, j, k + 1]
     y[i, j, k] = diag * x[i, j, k] - sum_nb
 
 
@@ -1756,34 +1763,40 @@ block("S2.6.3", "PCG: apply Laplacian operator A to x")(k3_apply_A)
 
 
 @wp.kernel
-def k3_compute_diag(marker: wp.array3d(dtype=int), diag: wp.array3d(dtype=float)):
+def k3_compute_diag(marker: wp.array3d(dtype=int), diag: wp.array3d(dtype=float),
+                    off_x: int, off_y: int, off_z: int):
+    # B7-alt.3: diag sub-dense (local), marker full-dense (gi/gj/gk).
     i, j, k = wp.tid()
-    nx = marker.shape[0]; ny = marker.shape[1]; nz = marker.shape[2]
-    if i >= nx or j >= ny or k >= nz:
+    sx = diag.shape[0]; sy = diag.shape[1]; sz = diag.shape[2]
+    if i >= sx or j >= sy or k >= sz:
         return
-    if marker[i, j, k] != 1:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if marker[gi, gj, gk] != 1:
         diag[i, j, k] = 1.0
         return
     d = float(0.0)
-    if i > 0          and marker[i - 1, j, k] != 2: d += 1.0
-    if i < nx - 1     and marker[i + 1, j, k] != 2: d += 1.0
-    if j > 0          and marker[i, j - 1, k] != 2: d += 1.0
-    if j < ny - 1     and marker[i, j + 1, k] != 2: d += 1.0
-    if k > 0          and marker[i, j, k - 1] != 2: d += 1.0
-    if k < nz - 1     and marker[i, j, k + 1] != 2: d += 1.0
+    if gi > 0          and marker[gi - 1, gj, gk] != 2: d += 1.0
+    if gi < gnx - 1    and marker[gi + 1, gj, gk] != 2: d += 1.0
+    if gj > 0          and marker[gi, gj - 1, gk] != 2: d += 1.0
+    if gj < gny - 1    and marker[gi, gj + 1, gk] != 2: d += 1.0
+    if gk > 0          and marker[gi, gj, gk - 1] != 2: d += 1.0
+    if gk < gnz - 1    and marker[gi, gj, gk + 1] != 2: d += 1.0
     diag[i, j, k] = wp.max(d, 1.0)
 
 
 @wp.kernel
 def k3_apply_invM(r: wp.array3d(dtype=float), diag: wp.array3d(dtype=float),
                   z: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
-                  done: wp.array(dtype=int)):
+                  done: wp.array(dtype=int),
+                  off_x: int, off_y: int, off_z: int):
+    # B7-alt.3: r/diag/z sub-dense (local), marker full-dense (gi/gj/gk).
     if done[0] != 0:
         return
     i, j, k = wp.tid()
     if i >= r.shape[0] or j >= r.shape[1] or k >= r.shape[2]:
         return
-    if marker[i, j, k] != 1:
+    if marker[i + off_x, j + off_y, k + off_z] != 1:
         z[i, j, k] = 0.0
     else:
         z[i, j, k] = r[i, j, k] / diag[i, j, k]
@@ -1791,12 +1804,15 @@ def k3_apply_invM(r: wp.array3d(dtype=float), diag: wp.array3d(dtype=float),
 
 @wp.kernel
 def k3_axpy(a: float, x: wp.array3d(dtype=float), y: wp.array3d(dtype=float),
-            out: wp.array3d(dtype=float), marker: wp.array3d(dtype=int)):
-    """out = y + a * x, restricted to fluid cells."""
+            out: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
+            off_x: int, off_y: int, off_z: int):
+    """out = y + a * x, restricted to fluid cells.
+
+    B7-alt.3: x/y/out sub-dense (local), marker full-dense (gi/gj/gk)."""
     i, j, k = wp.tid()
     if i >= x.shape[0] or j >= x.shape[1] or k >= x.shape[2]:
         return
-    if marker[i, j, k] != 1:
+    if marker[i + off_x, j + off_y, k + off_z] != 1:
         out[i, j, k] = 0.0
     else:
         out[i, j, k] = y[i, j, k] + a * x[i, j, k]
@@ -1805,13 +1821,15 @@ def k3_axpy(a: float, x: wp.array3d(dtype=float), y: wp.array3d(dtype=float),
 @wp.kernel
 def k3_dot_fluid(a: wp.array3d(dtype=float), b: wp.array3d(dtype=float),
                  out: wp.array(dtype=float), marker: wp.array3d(dtype=int),
-                 done: wp.array(dtype=int)):
+                 done: wp.array(dtype=int),
+                 off_x: int, off_y: int, off_z: int):
+    # B7-alt.3: a/b sub-dense (local), marker full-dense (gi/gj/gk).
     if done[0] != 0:
         return
     i, j, k = wp.tid()
     if i >= a.shape[0] or j >= a.shape[1] or k >= a.shape[2]:
         return
-    if marker[i, j, k] == 1:
+    if marker[i + off_x, j + off_y, k + off_z] == 1:
         wp.atomic_add(out, 0, a[i, j, k] * b[i, j, k])
 
 
@@ -1935,15 +1953,18 @@ def k3_axpy_devscalar(
     x: wp.array3d(dtype=float), y_in: wp.array3d(dtype=float),
     y_out: wp.array3d(dtype=float), marker: wp.array3d(dtype=int),
     done: wp.array(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
     """y_out = y_in + sign * a_dev[0] * x  (on fluid cells). No-op when
-    the PCG `done` flag is set."""
+    the PCG `done` flag is set.
+
+    B7-alt.3: x/y_in/y_out sub-dense (local), marker full-dense (gi/gj/gk)."""
     if done[0] != 0:
         return
     i, j, k = wp.tid()
     if i >= x.shape[0] or j >= x.shape[1] or k >= x.shape[2]:
         return
-    if marker[i, j, k] != 1:
+    if marker[i + off_x, j + off_y, k + off_z] != 1:
         y_out[i, j, k] = 0.0
         return
     a = a_dev[0] * sign
@@ -2739,24 +2760,32 @@ class FlipSolver3D:
         """If `_no_host_sync` is True (CUDA-graph capture path), skips the
         residual host reads — runs exactly `max_iter` iterations regardless
         of convergence. Trades a small amount of redundant iteration for
-        graph-capture eligibility."""
-        nx, ny, nz, dev = self.nx, self.ny, self.nz, self.device
-        if not hasattr(self, "_pcg_r"):
-            self._pcg_r = zeros((nx, ny, nz), dev=dev)
-            self._pcg_z = zeros((nx, ny, nz), dev=dev)
-            self._pcg_p = zeros((nx, ny, nz), dev=dev)
-            self._pcg_Ap = zeros((nx, ny, nz), dev=dev)
-            self._pcg_diag = zeros((nx, ny, nz), dev=dev)
-            self._pcg_alpha = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_beta = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_rz_old = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_rz_new = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
-            self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
-            # A — graph-eligibility helpers (on-device convergence check).
-            self._pcg_done = wp.zeros(1, dtype=int, device=dev)
-            self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
+        graph-capture eligibility.
+
+        B7-alt.3: PCG scratch (_pcg_r/z/p/Ap/diag) shares the shape of
+        `self.p`, so a sub-dense rebuild lazily resizes them on the next
+        call. `_sub_offset` is passed to every grid kernel."""
+        dev = self.device
+        target_shape = tuple(self.p.shape)
+        ox, oy, oz = self._sub_offset
+        if (not hasattr(self, "_pcg_r")
+                or tuple(self._pcg_r.shape) != target_shape):
+            self._pcg_r = zeros(target_shape, dev=dev)
+            self._pcg_z = zeros(target_shape, dev=dev)
+            self._pcg_p = zeros(target_shape, dev=dev)
+            self._pcg_Ap = zeros(target_shape, dev=dev)
+            self._pcg_diag = zeros(target_shape, dev=dev)
+            if not hasattr(self, "_pcg_alpha"):
+                self._pcg_alpha = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_beta = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_rz_old = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_rz_new = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_pAp = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_r_norm2 = wp.zeros(1, dtype=float, device=dev)
+                self._pcg_r0_norm2 = wp.zeros(1, dtype=float, device=dev)
+                # A — graph-eligibility helpers (on-device convergence check).
+                self._pcg_done = wp.zeros(1, dtype=int, device=dev)
+                self._pcg_tol_sq = wp.zeros(1, dtype=float, device=dev)
 
         # Reset the per-call stop flag. From this point on, every iter-
         # body kernel below is gated on `_pcg_done` — once converged, the
@@ -2767,20 +2796,22 @@ class FlipSolver3D:
                   inputs=[self._pcg_done], device=dev)
         done = self._pcg_done
 
-        wp.launch(k3_compute_diag, dim=(nx, ny, nz),
-                  inputs=[self.marker, self._pcg_diag], device=dev)
+        wp.launch(k3_compute_diag, dim=target_shape,
+                  inputs=[self.marker, self._pcg_diag, ox, oy, oz], device=dev)
         # x = 0, r = b
         self.p.zero_()
         wp.copy(self._pcg_r, self.div)
-        wp.launch(k3_apply_invM, dim=(nx, ny, nz),
-                  inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker, done],
+        wp.launch(k3_apply_invM, dim=target_shape,
+                  inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker,
+                          done, ox, oy, oz],
                   device=dev)
         wp.copy(self._pcg_p, self._pcg_z)
 
         def dev_dot(a, b, out):
             wp.launch(k3_zero_scalar, dim=1, inputs=[out, done], device=dev)
-            wp.launch(k3_dot_fluid, dim=(nx, ny, nz),
-                      inputs=[a, b, out, self.marker, done], device=dev)
+            wp.launch(k3_dot_fluid, dim=target_shape,
+                      inputs=[a, b, out, self.marker, done, ox, oy, oz],
+                      device=dev)
 
         # rz_old = r·z, r0_norm² = r·r  — both on device
         dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_old)
@@ -2800,19 +2831,22 @@ class FlipSolver3D:
             tol_sq = (tol ** 2) * r0_norm2_host
 
         for it in range(max_iter):
-            wp.launch(k3_apply_A, dim=(nx, ny, nz),
-                      inputs=[self._pcg_p, self._pcg_Ap, self.marker, done], device=dev)
+            wp.launch(k3_apply_A, dim=target_shape,
+                      inputs=[self._pcg_p, self._pcg_Ap, self.marker, done,
+                              ox, oy, oz], device=dev)
             dev_dot(self._pcg_p, self._pcg_Ap, self._pcg_pAp)
             wp.launch(k3_div_scalar, dim=1,
                       inputs=[self._pcg_rz_old, self._pcg_pAp, self._pcg_alpha, done],
                       device=dev)
             # x += α p
-            wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
-                      inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p, self.marker, done],
+            wp.launch(k3_axpy_devscalar, dim=target_shape,
+                      inputs=[self._pcg_alpha, 1.0, self._pcg_p, self.p, self.p,
+                              self.marker, done, ox, oy, oz],
                       device=dev)
             # r -= α Ap
-            wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
-                      inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r, self._pcg_r, self.marker, done],
+            wp.launch(k3_axpy_devscalar, dim=target_shape,
+                      inputs=[self._pcg_alpha, -1.0, self._pcg_Ap, self._pcg_r,
+                              self._pcg_r, self.marker, done, ox, oy, oz],
                       device=dev)
             # Convergence check — emitted every `check_every` iters and at
             # the final iter. The Python `if` runs at capture time, so the
@@ -2829,8 +2863,9 @@ class FlipSolver3D:
                     if float(self._pcg_r_norm2.numpy()[0]) < tol_sq:
                         return it + 1
             # z = M⁻¹ r
-            wp.launch(k3_apply_invM, dim=(nx, ny, nz),
-                      inputs=[self._pcg_r, self._pcg_diag, self._pcg_z, self.marker, done], device=dev)
+            wp.launch(k3_apply_invM, dim=target_shape,
+                      inputs=[self._pcg_r, self._pcg_diag, self._pcg_z,
+                              self.marker, done, ox, oy, oz], device=dev)
             # rz_new = r·z
             dev_dot(self._pcg_r, self._pcg_z, self._pcg_rz_new)
             # β = rz_new / rz_old
@@ -2838,8 +2873,9 @@ class FlipSolver3D:
                       inputs=[self._pcg_rz_new, self._pcg_rz_old, self._pcg_beta, done],
                       device=dev)
             # p = z + β p
-            wp.launch(k3_axpy_devscalar, dim=(nx, ny, nz),
-                      inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z, self._pcg_p, self.marker, done],
+            wp.launch(k3_axpy_devscalar, dim=target_shape,
+                      inputs=[self._pcg_beta, 1.0, self._pcg_p, self._pcg_z,
+                              self._pcg_p, self.marker, done, ox, oy, oz],
                       device=dev)
             # rz_old ← rz_new
             wp.launch(k3_copy_scalar, dim=1,
@@ -2931,8 +2967,11 @@ class FlipSolver3D:
         done = self._pcg_done
 
         # Diag: still cheap, launch dense. (One-shot per step.)
+        # Sparse PCG (block-sparse per-tile variants) hasn't been ported
+        # to sub-dense yet — guard in step() rejects this combo — so we
+        # always pass full-dense offsets here.
         wp.launch(k3_compute_diag, dim=(nx, ny, nz),
-                  inputs=[self.marker, self._pcg_diag], device=dev)
+                  inputs=[self.marker, self._pcg_diag, 0, 0, 0], device=dev)
 
         # `coords` device array + `_n_active_dev` are populated here.
         n_active, coords = self._build_active_blocks(_no_host_sync=_no_host_sync)
@@ -3197,9 +3236,7 @@ class FlipSolver3D:
         # colour, temperature).
         if self._sub_offset != (0, 0, 0):
             unsupported = []
-            if pressure_solver == "pcg":
-                unsupported.append("pressure_solver='pcg'")
-            elif pressure_solver not in ("jacobi", "gsrb"):
+            if pressure_solver not in ("jacobi", "gsrb", "pcg"):
                 unsupported.append(f"pressure_solver={pressure_solver!r}")
             if pressure_block_sparse:
                 unsupported.append("pressure_block_sparse=True")
