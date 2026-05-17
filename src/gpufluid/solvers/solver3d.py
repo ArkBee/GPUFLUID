@@ -3608,6 +3608,69 @@ class FlipSolver3D:
         hi = (min(nx, hi[0] + d), min(ny, hi[1] + d), min(nz, hi[2] + d))
         return lo, hi
 
+    @block("F3.7", "Map a world-space particle position to local sub-dense "
+                   "cell coords + flag whether it lies inside the bbox.")
+    def _pos_to_sub_cell(self, pos):
+        """Return ``((li, lj, lk), inside)`` for a single world-space ``pos``.
+
+        ``inside`` is True when the cell ``(floor(pos/dx) - sub_offset)`` is
+        strictly inside ``self._sub_shape`` — i.e. inside the dilated
+        bbox built at the last rebuild. False means the particle has
+        wandered past the dilation buffer and the sub-dense kernels will
+        silently clamp it via sample3 / drop it via scatter_face. Caller
+        decides what to do (warning, force rebuild, etc.)."""
+        p = np.asarray(pos, dtype=np.float32).reshape(3)
+        gi = int(np.floor(p[0] / self.dx))
+        gj = int(np.floor(p[1] / self.dx))
+        gk = int(np.floor(p[2] / self.dx))
+        ox, oy, oz = self._sub_offset
+        li, lj, lk = gi - ox, gj - oy, gk - oz
+        sx, sy, sz = self._sub_shape
+        inside = (0 <= li < sx and 0 <= lj < sy and 0 <= lk < sz)
+        return (li, lj, lk), inside
+
+    def _check_particles_in_sub_bbox(self, frame_idx: int) -> int:
+        """Scan particle positions, count how many sit outside the current
+        sub-dense bbox, and fire a ONE-SHOT stderr warning if any do. Return
+        the out-of-bbox count (useful for tests). No-op when sub-dense is
+        disabled, when there are no particles, or when the offset is zero
+        (full-dense covers the whole domain by construction).
+
+        Called from prepare_frame right after a rebuild; an out-of-bbox
+        count > 0 means the rebuild bbox didn't capture all the fluid —
+        usually because outflow/inflow/D4.7 left the marker missing cells
+        that particles still occupy. The fix is either a larger
+        ``sub_dilation`` or a tighter ``sub_rebuild_every``."""
+        if not self._enable_sub_dense or self.pos is None or self.n_particles == 0:
+            return 0
+        if self._sub_offset == (0, 0, 0) and self._sub_shape == (self.nx, self.ny, self.nz):
+            return 0
+        pos_np = self.pos.numpy()
+        cells = np.floor(pos_np / self.dx).astype(np.int64)
+        ox, oy, oz = self._sub_offset
+        sx, sy, sz = self._sub_shape
+        local = cells - np.array([ox, oy, oz], dtype=np.int64)
+        out_mask = (
+            (local[:, 0] < 0) | (local[:, 0] >= sx)
+            | (local[:, 1] < 0) | (local[:, 1] >= sy)
+            | (local[:, 2] < 0) | (local[:, 2] >= sz)
+        )
+        n_out = int(out_mask.sum())
+        if n_out > 0 and not getattr(self, "_sub_oob_warned", False):
+            import sys
+            print(
+                f"[gpufluid] WARNING: {n_out} particles ({100.0*n_out/self.n_particles:.1f}%) "
+                f"lie outside the sub-dense bbox at frame {frame_idx} "
+                f"(offset={self._sub_offset}, shape={self._sub_shape}). "
+                f"Their grid contributions will be silently clamped/dropped "
+                f"by sample3/scatter_face. Raise `sub_dilation` (current="
+                f"{self._sub_dilation}) or lower `sub_rebuild_every` (current="
+                f"{self._sub_rebuild_every}) to widen the safety margin.",
+                file=sys.stderr, flush=True,
+            )
+            self._sub_oob_warned = True
+        return n_out
+
     def _should_rebuild_sub_dense(self, frame_idx: int) -> bool:
         """True when prepare_frame should rebuild the sub-dense bbox:
         first call (never rebuilt), periodic timer, or proximity to the
@@ -3775,6 +3838,13 @@ class FlipSolver3D:
             if bbox is not None:
                 self._rebuild_sub_dense(*bbox)
                 self._last_sub_rebuild_frame = frame_idx
+                # B7-alt.4 — verify no particles escaped the new bbox.
+                # The marker was built from the LAST step's p2g, but
+                # particles have moved a partial step further between
+                # then and now (inflow/outflow + advect). With sane
+                # dilation everyone stays inside; this guards against
+                # misconfigured `sub_dilation` / `sub_rebuild_every`.
+                self._check_particles_in_sub_bbox(frame_idx)
 
     # ----------------------------------------------------- F3.4 step_cfl
     @block("F3.4", "CFL-adaptive substepping: clamps by advection CFL "
