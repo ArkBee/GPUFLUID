@@ -82,54 +82,46 @@ edge. `marker` stays full-dense; every kernel reads it via global
 --sub-dilation K             # default 4
 ```
 
-### Default next task — **F3.6.C3** (start here in N+5 session)
+### F3.6 MACRO ✅ CLOSED 2026-05-17
 
-F3.6.C2 closed 2026-05-17 — solver now drains the FrameEventQueue
-instead of pulling from `domain/regions.py`. All 6 historical
-whitelist entries deleted; `_KNOWN_LAYER_EXCEPTIONS` is the empty
-list. Suite stays at 237; B5 + B7-alt graph-rehit tests confirm
-88% hit rate preserved (drain happens BEFORE substep loop, queue
-is empty during capture).
+The architecture contract is fully principled. Every cross-layer
+import either satisfies the §2 layer rule or fails CI. The 6-phase
+F3.6 hook refactor (spec in DESIGN.md §3.2.4.2) eliminated all
+historical violations:
 
-**F3.6.C3 — close the macro with a regression guard + closure video.**
+| Phase | What shipped |
+|-------|--------------|
+| A1 | `sdf_*` math primitives -> `primitives/sdf.py` (G1.10–G1.14) |
+| A2 | `mark_solid_from_mesh_gpu` -> `schemes/mesh_marker.py` |
+| B  | `Motion` + `evaluate_center` -> `primitives/animation.py` (G1.15/16) |
+| C1 | `FrameEventQueue` (G1.19) + `publish_for_frame` dual-path on D4 region helpers |
+| C2 | Solver drains queue at `prepare_frame` top; legacy imports deleted |
+| C3 | `tests/test_no_layer_exceptions.py` hard CI gate + `out/videos/step29.mp4` |
 
-1. Add `tests/test_no_layer_exceptions.py`:
-   * Single test: `assert _KNOWN_LAYER_EXCEPTIONS == []`.
-   * Fails immediately if a future PR adds back a whitelist entry
-     without an accompanying DESIGN.md §3.2.4.1 row update.
-   * Doc reference: this test IS the §3.2.4.1 commitment — anyone
-     adding to the whitelist must read the section first.
-2. Bake step29 scene + render closure video:
-   * Re-use existing whitewater_splash bake (or a simpler scene —
-     no F3.6-specific demo needed because the change is
-     architectural).
-   * Clone `render_step27_eevee.py` (text-overlay pattern for
-     invisible perf wins). Overlay text:
-       - "F3.6  -  D4 → F3 hook refactor closed"
-       - "6 layer violations → 0"
-       - "FrameEventQueue: D4 publishes, F3 drains"
-       - "F3.6 macro CLOSED  -  2026-05-17"
-   * Stitch as `out/videos/step29.mp4`.
-3. Update HANDOFF + BACKLOG marking F3.6 macro fully ✅ closed.
+`_KNOWN_LAYER_EXCEPTIONS` is the empty list. `step29.mp4` (2.0 MB,
+text overlay) ships under §2 rule 6. Suite at **238 passed**, no
+regressions across the 6-PR journey. CUDA-graph rehit rate preserved
+(88% on B5 benches, drain happens before substep loop).
 
-Acceptance: macro F3.6 is fully ✅ in BACKLOG; the hard test guards
-the whitelist; step29.mp4 ships under HARD GATE.
+### Default next task — open, no automatic queue
 
-### After F3.6
+With F3.6 closed the architecture contract is complete. There is no
+single "next macro" the spec mandates. Open candidates, all
+**user-directed**:
 
-The architecture contract is fully principled — every cross-layer
-import is either declared OK by the §2 rule or fails CI. No further
-F3.6 work needed. Open work:
+* **Push origin** when a fresh PAT lands (35+ commits queued).
+* **Production polish** — HDRI lighting presets for demo scenes,
+  per-scene overlay frames, tutorial notebooks.
+* **v0.2 API stabilisation** — freeze the public surface, write a
+  migration guide, tag a release.
+* **D4.3.GPU rename to S2.x** — finish what F3.6.A2 deferred. Pure
+  ID rename, mechanical, ~1 session.
+* **B10 Alembic** — only if a studio asks.
+* **Skip:** B2 Mixbox (license), B8 differentiable (no use case),
+  B9 multi-GPU (no use case).
 
-* **Push origin** when fresh PAT arrives (34+ commits queued).
-* **Skip B2 Mixbox** (license-blocked).
-* **Skip B8/B9 research** without a concrete use-case.
-* **B10 Alembic** only if a studio asks.
-
-Or move into a new direction (production polish, tutorials,
-v0.2 API stabilisation, multi-GPU spike if a user appears with
-512³ need, etc.) — discussion with user required, no default
-queue.
+If user does not direct, the safe default is to **stop and check in**
+— the architecture work has reached a natural break.
 
 ### Earlier default task — DONE 2026-05-17
 

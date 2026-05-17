@@ -266,14 +266,21 @@ relocations.
   earlier A1/A2/B ones) deleted from `_KNOWN_LAYER_EXCEPTIONS`.
   Suite stays 237; B5 graph-rehit tests + B7-alt graph-rehit tests
   all pass — 88% hit rate preserved.)*
-* [ ] F3.6.C3 — Add hard test `tests/test_no_f3_to_d4_imports.py`
-  asserting `_KNOWN_LAYER_EXCEPTIONS == []` in `blocks/check.py`.
-  Future regressions fail CI immediately. Closure video `step29.mp4`
-  with text overlay "F3↔D4 hook refactor: 6 layer violations → 0".
+* [x] F3.6.C3 — Add hard test + closure video. *(2026-05-17:
+  shipped. `tests/test_no_layer_exceptions.py` (single assertion
+  `_KNOWN_LAYER_EXCEPTIONS == []`) — future PR adding a whitelist
+  entry without a DESIGN.md §3.2.4.1 exit-plan update fails CI
+  immediately. `out/videos/step29.mp4` (2.0 MB, 90 frames @ 24fps
+  Eevee) — text-overlay closure video on the step28 bake (visual
+  backdrop; F3.6 is architectural so the scene doesn't matter,
+  only the overlay).)*
 
-**Acceptance:** `gpufluid blocks --check` clean with zero whitelist
-entries. The `_KNOWN_LAYER_EXCEPTIONS` list in `check.py` is empty.
-Step29 closure video shipped.
+**Acceptance:** ✅ **F3.6 MACRO CLOSED 2026-05-17.** `gpufluid blocks
+--check` clean with zero whitelist entries. The
+`_KNOWN_LAYER_EXCEPTIONS` list is empty and guarded by a hard test.
+The 6-phase journey: A1 (sdf -> G1), A2 (mesh_marker -> S2), B
+(animation -> G1), C1 (FrameEventQueue dual-path), C2 (solver
+drains), C3 (hard gate + closure video).
 
 ### B8. Differentiable solver via Warp gradients `risk:high value:research`
 
