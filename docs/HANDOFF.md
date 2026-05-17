@@ -3,6 +3,172 @@
 > Read this file FIRST in a new session. Everything important is here.
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
+
+---
+
+## 0. NEXT-SESSION QUICKSTART (2026-05-17 → next session)
+
+**One-line state:** v1.0 B7-alt sub-dense storage macro is fully closed
+and bit-exact. Repo is healthy. The only loose thread is one
+`--timings`/`--enable-cuda-graphs` bug — that's the default next task.
+
+### Where we are right now
+
+| Thing | Value |
+|---|---|
+| Branch | `main` |
+| Local HEAD | `ecc96b1` (this commit) |
+| `origin/main` | `93e42e2` — **17 commits behind local, all unpushed** |
+| Tests | 213 total, **all green** (no `--deselect` needed) |
+| Suite runtime | ~75 s on RTX 4080 SUPER |
+| Block registry | 81 unique IDs / 107 callables (`gpufluid info`) |
+| Demo videos | 27 mp4 in `out/videos/` (steps 1–27) |
+| Last demo | `out/videos/step27.mp4` — B7-alt v1.0 closure overlay |
+| Addon zip | 37 KB at `addon/gpufluid_blender.zip`, exposes per-source temperature |
+| Latest milestone | **v1.0 closed** (v0.7, v0.8, v0.9 all closed earlier) |
+
+### Push status — read before doing anything destructive
+
+The 17-commit local stack is unpushed because the previous one-shot PAT
+expired. **Do not** `git push --force` or `git reset --hard` without
+asking the user — there's real work in those commits. To push: the user
+needs to provide a fresh PAT or auth handle. The full stack (oldest →
+newest, all on `main`):
+
+```
+f2d9d39  B7-alt.2  — sub-dense storage refactor + rebuild trigger
+eb0e59f  B7-alt.3  — Jacobi/dense/FLIP path (7 kernels)
+1e48e73  B7-alt.3  — GS-RB + viscosity
+732b100  B7-alt.3  — APIC kernels
+88e5720  B7-alt.3  — PCG dense kernels (5)
+ab84bba  B7-alt.3  — block-sparse + CSF + colour + scalar (22 kernels)
+b2b1a7d  B7-alt.4  — pos_to_sub helper + OOB warning
+ca0fa27  chore     — gitignore .claude/scheduled_tasks
+faae89c  B7-alt.5  — CUDA-graph rehit ≥80% verified (87.5%)
+a3e1bd7  B7-alt.7  — scattered-topology one-shot warning
+3848fe9  B7-alt.6  — 256³ acceptance bench (6.11× memory drop)
+2e97a12  B7-alt.8  — on-device rebuild kernel (3 ms @ 256³)
+56af16d  docs      — v1.0 macro CLOSED milestone bump
+acee31d  Tier 4    — addon UI per-source temperature
+48504e0  test      — fix flaky M5.4 GPU MC speedup at 128³
+a5456a0  step27    — B7-alt v1.0 macro closure overlay video
+ecc96b1  docs      — handoff refresh + per-iteration video rule (this)
+```
+
+### What v1.0 actually shipped — sub-dense storage
+
+`FlipSolver3D(enable_sub_dense=True, sub_rebuild_every=N, sub_dilation=K)`
+shrinks every per-step grid field (`u/v/w/uw/vw/ww/us/vs/ws/p/p_tmp/div`
++ PCG/CSF/colour/scalar scratch) to the active 8³-tile bbox plus `K` cells
+of safety margin. Rebuilt every `N` frames or when fluid approaches the
+edge. `marker` stays full-dense; every kernel reads it via global
+`gi/gj/gk = local + sub_offset`.
+
+**Coverage (all bit-exact vs full-dense baseline, 10 integration tests):**
+- Pressure: `jacobi` × `gsrb` × `pcg`, each in `dense` AND `sparse` mode
+- Transfer: `flip`, `pic`, `apic`
+- Plus: viscosity > 0, CSF (σ > 0), per-particle colour, per-particle scalar
+
+**Headline numbers (256³/10%-fill dam-break, RTX 4080 SUPER):**
+- 6.11× memory drop (642 MB saved across 12 cell fields)
+- Sub-dense step: 1 ms
+- On-device rebuild: 3 ms (vs ~100 ms CPU round-trip baseline)
+- CUDA-graph hit rate: 87.5% across rebuilds (identical to dense)
+
+**CLI flags added this session:**
+```
+--enable-sub-dense           # opt in
+--sub-rebuild-every N        # default 8
+--sub-dilation K             # default 4
+```
+
+### Default next task
+
+**Fix `--timings` + `--enable-cuda-graphs` incompatibility.** Discovered
+at the step27 bake. `StepProfiler.section()` opens
+`wp.ScopedTimer(synchronize=True)`; once `step()` enters its graph-capture
+branch, the sync throws "Cannot synchronize device while graph capture is
+active." Pre-existing bug (also affects v0.9 graph-enabled bakes), not
+unique to sub-dense.
+
+Recommended fix: in `src/gpufluid/primitives/profiling.py`, detect when
+the device is in graph-capture mode (via `wp.is_capturing(dev)`) and
+return `nullcontext` from `StepProfiler.section()` in that case. The
+per-section timing under graph replay isn't meaningful anyway (only the
+whole capture's wall time is) — better to no-op than crash.
+
+Test: `gpufluid simulate examples/scenes/big_pcg.toml --enable-cuda-graphs --timings`
+should complete without error.
+
+### Tier 4 backlog (only if user asks, in priority order)
+
+1. **CSF legacy dead-code cleanup** — `k3_csf_subtract_bias_{u,v,w}`
+   (non-`_dev`) variants are unused; remove them + their tests.
+2. **B10 Alembic writer** — Tier 4; USD already covers Blender, only
+   matters if a studio asks for Alembic.
+3. **B2 Mixbox pigment LUT** — license-blocked (CC BY-NC). Re-evaluate
+   only if commercial licence becomes acceptable.
+
+### v1.x research (multi-session, only with concrete user need)
+
+- **B8 differentiable solver** via Warp gradients. Spike B8.1 first.
+- **B9 multi-GPU domain decomposition.** Spike B9.1 first.
+
+### Five load-bearing invariants for any future kernel work
+
+These come from the B7-alt.3 ports. Future kernel touches must preserve
+them or sub-dense silently drifts:
+
+1. **Marker stays full-dense.** Every kernel reads it via global
+   `gi/gj/gk = i + off_x, j + off_y, k + off_z`.
+2. **Sub-dense buffer reads use LOCAL `i/j/k`.**
+3. **Edge tests against the GLOBAL domain wall use GLOBAL coords**
+   (`if gi == 0`); edge tests against the sub-dense BUFFER edge use
+   LOCAL coords (`if i == 0`). Don't mix.
+4. **APIC affine extension uses GLOBAL face positions** for the
+   face-to-particle world offset: `(ii + off_x) * dx - px`, not
+   `ii * dx - px`. Otherwise C tracks the bbox instead of the world.
+5. **GS-RB parity uses GLOBAL indices**: `(gi + gj + gk) % 2`. An odd
+   `off_x + off_y + off_z` would silently swap red/black.
+
+Plus: any new lazy-allocated scratch buffer keys off `self.p.shape`
+and re-allocates on shape change (see `_pressure_pcg`,
+`_apply_surface_tension`, `_apply_color_transfer`,
+`_apply_scalar_transfer` for the pattern).
+
+### HARD GATE on every code iteration: video step
+
+Per §2 rule 6 (just hardened this session): every shipped macro or
+milestone-level micro MUST be confirmed with a video before claiming
+complete. Visible features clone `render_step24_eevee.py`; invisible
+perf/refactor wins clone `render_step27_eevee.py` (4-line text-overlay).
+If you genuinely can't render (no GPU access), mark `▶ pending video` in
+BACKLOG instead of `✅ closed`.
+
+### How to run smoke checks before any work
+
+```powershell
+# from repo root
+.venv\Scripts\activate
+pytest -q                                # 213 passed (~75 s on 4080 SUPER)
+gpufluid info                            # 81 unique IDs / 107 callables
+gpufluid simulate examples/scenes/step27_sub_dense.toml `
+    --enable-sub-dense --sub-dilation 6 --enable-cuda-graphs
+# expect: sim 1.13s + mesh 3.74s, "88% hit rate" line at end
+```
+
+### Documents to read next if §0 isn't enough
+
+- **§2** workflow principles — especially the hardened rule 6.
+- **§6** demo videos table (step27 is the latest reference).
+- **§8** roadmap milestones (v0.7…v1.0 all closed).
+- **§12** open TODOs (Tier 4 + research details).
+- **§13** repo hygiene notes (the 5 invariants, lazy-alloc pattern,
+  CSF dead code, `--timings`/graphs bug).
+- `docs/BACKLOG.md` — milestone status table + macro detail.
+- `docs/DESIGN.md` — architecture contract.
+
+---
 >
 > **End-of-session state (2026-05-17, v1.0 B7-alt MACRO FULLY CLOSED):**
 > 213 tests total, **all green** (the previously-flaky
