@@ -1,4 +1,5 @@
-"""Tests for D4.7 inflow / outflow regions."""
+"""Tests for [BLK D4.7] inflow / outflow regions, plus [BLK D4.7.GPU]
+mark+scan+scatter outflow compaction kernels."""
 import numpy as np
 import pytest
 

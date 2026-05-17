@@ -1,5 +1,10 @@
 """[BLK S2.11.GPU] GPU particle reseed regression + perf.
 
+Drives [BLK S2.11.GPU.COUNT] (atomic per-cell count) and
+[BLK S2.11.GPU.RANK] (per-particle rank + alive mask) through the
+GPU reseed orchestrator.
+
+
 Verifies that:
   1. GPU reseed and CPU reseed agree on emit / cull counts for the same
      particle distribution.

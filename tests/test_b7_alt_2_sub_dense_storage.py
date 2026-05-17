@@ -1,4 +1,4 @@
-"""B7-alt.2 — sub-dense field storage + rebuild trigger.
+"""B7-alt.2 / [BLK F3.7] — sub-dense field storage + rebuild trigger.
 
 Storage-layer micro for the v1.0 macro that B7-alt.1 greenlit. Adds the
 infrastructure that B7-alt.3 will later thread through ~20 kernels:

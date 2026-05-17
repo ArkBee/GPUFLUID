@@ -1,4 +1,11 @@
-"""Layer F3 tests — solver smoke tests (S2.3 gravity, F3.3 step pipeline)."""
+"""Layer F3 tests — solver smoke tests.
+
+[BLK F3.3] step() drives the full per-step kernel sequence end-to-end,
+which exercises [BLK S2.1] P2G, [BLK S2.2] normalize, [BLK S2.3]
+gravity, [BLK S2.4] solid BC, [BLK S2.5] divergence, [BLK S2.6.1]
+Jacobi pressure, [BLK S2.7] grad subtract, [BLK S2.8] G2P+advect, plus
+the seeders [BLK D4.5.1] and [BLK D4.5.2] used to populate fluid.
+"""
 import numpy as np
 import pytest
 import warp as wp

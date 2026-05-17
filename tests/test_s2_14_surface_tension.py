@@ -1,5 +1,11 @@
 """[BLK S2.14] Surface tension regression test.
 
+Exercises every CSF micro-block end-to-end through one step():
+[BLK S2.14.1] indicator χ̃, [BLK S2.14.2] normal n̂, [BLK S2.14.3]
+curvature κ, [BLK S2.14.4] CSF impulse, [BLK S2.14.5] capillary-wave dt,
+[BLK S2.14.6] force-balance.
+
+
 Validates that the Brackbill-Kothe CSF actually changes the simulation: a
 fluid cube at rest in zero gravity should contract toward a sphere when
 surface_tension > 0. The test asserts the corner-to-centroid distance

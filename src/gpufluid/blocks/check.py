@@ -401,28 +401,51 @@ def _normalise_id(bid: str) -> str:
 
 def _check_test_coverage(registry: Dict[str, List[BlockInfo]],
                          out: CheckReport) -> None:
+    """Warn for any block without a guard test.
+
+    A test "covers" a block when EITHER:
+      (a) a `test_*.py` filename or `def test_*` function name contains
+          the normalised slug (e.g. `s2_14_6`), OR
+      (b) any test file's contents literally mention the block ID
+          (e.g. `S2.14.6` in a docstring, comment, or class name).
+
+    Path (b) lets a test exercise a block without requiring its slug to
+    appear in the function name — preserves the docs-first principle
+    (the test still has to NAME the block to claim coverage) while
+    accepting tests that already do via docstrings instead of slugs.
+    """
     if not TESTS_ROOT.exists():
         return
     test_files = list(TESTS_ROOT.rglob("test_*.py"))
-    # Build a haystack of test file/function names.
-    haystack: List[str] = []
+    slug_haystack: List[str] = []
+    full_text_haystack_parts: List[str] = []
     for f in test_files:
-        haystack.append(f.stem)
+        slug_haystack.append(f.stem)
         try:
-            tree = ast.parse(f.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):
+            txt = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        full_text_haystack_parts.append(txt)
+        try:
+            tree = ast.parse(txt)
+        except SyntaxError:
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
-                haystack.append(node.name)
-    haystack_str = "|".join(haystack).lower()
+                slug_haystack.append(node.name)
+    slug_str = "|".join(slug_haystack).lower()
+    full_text = "\n".join(full_text_haystack_parts)
     for bid in registry:
         slug = _normalise_id(bid)
-        if slug not in haystack_str:
-            out.warnings.append(CheckFinding(
-                6, "no-guard-test",
-                f"{bid}: no test_*.py file or test_* function name contains "
-                f"{slug!r}. Aspirational hygiene — not a CI fail."))
+        if slug in slug_str:
+            continue
+        if bid in full_text:
+            continue
+        out.warnings.append(CheckFinding(
+            6, "no-guard-test",
+            f"{bid}: no test names or test file contents mention "
+            f"{bid!r} or slug {slug!r}. Add a `[BLK {bid}]` reference "
+            f"or rename a test function. Aspirational hygiene — not a CI fail."))
 
 
 # ----------------------------------------------------------- orchestrator

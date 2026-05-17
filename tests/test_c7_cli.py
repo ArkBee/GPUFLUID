@@ -1,4 +1,7 @@
-"""Tests for C7 CLI: config parsing, end-to-end simulate, info."""
+"""Tests for layer C7 CLI: config parsing, end-to-end simulate, info.
+
+Covers [BLK C7.1] TOML config schema, [BLK C7.2] simulate command,
+[BLK C7.3] bench command, [BLK C7.4] info command."""
 import io
 import json
 import sys

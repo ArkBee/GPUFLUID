@@ -1,4 +1,8 @@
-"""B3.1 — W7.7 trapped-air potential (Ihmsen 2012 §3.1) on GPU.
+"""B3.1 — [BLK W7.7] trapped-air potential (Ihmsen 2012 §3.1) on GPU.
+
+Also exercises [BLK W7.7.H] (the numpy→numpy host wrapper) via the
+direct callable path.
+
 
 The whole point of the potential is to *distinguish* divergent flow from
 laminar flow. Tests prove the answer changes between the two regimes; a

@@ -1,4 +1,4 @@
-"""[BLK W7.4 + W7.5] Whitewater foam/spray/bubble classification + dynamics.
+"""[BLK W7.1] [BLK W7.2] [BLK W7.4] [BLK W7.5] Whitewater state + emit + classify + dynamics.
 
 Validates that:
   1. With a density grid supplied, emit classifies particles into all three

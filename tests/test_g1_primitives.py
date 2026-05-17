@@ -1,4 +1,9 @@
-"""Layer G1 tests — primitives, runtime, gridmath."""
+"""Layer G1 tests — primitives, runtime, gridmath.
+
+Covers blocks: [BLK G1.1] [BLK G1.2] [BLK G1.3] [BLK G1.4] [BLK G1.5]
+[BLK G1.6] [BLK G1.7] [BLK G1.8] — most are exercised via the runtime/
+allocator + trilinear scatter/sample helpers used by every kernel.
+"""
 import numpy as np
 import pytest
 import warp as wp

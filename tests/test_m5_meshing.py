@@ -1,4 +1,7 @@
-"""Layer M5 tests — particle → density → marching cubes."""
+"""Layer M5 tests — particle → density → marching cubes.
+
+Covers [BLK M5.1] density scatter, [BLK M5.2] density box-blur,
+[BLK M5.3] CPU marching cubes path, and [BLK M5.7] GPU wall-mask."""
 import numpy as np
 import pytest
 import warp as wp

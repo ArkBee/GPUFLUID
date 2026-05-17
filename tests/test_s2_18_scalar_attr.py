@@ -1,4 +1,7 @@
-"""B11 / S2.18 — per-particle scalar attribute transfer (temperature).
+"""B11 / [BLK S2.18] — per-particle scalar attribute transfer (temperature).
+
+Exercises every kernel of the scalar-attr pipeline: [BLK S2.18.1] P2G
+scatter, [BLK S2.18.2] grid normalize, [BLK S2.18.3] G2P gather.
 
 Proves the new pipeline *changes the answer*, mirroring the rule in
 HANDOFF §2.3 (tests must demonstrate the feature does something, not

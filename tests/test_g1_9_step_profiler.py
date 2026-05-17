@@ -1,4 +1,8 @@
-"""B12 — per-section step profiler (G1.9)."""
+"""B12 — per-section step profiler ([BLK G1.9]).
+
+Touches [BLK S2.13] viscosity Jacobi via the viscosity-section test
+(profiler asserts the section fires only when ν > 0).
+"""
 import numpy as np
 import pytest
 

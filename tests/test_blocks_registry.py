@@ -118,10 +118,15 @@ def test_check_5_no_duplicate_id_qualname(populated_registry):
         "\n  ".join(str(e) for e in errs)
 
 
-@pytest.mark.xfail(strict=False, reason="check 6 is aspirational hygiene")
 def test_check_6_every_block_has_a_test(populated_registry):
-    """Every registered block has a `test_<id>_*` function or
-    `test_<id>_*.py` file. Warning-level — not enforced in CI."""
+    """Every registered block is mentioned in at least one test (by
+    slug in a name OR by literal `[BLK X.Y.Z]` reference in a test
+    file's contents).
+
+    Started as warning-level (xfail) per DESIGN.md §3.2.1; flipped to
+    hard once the index reached zero warnings, so new blocks must
+    carry a test reference from day one.
+    """
     warns = [w for w in populated_registry.warnings if w.check == 6]
     assert not warns, "Blocks missing a guard test:\n  " + \
         "\n  ".join(str(w) for w in warns)

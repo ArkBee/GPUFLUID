@@ -1,5 +1,10 @@
 """[BLK S2.15] Per-particle color attribute regression tests.
 
+Exercises the P2G→normalize→G2P color pipeline kernels:
+[BLK S2.15.1] P2G scatter, [BLK S2.15.2] grid normalize, [BLK S2.15.3]
+G2P gather.
+
+
 Two red+blue cubes seeded next to each other must:
   1. Each carry the seed color initially (no green leakage).
   2. Develop a blended (purple-ish) population after a few steps.
