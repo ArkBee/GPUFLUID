@@ -43,16 +43,18 @@ AUTOGEN_HEADER = (
 # to the `gpufluid` namespace. Wildcards via prefix match (e.g.
 # "solvers.solver3d" matches that exact module; "domain" matches all D4).
 _KNOWN_LAYER_EXCEPTIONS: List[Tuple[str, str]] = [
-    # F3 solver imports D4 domain helpers for per-frame inflow/outflow hooks.
-    # Pre-dates the layer contract; exit plan in DESIGN.md §3.2.4.1.
-    ("solvers.solver3d", "domain.regions"),
-    # F3.6.A1 closed 2026-05-17: math primitives moved to primitives/sdf.py
-    # F3.6.A2 closed 2026-05-17: mark_solid_from_mesh_gpu moved to
-    #                            schemes/mesh_marker.py
-    # F3.6.B  closed 2026-05-17: Motion + evaluate_center moved to
-    #                            primitives/animation.py
-    ("solvers.solver3d", "domain.seed"),
-    ("solvers.solver3d", "domain.mesh_sdf_gpu"),
+    # F3.6 macro closed all 6 historical violations on 2026-05-17:
+    #   A1 — domain/sdf math primitives -> primitives/sdf.py (G1)
+    #   A2 — domain/mesh_sdf_gpu -> schemes/mesh_marker.py (S2)
+    #   B  — domain/animation Motion + evaluate_center -> primitives/animation.py (G1)
+    #   C1 — FrameEventQueue + publish_for_frame dual-path added
+    #   C2 — solver3d drains queue; domain.regions + domain.seed +
+    #         domain.mesh_sdf_gpu entries removed.
+    #
+    # The list is intentionally empty. A regression test
+    # (tests/test_no_layer_exceptions.py — added in F3.6.C3) will
+    # guard it from being silently repopulated without an exit plan
+    # update in DESIGN.md §3.2.4.1.
 ]
 
 

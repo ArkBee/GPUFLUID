@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 from ..blocks import block
 from ..primitives.runtime import init as warp_init, device as default_device, zeros, zeros_int
 from ..primitives.gridmath import clamp_int, sample3, scatter_face
-from ..domain.regions import InflowBox, OutflowBox, apply_inflows, apply_outflows
+# F3.6.C2 (2026-05-17): removed `from ..domain.regions import ...` entirely.
+# self.inflows/self.outflows are plain lists; the items have duck-typed
+# .publish_for_frame() per the FrameEventQueue contract (DESIGN.md §3.2.4.2).
 from ..primitives.animation import Motion, evaluate_center
 from ..primitives.sdf import sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union
 
@@ -2442,6 +2444,12 @@ class FlipSolver3D:
         self.inflows: list = []
         self.outflows: list = []
         self._rng = np.random.default_rng(0)
+        # F3.6.C2 — per-frame event queue (D4 -> F3 hook). D4 region
+        # helpers publish FluidEmitEvent/FluidOutflowEvent at the top
+        # of prepare_frame; the solver drains and applies. Replaces the
+        # legacy apply_inflows/apply_outflows pull path.
+        from ..primitives.frame_events import FrameEventQueue
+        self._frame_events = FrameEventQueue()
 
     # ---------------------------------------------------------- D4.4 obstacles
     @block("D4.4", "Inject SDF obstacle into marker grid")
@@ -2585,20 +2593,25 @@ class FlipSolver3D:
 
     # -------- D4.7.GPU stream-compaction outflow path ---------------------
     @block("D4.7.GPU", "GPU outflow compaction (mark + scan + scatter)")
-    def _apply_outflows_gpu(self, frame_idx: int) -> int:
+    def _apply_outflows_gpu(self, outflow_events) -> int:
         """Compact ``self.pos/vel`` in place by removing particles inside any
-        active outflow box. Returns the new particle count."""
+        bbox in ``outflow_events`` (list of FluidOutflowEvent with inside=True).
+
+        F3.6.C2: signature changed from ``(frame_idx)`` reading
+        ``self.outflows`` to taking pre-drained events. The active-filter
+        logic now lives in `OutflowBox.publish_for_frame`, which is the
+        single source of truth for "is this outflow firing this frame".
+        """
         import warp.utils as wputils
         if self.pos is None or self.n_particles == 0:
             return 0
-        active = [o for o in self.outflows
-                  if o.frame_start <= frame_idx <= o.frame_end]
+        active = [ev for ev in outflow_events if ev.inside]
         if not active:
             return self.n_particles
         n = self.n_particles
         dev = self.device
-        lo_np = np.array([o.lo for o in active], dtype=np.float32)
-        hi_np = np.array([o.hi for o in active], dtype=np.float32)
+        lo_np = np.array([ev.lo for ev in active], dtype=np.float32)
+        hi_np = np.array([ev.hi for ev in active], dtype=np.float32)
         lo_wp = wp.array(lo_np, dtype=wp.vec3, device=dev)
         hi_wp = wp.array(hi_np, dtype=wp.vec3, device=dev)
 
@@ -3815,13 +3828,28 @@ class FlipSolver3D:
                 self._apply_anim_mesh_obstacles_after_upload(
                     mesh_specs_active, self.cell_centers_np(), frame_idx)
 
-        # ---- inflow + outflow
-        # outflow on GPU (stream compaction); falls through to no-op if no active
-        if self.outflows:
-            self._apply_outflows_gpu(frame_idx)
-        # inflow: small per-frame batch — append host-side and re-bind
-        if self.inflows:
-            emit_pos, emit_vel = apply_inflows(self.inflows, frame_idx, frame_dt, self._rng)
+        # ---- F3.6.C2 — inflow + outflow via FrameEventQueue (D4 -> F3 hook).
+        # Each region helper PUBLISHES events for this frame; the solver
+        # DRAINS them and applies. No more `from domain.regions import
+        # apply_inflows, apply_outflows` — D4 stopped pulling, F3 stopped
+        # importing it. Parity tests in tests/test_g1_17_frame_events.py
+        # pin byte-equivalence with the legacy path.
+        self._frame_events.clear()
+        for inflow in self.inflows:
+            inflow.publish_for_frame(self._frame_events, frame_idx,
+                                     frame_dt, self._rng)
+        for outflow in self.outflows:
+            outflow.publish_for_frame(self._frame_events, frame_idx)
+        # Drain outflows first (cull existing particles) then emits
+        # (append new ones). Both events are host-side; the GPU
+        # compaction kernel runs inside _apply_outflows_gpu.
+        outflow_events = self._frame_events.drain_outflows()
+        if outflow_events:
+            self._apply_outflows_gpu(outflow_events)
+        emit_events = self._frame_events.drain_emits()
+        if emit_events:
+            emit_pos = np.concatenate([e.positions for e in emit_events], axis=0)
+            emit_vel = np.concatenate([e.velocities for e in emit_events], axis=0)
             if len(emit_pos) > 0:
                 cur_pos = self.pos.numpy() if self.pos is not None else np.zeros((0, 3), dtype=np.float32)
                 cur_vel = self.vel.numpy() if self.vel is not None else np.zeros((0, 3), dtype=np.float32)

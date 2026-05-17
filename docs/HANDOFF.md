@@ -82,51 +82,54 @@ edge. `marker` stays full-dense; every kernel reads it via global
 --sub-dilation K             # default 4
 ```
 
-### Default next task — **F3.6.C2** (start here in N+4 session)
+### Default next task — **F3.6.C3** (start here in N+5 session)
 
-F3.6.C1 closed 2026-05-17 — `FrameEventQueue` (G1.19) + event
-dataclasses (G1.17/G1.18) shipped, with 10 TDD tests including parity
-tests asserting `InflowBox.publish_for_frame` + drain produces
-byte-identical particles as the legacy `apply_inflows`. D4 region
-helpers now expose both APIs side-by-side; solver still uses legacy.
+F3.6.C2 closed 2026-05-17 — solver now drains the FrameEventQueue
+instead of pulling from `domain/regions.py`. All 6 historical
+whitelist entries deleted; `_KNOWN_LAYER_EXCEPTIONS` is the empty
+list. Suite stays at 237; B5 + B7-alt graph-rehit tests confirm
+88% hit rate preserved (drain happens BEFORE substep loop, queue
+is empty during capture).
 
-**F3.6.C2 — switch solver to drain-only, delete legacy pull path.**
+**F3.6.C3 — close the macro with a regression guard + closure video.**
 
-1. In `solvers/solver3d.py` `prepare_frame`:
-   * Own a `FrameEventQueue` instance (`self._frame_events`).
-   * At top of `prepare_frame`: call `queue.clear()`, then for each
-     inflow/outflow call `.publish_for_frame(queue, ...)`.
-   * Replace the existing `apply_inflows(...)` call with a
-     `queue.drain_emits()` + concat loop.
-   * Replace `apply_outflows(...)` similarly with `drain_outflows()`
-     + per-event filter.
-2. Remove the top-level imports `from ..domain.regions import
-   InflowBox, OutflowBox, apply_inflows, apply_outflows` — keep only
-   `InflowBox, OutflowBox` type references (still needed for
-   `self.inflows` annotation), OR move those types to a separate
-   shared module. The parity tests guarantee no behaviour change.
-3. **Critical for CUDA-graph compat**: the queue drain happens
-   BEFORE the substep loop. Verify rehit rate unchanged on
-   `test_b5_3_invalidate_on_topology_change` (which still
-   invalidates on `n_particles` change — independent of the queue).
-4. `_KNOWN_LAYER_EXCEPTIONS` loses `("solvers.solver3d",
-   "domain.regions")`. Also drop `domain.seed` if it's no longer
-   imported (audit `solvers/solver3d.py` after the refactor).
+1. Add `tests/test_no_layer_exceptions.py`:
+   * Single test: `assert _KNOWN_LAYER_EXCEPTIONS == []`.
+   * Fails immediately if a future PR adds back a whitelist entry
+     without an accompanying DESIGN.md §3.2.4.1 row update.
+   * Doc reference: this test IS the §3.2.4.1 commitment — anyone
+     adding to the whitelist must read the section first.
+2. Bake step29 scene + render closure video:
+   * Re-use existing whitewater_splash bake (or a simpler scene —
+     no F3.6-specific demo needed because the change is
+     architectural).
+   * Clone `render_step27_eevee.py` (text-overlay pattern for
+     invisible perf wins). Overlay text:
+       - "F3.6  -  D4 → F3 hook refactor closed"
+       - "6 layer violations → 0"
+       - "FrameEventQueue: D4 publishes, F3 drains"
+       - "F3.6 macro CLOSED  -  2026-05-17"
+   * Stitch as `out/videos/step29.mp4`.
+3. Update HANDOFF + BACKLOG marking F3.6 macro fully ✅ closed.
 
-Acceptance: `gpufluid blocks --check` whitelist becomes empty (or
-down to whatever genuinely-needed). The full suite stays green,
-notably the B5 graph-rehit tests (no drop in 88% hit rate).
+Acceptance: macro F3.6 is fully ✅ in BACKLOG; the hard test guards
+the whitelist; step29.mp4 ships under HARD GATE.
 
-### Multi-session ahead
+### After F3.6
 
-* **N+5: F3.6.C3** — add hard `test_no_f3_to_d4_imports.py`
-  asserting `_KNOWN_LAYER_EXCEPTIONS == []`. Closure video
-  `step29.mp4` (text overlay "6 layer violations → 0"). **F3.6
-  macro CLOSED**.
+The architecture contract is fully principled — every cross-layer
+import is either declared OK by the §2 rule or fails CI. No further
+F3.6 work needed. Open work:
 
-Standing items: push origin when fresh PAT arrives (33+ commits),
-skip B2 Mixbox (license), skip B8/B9 research (no use-case), B10
-Alembic only on request.
+* **Push origin** when fresh PAT arrives (34+ commits queued).
+* **Skip B2 Mixbox** (license-blocked).
+* **Skip B8/B9 research** without a concrete use-case.
+* **B10 Alembic** only if a studio asks.
+
+Or move into a new direction (production polish, tutorials,
+v0.2 API stabilisation, multi-GPU spike if a user appears with
+512³ need, etc.) — discussion with user required, no default
+queue.
 
 ### Earlier default task — DONE 2026-05-17
 

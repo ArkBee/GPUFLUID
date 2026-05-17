@@ -193,7 +193,7 @@ the whitelist; silent additions break the build.
 
 | Importer (layer) | Imports (layer) | Reason | Exit plan |
 |------------------|-----------------|--------|-----------|
-| `solvers/solver3d.py` (F3) | `domain/regions`, `domain/seed` (D4) | F3 calls D4 per-frame helpers from inside `step_cfl`/`prepare_frame` instead of receiving pre-baked work via a hook. Active F3.6 refactor — see §3.2.4.2. Removed by phase: `domain/sdf` (F3.6.A1, 2026-05-17), `domain/mesh_sdf*` (F3.6.A2, 2026-05-17), `domain/animation` (F3.6.B, 2026-05-17). One genuine inversion remaining (regions inflow/outflow); to be fixed by F3.6.C1+C2. | Phased F3.6 refactor (A1✅/A2✅/B✅/C1/C2/C3) — see §3.2.4.2. |
+| (none) | F3.6 closed all 6 historical violations 2026-05-17: A1 sdf→G1, A2 mesh_sdf_gpu→S2, B animation→G1, C1 FrameEventQueue + dual-path, C2 solver drains queue + dropped legacy imports. C3 (hard `test_no_layer_exceptions` + step29.mp4 closure video) pending. | Macro F3.6 to close in C3. |
 | `cli/commands.py` (C7) | `sim/whitewater*` (W7), `sim/reseed` (W7), `domain/*` (D4), `meshing/*` (M5), `io/*` (I6), `solvers/*` (F3), `schemes/*` (S2) | CLI is the top-of-stack orchestrator and is allowed to touch every lower layer by design. C7 > W7, M5, I6 — no exception needed. | n/a (not a violation; listed for clarity) |
 
 If you find a NEW cross-layer import that the check flags:

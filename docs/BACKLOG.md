@@ -252,11 +252,20 @@ relocations.
   region helpers gained `publish_for_frame()` dual-path; legacy fns
   still callable. Solver unchanged — that's C2. Whitelist still 2
   entries as designed (transitional).)*
-* [ ] F3.6.C2 — Switch `solver3d.prepare_frame` to drain the queue
-  instead of pulling from `domain.regions`. Delete legacy pull path.
-  Verify CUDA-graph rehit rate unchanged (drain happens BEFORE
-  capture, queue empty during substep loop). Acceptance: all 6
-  whitelist entries removed, §3.2.4.1 table empty.
+* [x] F3.6.C2 — Switch `solver3d.prepare_frame` to drain the queue
+  instead of pulling from `domain.regions`. *(2026-05-17: shipped.
+  Solver gained `self._frame_events = FrameEventQueue()` slot.
+  prepare_frame now: clear queue, publish per-inflow/per-outflow,
+  drain emits + outflows, apply. `_apply_outflows_gpu` signature
+  changed from `(frame_idx)` reading self.outflows to
+  `(outflow_events)` consuming pre-drained events — active-filter
+  logic moves into `OutflowBox.publish_for_frame`. Top-level import
+  `from ..domain.regions import ...` removed entirely (only types
+  needed and they're duck-typed in self.inflows lists). All 6
+  whitelist entries (`domain.regions`, `domain.seed`, plus the
+  earlier A1/A2/B ones) deleted from `_KNOWN_LAYER_EXCEPTIONS`.
+  Suite stays 237; B5 graph-rehit tests + B7-alt graph-rehit tests
+  all pass — 88% hit rate preserved.)*
 * [ ] F3.6.C3 — Add hard test `tests/test_no_f3_to_d4_imports.py`
   asserting `_KNOWN_LAYER_EXCEPTIONS == []` in `blocks/check.py`.
   Future regressions fail CI immediately. Closure video `step29.mp4`
