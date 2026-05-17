@@ -193,7 +193,7 @@ the whitelist; silent additions break the build.
 
 | Importer (layer) | Imports (layer) | Reason | Exit plan |
 |------------------|-----------------|--------|-----------|
-| `solvers/solver3d.py` (F3) | `domain/regions`, `domain/animation`, `domain/sdf`, `domain/seed`, `domain/mesh_sdf*` (D4) | F3 calls D4 per-frame helpers from inside `step_cfl`/`prepare_frame` instead of receiving pre-baked work via a hook. Pre-dates the layer contract. | Refactor F3.6 per-frame hook to fully invert the dependency: D4 pushes inflow/outflow events into a queue that F3 drains. Out of scope for v1.0; tracked as a v1.1 architecture macro. |
+| `solvers/solver3d.py` (F3) | `domain/regions`, `domain/animation`, `domain/seed`, `domain/mesh_sdf*` (D4) | F3 calls D4 per-frame helpers from inside `step_cfl`/`prepare_frame` instead of receiving pre-baked work via a hook. Pre-dates the layer contract. Active F3.6 refactor — see §3.2.4.2. `domain/sdf` removed from this list on 2026-05-17 by F3.6.A1 (math primitives relocated to `primitives/sdf.py`). | Phased F3.6 refactor (A1/A2/B/C1/C2/C3) — see §3.2.4.2. |
 | `cli/commands.py` (C7) | `sim/whitewater*` (W7), `sim/reseed` (W7), `domain/*` (D4), `meshing/*` (M5), `io/*` (I6), `solvers/*` (F3), `schemes/*` (S2) | CLI is the top-of-stack orchestrator and is allowed to touch every lower layer by design. C7 > W7, M5, I6 — no exception needed. | n/a (not a violation; listed for clarity) |
 
 If you find a NEW cross-layer import that the check flags:
@@ -420,6 +420,15 @@ Pure helpers. No domain logic.
 | G1.6  | Trilinear scatter (`scatter_face`) with atomic_add          | impl |
 | G1.7  | Box-filter 3D (`box_blur_3d`)                                | impl |
 | G1.8  | Cell-center coordinate grid (numpy host helper)              | impl |
+| G1.9  | Step profiler (per-section ScopedTimer wrapper)              | impl |
+| G1.10 | SDF sphere (analytic, was D4.2.1 pre-F3.6.A1)                | impl |
+| G1.11 | SDF axis-aligned box (was D4.2.2 pre-F3.6.A1)                | impl |
+| G1.12 | SDF cylinder Y-axis (was D4.2.3 pre-F3.6.A1)                 | impl |
+| G1.13 | SDF plane (was D4.2.4 pre-F3.6.A1)                           | impl |
+| G1.14 | SDF union (min of components, was D4.2.5 pre-F3.6.A1)        | impl |
+
+The G1.10–G1.14 analytic SDFs relocated from D4 on 2026-05-17 — see
+§3.2.4.2 F3.6.A1 phase. Pure math, no solver/domain coupling.
 
 ---
 
@@ -585,14 +594,9 @@ Geometry of the simulation domain: walls, obstacles, fluid seeders.
 | ID      | Block | Status |
 |---------|-------|--------|
 | D4.1    | Solid wall shell (init marker boundary)                       | impl |
-| D4.2    | SDF analytic primitives                                       | —    |
-| D4.2.1  |   Sphere                                                      | impl |
-| D4.2.2  |   Box                                                         | impl |
-| D4.2.3  |   Cylinder (Y-aligned)                                        | impl |
-| D4.2.4  |   Plane                                                       | planned |
-| D4.2.5  |   Union / intersect / subtract operators                      | impl (union) |
-| D4.3    | Mesh → SDF (triangle-soup distance)                           | planned |
-| D4.4    | Apply SDF as solid markers                                    | impl |
+| D4.2    | SDF analytic primitives — RELOCATED to G1.10–G1.14 on 2026-05-17 (F3.6.A1). See §4. | moved |
+| D4.3    | Mesh → SDF (triangle-soup distance)                           | impl |
+| D4.4    | Apply SDF as solid markers (mutates solver marker, stays D4)  | impl |
 | D4.5    | Fluid seeders                                                 | —    |
 | D4.5.1  |   Box seeder (uniform jittered)                               | impl |
 | D4.5.2  |   Mesh seeder (volumetric fill)                               | planned |

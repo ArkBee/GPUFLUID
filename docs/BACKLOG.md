@@ -221,12 +221,14 @@ micro. The key insight: the 6 violations are 3 different problems,
 not one wholesale inversion. ~60% of the work is mechanical
 relocations.
 
-* [ ] F3.6.A1 — Move `sdf_sphere/box/cylinder_y/plane/union` +
+* [x] F3.6.A1 — Move `sdf_sphere/box/cylinder_y/plane/union` +
   `cell_centers` from `domain/sdf.py` to `primitives/sdf.py`. Pure
-  math, belongs in G1. Register under G1.10..G1.14 (or co-locate
-  with existing G1.8 `cell_centers`). Update all import sites.
-  Acceptance: `gpufluid blocks --check` shows 1 fewer whitelist
-  entry, suite green. *(Estimated: 1 session, 1-2 hours, mechanical.)*
+  math, belongs in G1. *(2026-05-17: shipped. New IDs G1.10–G1.14 +
+  unchanged G1.8 for cell_centers. `domain/sdf.py` keeps only
+  D4.4 `mark_solid_from_sdf` + back-compat re-exports. 7 importers
+  updated (3 src, 4 tests), `_KNOWN_LAYER_EXCEPTIONS` lost the
+  `solvers.solver3d → domain.sdf` entry — whitelist down 1.
+  Suite stayed at 227 passed, `--check` clean.)*
 * [ ] F3.6.A2 — Move `mark_solid_from_mesh_gpu` from
   `domain/mesh_sdf_gpu.py` to `schemes/mesh_marker.py` (S2). Keep
   current `D4.3.GPU` block IDs for now (rename deferred to avoid

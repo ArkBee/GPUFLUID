@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from gpufluid.solvers.solver3d import FlipSolver3D
-from gpufluid.domain.sdf import sdf_sphere
+from gpufluid.primitives.sdf import sdf_sphere
 
 
 def _run_drop_on_sphere(mode: str, frames: int = 50):

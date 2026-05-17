@@ -27,7 +27,7 @@ from ..primitives.runtime import init as warp_init, device as default_device, ze
 from ..primitives.gridmath import clamp_int, sample3, scatter_face
 from ..domain.regions import InflowBox, OutflowBox, apply_inflows, apply_outflows
 from ..domain.animation import Motion, evaluate_center
-from ..domain.sdf import sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union
+from ..primitives.sdf import sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union
 
 warp_init()
 
@@ -2452,7 +2452,7 @@ class FlipSolver3D:
         self._static_obstacle_sdfs.append(np.asarray(sdf, dtype=np.float32))
 
     def cell_centers_np(self):
-        from ..domain.sdf import cell_centers
+        from ..primitives.sdf import cell_centers
         return cell_centers(self.nx, self.ny, self.nz, self.dx)
 
     # -------- D4.6 animated obstacle registration -------------------------

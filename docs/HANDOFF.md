@@ -82,31 +82,35 @@ edge. `marker` stays full-dense; every kernel reads it via global
 --sub-dilation K             # default 4
 ```
 
-### Default next task — **F3.6.A1 micro** (start here in N+1 session)
+### Default next task — **F3.6.A2 + F3.6.B** (start here in N+2 session)
 
-**Relocate analytic SDF primitives from D4 to G1** — the first
-mechanical micro of the F3.6 hook refactor macro. Self-contained,
-no architectural decisions needed (spec is already written).
+F3.6.A1 closed 2026-05-17 — analytic SDFs (`sdf_sphere/box/cylinder_y/
+plane/union` + `cell_centers`) now live in `primitives/sdf.py` under
+G1.10–G1.14; `domain/sdf.py` keeps only D4.4 `mark_solid_from_sdf` +
+back-compat re-exports. 7 importers updated; whitelist down to 4
+entries (`regions`, `animation`, `seed`, `mesh_sdf*`).
 
-* **Read first:** `docs/DESIGN.md §3.2.4.2` for the full F3.6 plan +
-  why this micro exists. The 3-category split (A/B/C) is the key
-  insight — without it the refactor looks unmanageable.
-* **What to do:** move `sdf_sphere`, `sdf_box`, `sdf_cylinder_y`,
-  `sdf_plane`, `sdf_union`, and `cell_centers` from
-  `src/gpufluid/domain/sdf.py` to a new
-  `src/gpufluid/primitives/sdf.py` (layer G1). Re-register them
-  under new G1.10..G1.14 block IDs (`cell_centers` already has
-  `[BLK G1.8]`). Keep `domain/sdf.py` for the `apply_sdf_as_solid`
-  host helper — that one TAKES a solver marker array and is rightly
-  D4. Update every import site to the new module path.
-* **Acceptance:** `gpufluid blocks --check` shows 1 fewer whitelist
-  entry (the `solvers/solver3d.py → domain.sdf` row); `pytest -q`
-  green; no behavioural change visible to scenes/tests.
-* **Estimated effort:** 1 session, 1–2 hours. Mechanical. No video
-  needed (architectural micro, not feature).
+Next two micros are similar in flavour:
 
-Continuing from here: see **"Multi-session plan ahead"** below for
-phases F3.6.A2..F3.6.C3.
+**F3.6.A2 — relocate `mark_solid_from_mesh_gpu` to S2.**
+* From `domain/mesh_sdf_gpu.py` to `schemes/mesh_marker.py`.
+* Keep D4.3.GPU ID for now (rename deferred — too many test name
+  ripples for one PR). The check passes regardless because layer
+  membership comes from the ID prefix, not the file path.
+* Acceptance: whitelist loses `solvers.solver3d → domain.mesh_sdf*`
+  entry; suite green.
+
+**F3.6.B — relocate `Motion` + `evaluate_center` to G1.**
+* From `domain/animation.py` to `primitives/animation.py`.
+* New blocks G1.15 (`Motion` dataclass) + G1.16 (`evaluate_center`).
+* Audit pickle paths first — `checkpoint` may serialise `Motion`
+  instances. If so, write a one-time migration helper or accept
+  that old checkpoints break (document in HANDOFF).
+* Acceptance: whitelist loses `domain.animation` entry. After this,
+  3 of 6 violations gone.
+
+Read `docs/DESIGN.md §3.2.4.2` before starting — has the full plan
++ the 3-category insight that makes the refactor tractable.
 
 ### Earlier default task — DONE 2026-05-17
 

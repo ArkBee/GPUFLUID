@@ -15,10 +15,11 @@ from .meshing.smoothing import smooth_taubin, smooth_laplacian  # registers M5.5
 from .meshing.decimate import decimate_mesh                       # registers M5.6
 from .sim.reseed import reseed_particles, ReseedConfig            # registers S2.11
 from .sim.whitewater import WhitewaterSystem, WhitewaterConfig    # registers W7.x
-from .domain.sdf import (
+from .primitives.sdf import (
     cell_centers,
-    sdf_sphere, sdf_box, sdf_cylinder_y, sdf_plane, sdf_union, mark_solid_from_sdf,
+    sdf_sphere, sdf_box, sdf_cylinder_y, sdf_plane, sdf_union,
 )
+from .domain.sdf import mark_solid_from_sdf
 from .io.ply import write_ply, read_ply, write_particles_npy
 from .blocks import BlockError, block, get_registry, by_layer
 

@@ -18,8 +18,13 @@ additionally has at least one `test_*` matching the block ID slug;
 | G1.5 | Trilinear sample of 3D field | G1 | `?` | impl |
 | G1.6 | Trilinear scatter with atomic_add into 8 corners | G1 | `?` | impl |
 | G1.7 | 3D box-blur kernel (3^3) | G1 | `?` | impl |
-| G1.8 | Cell-centre world-position grid (host) | G1 | `src/gpufluid/domain/sdf.py` | impl,test |
+| G1.8 | Cell-centre world-position grid (host) | G1 | `src/gpufluid/primitives/sdf.py` | impl,test |
 | G1.9 | Step profiler: per-section timing aggregator over wp.ScopedTimer | G1 | `src/gpufluid/primitives/profiling.py` | impl,test |
+| G1.10 | SDF sphere (analytic, negative inside) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
+| G1.11 | SDF axis-aligned box (analytic, negative inside) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
+| G1.12 | SDF cylinder aligned with Y (gravity) axis | G1 | `src/gpufluid/primitives/sdf.py` | impl |
+| G1.13 | SDF plane (signed distance to half-space) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
+| G1.14 | SDF union (min of components) | G1 | `src/gpufluid/primitives/sdf.py` | impl |
 | S2.1 | P2G: scatter particle velocities → MAC faces (trilinear) | S2 | `?` | impl,test |
 | S2.2 | Normalize MAC faces and save pre-pressure copy | S2 | `?` | impl |
 | S2.3 | Add gravity g·dt to v faces | S2 | `?` | impl,test |
@@ -61,11 +66,6 @@ additionally has at least one `test_*` matching the block ID slug;
 | F3.5 | Load checkpoint into a fresh solver (state-only; topology must match) (2 kernels) | F3 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | F3.6 | Per-frame hook: rebuild marker for anim obstacles, emit inflow particles, drop outflow particles | F3 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | F3.7 | Compute the 8³-tile bbox of active fluid cells, dilated by sub_dilation and clamped to the domain. (4 kernels) | F3 | `?`, `src/gpufluid/solvers/solver3d.py` | impl |
-| D4.2.1 | SDF sphere | D4 | `src/gpufluid/domain/sdf.py` | impl,test |
-| D4.2.2 | SDF axis-aligned box | D4 | `src/gpufluid/domain/sdf.py` | impl,test |
-| D4.2.3 | SDF cylinder aligned with Y (gravity) axis | D4 | `src/gpufluid/domain/sdf.py` | impl,test |
-| D4.2.4 | SDF plane (signed distance to half-space) | D4 | `src/gpufluid/domain/sdf.py` | impl,test |
-| D4.2.5 | SDF union (min of components) | D4 | `src/gpufluid/domain/sdf.py` | impl,test |
 | D4.3 | Mesh → SDF convenience: load + cell-centres in one call (2 kernels) | D4 | `src/gpufluid/domain/mesh_sdf.py` | impl,test |
 | D4.3.GPU | Compute solid-cell mask of a triangle mesh on GPU (auto-selects BVH for ≥256 triangles) (2 kernels) | D4 | `?`, `src/gpufluid/domain/mesh_sdf_gpu.py` | impl,test |
 | D4.3.GPU.BVH | BVH-backed inside test via wp.Mesh + winding query (2 kernels) | D4 | `?`, `src/gpufluid/domain/mesh_sdf_gpu.py` | impl,test |
@@ -103,6 +103,11 @@ additionally has at least one `test_*` matching the block ID slug;
 | F3.1 | `FlipSolver2D` | F3 | — | plan |
 | F3.2 | `FlipSolver3D` | F3 | — | plan |
 | D4.1 | Wall shell init | D4 | — | plan |
+| D4.2.1 | SDF sphere | D4 | — | plan |
+| D4.2.2 | SDF axis-aligned box | D4 | — | plan |
+| D4.2.3 | SDF cylinder aligned with Y (gravity) axis | D4 | — | plan |
+| D4.2.4 | SDF plane (signed distance to half-space) | D4 | — | plan |
+| D4.2.5 | SDF union (min of components) | D4 | — | plan |
 | I6.4 | Alembic writer | I6 | — | plan |
 | C7.1 | TOML config schema | C7 | — | plan |
 | W7.3 | Whitewater ballistic advect | W7 | — | plan |

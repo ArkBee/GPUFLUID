@@ -1,8 +1,8 @@
-"""Regression tests for D4.2.4 SDF plane."""
+"""Regression tests for [BLK G1.13] SDF plane (was D4.2.4 before F3.6.A1)."""
 import numpy as np
 import pytest
 
-from gpufluid.domain.sdf import sdf_plane, cell_centers
+from gpufluid.primitives.sdf import sdf_plane, cell_centers
 
 
 def test_d4_2_4_plane_horizontal_ground():

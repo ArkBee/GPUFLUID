@@ -4,7 +4,7 @@ import pytest
 import trimesh
 
 from gpufluid.domain.mesh_sdf import mesh_to_sdf, mesh_to_sdf_grid
-from gpufluid.domain.sdf import cell_centers
+from gpufluid.primitives.sdf import cell_centers
 from gpufluid.blocks import BlockError
 
 

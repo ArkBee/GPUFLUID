@@ -47,7 +47,8 @@ _KNOWN_LAYER_EXCEPTIONS: List[Tuple[str, str]] = [
     # Pre-dates the layer contract; exit plan in DESIGN.md §3.2.4.1.
     ("solvers.solver3d", "domain.regions"),
     ("solvers.solver3d", "domain.animation"),
-    ("solvers.solver3d", "domain.sdf"),
+    # ("solvers.solver3d", "domain.sdf"),  — F3.6.A1 closed 2026-05-17: math
+    #                                         primitives moved to primitives/sdf.py
     ("solvers.solver3d", "domain.seed"),
     ("solvers.solver3d", "domain.mesh_sdf"),
     ("solvers.solver3d", "domain.mesh_sdf_gpu"),

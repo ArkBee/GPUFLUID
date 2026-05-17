@@ -16,7 +16,7 @@ from ..meshing.surface import MeshExtractor
 from ..io.ply import write_ply, write_particles_npy
 from ..io.cache import CacheManifest, write_cache_manifest
 from ..io.usd import write_usd_mesh_sequence
-from ..domain.sdf import (
+from ..primitives.sdf import (
     sdf_sphere, sdf_box, sdf_cylinder_y, sdf_plane, sdf_union,
 )
 from ..domain.regions import InflowBox, OutflowBox

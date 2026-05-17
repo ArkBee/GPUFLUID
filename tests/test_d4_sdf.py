@@ -1,11 +1,18 @@
-"""Layer D4 tests — SDF primitives and marker injection."""
+"""SDF primitives + marker injection tests.
+
+After F3.6.A1 (2026-05-17) the analytic SDFs live in G1:
+[BLK G1.8] cell_centers, [BLK G1.10] sdf_sphere, [BLK G1.11] sdf_box,
+[BLK G1.12] sdf_cylinder_y, [BLK G1.13] sdf_plane, [BLK G1.14] sdf_union.
+Only [BLK D4.4] mark_solid_from_sdf remains under D4 (it mutates
+solver marker state).
+"""
 import numpy as np
 import pytest
 
-from gpufluid.domain.sdf import (
-    cell_centers,
-    sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union, mark_solid_from_sdf,
+from gpufluid.primitives.sdf import (
+    cell_centers, sdf_sphere, sdf_box, sdf_cylinder_y, sdf_union,
 )
+from gpufluid.domain.sdf import mark_solid_from_sdf
 
 EPS = 1e-5
 

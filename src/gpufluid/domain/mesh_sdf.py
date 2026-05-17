@@ -90,5 +90,5 @@ def mesh_to_sdf_grid(
     **kwargs,
 ) -> np.ndarray:
     """Wraps cell_centers + mesh_to_sdf for the common case."""
-    from .sdf import cell_centers
+    from ..primitives.sdf import cell_centers
     return mesh_to_sdf(mesh_path, cell_centers(nx, ny, nz, dx), **kwargs)
