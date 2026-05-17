@@ -25,11 +25,13 @@ from gpufluid.solvers.solver3d import FlipSolver3D
 
 def _seed_pair(N=32, lo=(0.40, 0.40, 0.40), hi=(0.60, 0.60, 0.60),
                ppc=4, rho=1.0, gravity=-9.81, flip_blend=0.95,
+               viscosity=0.0, viscosity_iters=12,
                enable_sub_dense_b=True, sub_dilation=4):
     """Build two FlipSolver3Ds with identical seeds, one full-dense and
     one sub-dense-capable."""
     common = dict(nx=N, ny=N, nz=N, rho=rho, gravity=gravity,
-                  flip_blend=flip_blend, transfer_mode="flip")
+                  flip_blend=flip_blend, transfer_mode="flip",
+                  viscosity=viscosity, viscosity_iters=viscosity_iters)
     a = FlipSolver3D(**common, enable_sub_dense=False)
     b = FlipSolver3D(**common, enable_sub_dense=True,
                      sub_rebuild_every=1000, sub_dilation=sub_dilation)
@@ -132,3 +134,51 @@ def test_b7_alt_3_multistep_stability_within_dilation():
         f"5-step sub-dense drift {drift_rel:.3e} exceeds tolerance — kernel "
         f"offset threading likely has a translation bug"
     )
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_gsrb():
+    """GS-RB pressure solver in sub-dense mode must match the dense GS-RB
+    baseline. Parity (red/black) is keyed off GLOBAL cell indices so an
+    odd offset doesn't swap colours — that's the one subtle invariant
+    beyond the Jacobi pattern."""
+    a, b = _seed_pair(sub_dilation=6)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="gsrb")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 gsrb] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    assert rel < 1e-4, f"GS-RB sub-dense drift {rel:.3e} exceeds fp32 noise"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_with_viscosity():
+    """Viscosity (k3_jacobi_visc) is a pure within-buffer Jacobi diffusion
+    with no marker access — the kernel needs no offset thread-through.
+    Verify the sub-dense viscosity step still matches dense (dilation
+    absorbs the Neumann fall-through at the sub-dense edge)."""
+    a, b = _seed_pair(viscosity=0.02, viscosity_iters=6, sub_dilation=6)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 visc] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    # Viscosity diffuses across fluid + non-fluid cells; in the dense
+    # path, dilation cells are zero-velocity anyway (no fluid there) so
+    # the Neumann fall-through at the sub-dense edge produces the same
+    # zero contribution. Tight tolerance.
+    assert rel < 1e-4, f"Viscosity sub-dense drift {rel:.3e} exceeds fp32 noise"

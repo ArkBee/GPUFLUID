@@ -95,9 +95,11 @@ def test_b4_1_sparse_gsrb_kernel_speedup_at_128():
         s.p.zero_()
         for _ in range(iters):
             wp.launch(k3_gauss_seidel_rb, dim=(N, N, N),
-                      inputs=[s.p, s.div, s.marker, 0], device=s.device)
+                      inputs=[s.p, s.div, s.marker, 0, 0, 0, 0],
+                      device=s.device)
             wp.launch(k3_gauss_seidel_rb, dim=(N, N, N),
-                      inputs=[s.p, s.div, s.marker, 1], device=s.device)
+                      inputs=[s.p, s.div, s.marker, 1, 0, 0, 0],
+                      device=s.device)
 
     def bench_sparse():
         s.p.zero_()

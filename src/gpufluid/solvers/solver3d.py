@@ -1173,48 +1173,57 @@ def k3_gauss_seidel_rb(
     div: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
     color: int,                          # 0=red, 1=black
+    off_x: int, off_y: int, off_z: int,
 ):
-    """In-place GS sweep on cells where (i+j+k)%2 == color."""
+    """In-place GS sweep on cells where (gi+gj+gk)%2 == color.
+
+    B7-alt.3: p/div are sub-dense (local coords); marker is full-dense
+    (global coords gi/gj/gk). The red/black parity uses GLOBAL indices —
+    otherwise an odd `off_x+off_y+off_z` would flip the colouring and
+    the sub-dense run would converge differently from dense. Pass zero
+    offsets for legacy behaviour."""
     i, j, k = wp.tid()
     nx = p.shape[0]; ny = p.shape[1]; nz = p.shape[2]
     if i >= nx or j >= ny or k >= nz:
         return
-    if (i + j + k) % 2 != color:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if (gi + gj + gk) % 2 != color:
         return
-    if marker[i, j, k] != 1:
+    if marker[gi, gj, gk] != 1:
         p[i, j, k] = 0.0
         return
     sum_nb = float(0.0); diag = float(0.0)
-    if i > 0:
-        m = marker[i - 1, j, k]
+    if gi > 0:
+        m = marker[gi - 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i - 1, j, k]
-    if i < nx - 1:
-        m = marker[i + 1, j, k]
+            if m == 1 and i > 0: sum_nb += p[i - 1, j, k]
+    if gi < gnx - 1:
+        m = marker[gi + 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i + 1, j, k]
-    if j > 0:
-        m = marker[i, j - 1, k]
+            if m == 1 and i < nx - 1: sum_nb += p[i + 1, j, k]
+    if gj > 0:
+        m = marker[gi, gj - 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j - 1, k]
-    if j < ny - 1:
-        m = marker[i, j + 1, k]
+            if m == 1 and j > 0: sum_nb += p[i, j - 1, k]
+    if gj < gny - 1:
+        m = marker[gi, gj + 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j + 1, k]
-    if k > 0:
-        m = marker[i, j, k - 1]
+            if m == 1 and j < ny - 1: sum_nb += p[i, j + 1, k]
+    if gk > 0:
+        m = marker[gi, gj, gk - 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j, k - 1]
-    if k < nz - 1:
-        m = marker[i, j, k + 1]
+            if m == 1 and k > 0: sum_nb += p[i, j, k - 1]
+    if gk < gnz - 1:
+        m = marker[gi, gj, gk + 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p[i, j, k + 1]
+            if m == 1 and k < nz - 1: sum_nb += p[i, j, k + 1]
     if diag < 0.5:
         p[i, j, k] = 0.0
     else:
@@ -3159,25 +3168,26 @@ class FlipSolver3D:
         # colour, temperature).
         if self._sub_offset != (0, 0, 0):
             unsupported = []
-            if pressure_solver != "jacobi":
-                unsupported.append(f"pressure_solver={pressure_solver!r} (need 'jacobi')")
+            if pressure_solver == "pcg":
+                unsupported.append("pressure_solver='pcg'")
+            elif pressure_solver not in ("jacobi", "gsrb"):
+                unsupported.append(f"pressure_solver={pressure_solver!r}")
             if pressure_block_sparse:
                 unsupported.append("pressure_block_sparse=True")
             if self.transfer_mode != "flip":
                 unsupported.append(f"transfer_mode={self.transfer_mode!r} (need 'flip')")
             if self.surface_tension > 0.0:
                 unsupported.append("surface_tension>0")
-            if self.viscosity > 0.0:
-                unsupported.append("viscosity>0")
             if self.attr_color is not None:
                 unsupported.append("attr_color (per-particle colour)")
             if self.attr_temperature is not None:
                 unsupported.append("attr_temperature (per-particle scalar)")
             if unsupported:
                 raise NotImplementedError(
-                    "FlipSolver3D.step() with sub-dense storage active only "
-                    "supports jacobi / dense / FLIP / no-CSF / no-viscosity / "
-                    "no-colour / no-scalar configs in B7-alt.3. Unsupported: "
+                    "FlipSolver3D.step() with sub-dense storage active "
+                    "currently supports jacobi|gsrb / dense / FLIP / "
+                    "with-or-without viscosity / no-CSF / no-colour / "
+                    "no-scalar configs. Unsupported: "
                     + ", ".join(unsupported)
                     + ". Either disable enable_sub_dense or wait for the "
                     "follow-up micros that extend coverage."
@@ -3364,9 +3374,11 @@ class FlipSolver3D:
                 else:
                     for _ in range(pressure_iters):
                         wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
-                                  inputs=[self.p, self.div, self.marker, 0], device=dev)
+                                  inputs=[self.p, self.div, self.marker, 0,
+                                          ox, oy, oz], device=dev)
                         wp.launch(k3_gauss_seidel_rb, dim=(nx, ny, nz),
-                                  inputs=[self.p, self.div, self.marker, 1], device=dev)
+                                  inputs=[self.p, self.div, self.marker, 1,
+                                          ox, oy, oz], device=dev)
                 self.last_pressure_iters = pressure_iters
             else:
                 raise ValueError(f"unknown pressure_solver: {pressure_solver!r}")

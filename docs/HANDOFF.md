@@ -4,8 +4,8 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 Jacobi-FLIP slice shipped):**
-> 184 tests total (183 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
+> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 Jacobi/GS-RB/FLIP/viscosity slice shipped):**
+> 186 tests total (185 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
 > 81 unique IDs / 105 callables (`gpufluid info`), v0.7 + v0.8 + **v0.9 all
 > closed**. CUDA-graph eligibility matrix is at **9/9** (every shipped
 > pressure-solver path captures cleanly: jacobi/gs-rb/PCG × dense/sparse,
@@ -22,9 +22,12 @@
 >    regression tests.
 > 2. B7-alt.3 Jacobi/dense/FLIP slice — 7 kernels gain `off_x/y/z`,
 >    `_step_impl` reads sub-dense extents+offset, step() guard now
->    config-aware (only blocks APIC/viscosity/CSF/PCG/GS-RB/sparse/
->    colour/scalar). 2 integration tests prove bit-exact match vs full
->    dense. Suite 170→183.
+>    config-aware. 2 integration tests prove bit-exact match vs full
+>    dense.
+> 3. B7-alt.3 follow-up — GS-RB ported (red/black parity uses GLOBAL
+>    indices); viscosity needs ZERO kernel changes (no marker, dilation
+>    absorbs Neumann edge). +2 integration tests; both bit-exact.
+>    Suite 170→185.
 > Previous session (2026-05-16, on `origin/main` at `adfb06c`):
 > ```
 > dcabdbe  docs/HANDOFF refresh post v1.0 spike
@@ -554,6 +557,10 @@ Estimated total: 3-5 sessions to ship B7-alt.2 … B7-alt.8 + 256³ bench.
   kernels port to off_x/y/z, `_step_impl` reads sub-dense extents,
   step() guard is config-aware. 2 GPU integration tests prove bit-exact
   match vs dense (0.000e+00 position drift, 1.5e-7 velocity drift).
+- ~~B7-alt.3 GS-RB + viscosity coverage~~ — **shipped 2026-05-17**.
+  `k3_gauss_seidel_rb` ported with parity check on global indices;
+  viscosity kernel needs no change (no marker, dilation absorbs the
+  Neumann edge). +2 GPU integration tests, both bit-exact.
 
 **Tier 1 (closed prior session — for context, do NOT re-open):**
 - ~~PCG graph-eligibility~~ — **Option A shipped** (`91e35b4`, 4.17× on big_pcg).
