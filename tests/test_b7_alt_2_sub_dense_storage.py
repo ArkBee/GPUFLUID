@@ -248,7 +248,7 @@ def test_step_raises_with_sub_offset_active_for_unsupported_config():
     tests/test_b7_alt_3_jacobi_dense_flip.py.
     """
     s = FlipSolver3D(nx=16, ny=16, nz=16, enable_sub_dense=True,
-                     sub_dilation=0, transfer_mode="apic")
+                     sub_dilation=0, surface_tension=0.1)
     s._rebuild_sub_dense((0, 0, 8), (8, 8, 16))
     assert s._sub_offset == (0, 0, 8)
     s.pos = wp.array(np.zeros((0, 3), dtype=np.float32),
@@ -256,5 +256,5 @@ def test_step_raises_with_sub_offset_active_for_unsupported_config():
     s.vel = wp.array(np.zeros((0, 3), dtype=np.float32),
                      dtype=wp.vec3, device=s.device)
     s.n_particles = 0
-    with pytest.raises(NotImplementedError, match=r"transfer_mode"):
+    with pytest.raises(NotImplementedError, match=r"surface_tension"):
         s.step(dt=0.01, pressure_iters=1)

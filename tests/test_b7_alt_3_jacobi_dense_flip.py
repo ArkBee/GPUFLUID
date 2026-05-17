@@ -25,12 +25,12 @@ from gpufluid.solvers.solver3d import FlipSolver3D
 
 def _seed_pair(N=32, lo=(0.40, 0.40, 0.40), hi=(0.60, 0.60, 0.60),
                ppc=4, rho=1.0, gravity=-9.81, flip_blend=0.95,
-               viscosity=0.0, viscosity_iters=12,
+               viscosity=0.0, viscosity_iters=12, transfer_mode="flip",
                enable_sub_dense_b=True, sub_dilation=4):
     """Build two FlipSolver3Ds with identical seeds, one full-dense and
     one sub-dense-capable."""
     common = dict(nx=N, ny=N, nz=N, rho=rho, gravity=gravity,
-                  flip_blend=flip_blend, transfer_mode="flip",
+                  flip_blend=flip_blend, transfer_mode=transfer_mode,
                   viscosity=viscosity, viscosity_iters=viscosity_iters)
     a = FlipSolver3D(**common, enable_sub_dense=False)
     b = FlipSolver3D(**common, enable_sub_dense=True,
@@ -182,3 +182,48 @@ def test_b7_alt_3_sub_dense_matches_dense_with_viscosity():
     # the Neumann fall-through at the sub-dense edge produces the same
     # zero contribution. Tight tolerance.
     assert rel < 1e-4, f"Viscosity sub-dense drift {rel:.3e} exceeds fp32 noise"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_apic():
+    """APIC (transfer_mode='apic') in sub-dense mode must match the
+    dense APIC baseline. The APIC scatter/gather computes the affine
+    extension via WORLD-space offsets between face and particle — those
+    must be (ii + off_x) * dx - px (not just ii * dx - px); getting it
+    wrong makes the C matrix track the bbox rather than the world frame,
+    drifts within one step."""
+    a, b = _seed_pair(transfer_mode="apic", sub_dilation=6)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 apic] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    assert rel < 1e-4, f"APIC sub-dense drift {rel:.3e} exceeds fp32 noise"
+
+
+@pytest.mark.gpu
+def test_b7_alt_3_sub_dense_matches_dense_pic():
+    """PIC (transfer_mode='pic') reuses the FLIP kernel with flip_blend=0,
+    so this exercises the same k3_p2g + k3_g2p_and_advect path. Tighten
+    the canonical: pure PIC under sub-dense should be bit-exact."""
+    a, b = _seed_pair(transfer_mode="pic", flip_blend=0.0, sub_dilation=6)
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    bbox = b._compute_active_bbox(b.marker.numpy())
+    assert bbox is not None
+    b._rebuild_sub_dense(*bbox)
+    b._last_sub_rebuild_frame = 0
+    a.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    b.step(dt=0.005, pressure_iters=40, pressure_solver="jacobi")
+    pos_a = a.pos.numpy(); pos_b = b.pos.numpy()
+    rel = float(np.abs(pos_a - pos_b).max()) / max(float(np.abs(pos_a).max()), 1e-9)
+    print(f"\n[B7-alt.3 pic] sub_offset={b._sub_offset}, "
+          f"sub_shape={b._sub_shape}, pos drift rel={rel:.3e}")
+    assert rel < 1e-4, f"PIC sub-dense drift {rel:.3e} exceeds fp32 noise"

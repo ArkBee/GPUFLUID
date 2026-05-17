@@ -1447,19 +1447,31 @@ def k3_p2g_apic(
     ww: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
     dx: float, nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: particles in world coords, marker full-dense (global
+    # ci/cj/ck), face fields u/v/w/uw/vw/ww sub-dense (local ii/jj/kk).
+    # The APIC affine extension uses WORLD-space face position minus
+    # particle position, so face offsets are computed with global indices
+    # (ii + off_x etc.) — getting this wrong makes the C matrix track
+    # the bbox rather than the world frame, drifts within one step. Pass
+    # zero offsets for legacy full-dense behaviour.
     pid = wp.tid()
     p = pos[pid]
     vp = vel[pid]
     C = affine_C[pid]
-    ci = clamp_int(int(p[0] / dx), 0, nx - 1)
-    cj = clamp_int(int(p[1] / dx), 0, ny - 1)
-    ck = clamp_int(int(p[2] / dx), 0, nz - 1)
+    # Global cell for marker.
+    nmx = marker.shape[0]; nmy = marker.shape[1]; nmz = marker.shape[2]
+    ci = clamp_int(int(p[0] / dx), 0, nmx - 1)
+    cj = clamp_int(int(p[1] / dx), 0, nmy - 1)
+    ck = clamp_int(int(p[2] / dx), 0, nmz - 1)
     if marker[ci, cj, ck] != 2:
         marker[ci, cj, ck] = 1
 
     # ---- u faces at (i*dx, (j+0.5)dx, (k+0.5)dx) -------------------------
-    fx = p[0] / dx; fy = p[1] / dx - 0.5; fz = p[2] / dx - 0.5
+    fx = p[0] / dx - float(off_x)
+    fy = p[1] / dx - 0.5 - float(off_y)
+    fz = p[2] / dx - 0.5 - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -1475,16 +1487,17 @@ def k3_p2g_apic(
                     if dk == 0: wzi = 1.0 - sz
                     else:       wzi = sz
                     wt = wxi * wyi * wzi
-                    ox = float(ii) * dx - p[0]
-                    oy = (float(jj) + 0.5) * dx - p[1]
-                    oz = (float(kk) + 0.5) * dx - p[2]
-                    # APIC affine extension: u_eff = vp.x + C row 0 · offset
+                    ox = float(ii + off_x) * dx - p[0]
+                    oy = (float(jj + off_y) + 0.5) * dx - p[1]
+                    oz = (float(kk + off_z) + 0.5) * dx - p[2]
                     u_eff = vp[0] + C[0, 0] * ox + C[0, 1] * oy + C[0, 2] * oz
                     wp.atomic_add(u, ii, jj, kk, u_eff * wt)
                     wp.atomic_add(uw, ii, jj, kk, wt)
 
     # ---- v faces at ((i+0.5)dx, j*dx, (k+0.5)dx) -------------------------
-    fx = p[0] / dx - 0.5; fy = p[1] / dx; fz = p[2] / dx - 0.5
+    fx = p[0] / dx - 0.5 - float(off_x)
+    fy = p[1] / dx - float(off_y)
+    fz = p[2] / dx - 0.5 - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -1500,15 +1513,17 @@ def k3_p2g_apic(
                     if dk == 0: wzi = 1.0 - sz
                     else:       wzi = sz
                     wt = wxi * wyi * wzi
-                    ox = (float(ii) + 0.5) * dx - p[0]
-                    oy = float(jj) * dx - p[1]
-                    oz = (float(kk) + 0.5) * dx - p[2]
+                    ox = (float(ii + off_x) + 0.5) * dx - p[0]
+                    oy = float(jj + off_y) * dx - p[1]
+                    oz = (float(kk + off_z) + 0.5) * dx - p[2]
                     v_eff = vp[1] + C[1, 0] * ox + C[1, 1] * oy + C[1, 2] * oz
                     wp.atomic_add(v, ii, jj, kk, v_eff * wt)
                     wp.atomic_add(vw, ii, jj, kk, wt)
 
     # ---- w faces at ((i+0.5)dx, (j+0.5)dx, k*dx) -------------------------
-    fx = p[0] / dx - 0.5; fy = p[1] / dx - 0.5; fz = p[2] / dx
+    fx = p[0] / dx - 0.5 - float(off_x)
+    fy = p[1] / dx - 0.5 - float(off_y)
+    fz = p[2] / dx - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -1524,9 +1539,9 @@ def k3_p2g_apic(
                     if dk == 0: wzi = 1.0 - sz
                     else:       wzi = sz
                     wt = wxi * wyi * wzi
-                    ox = (float(ii) + 0.5) * dx - p[0]
-                    oy = (float(jj) + 0.5) * dx - p[1]
-                    oz = float(kk) * dx - p[2]
+                    ox = (float(ii + off_x) + 0.5) * dx - p[0]
+                    oy = (float(jj + off_y) + 0.5) * dx - p[1]
+                    oz = float(kk + off_z) * dx - p[2]
                     w_eff = vp[2] + C[2, 0] * ox + C[2, 1] * oy + C[2, 2] * oz
                     wp.atomic_add(w, ii, jj, kk, w_eff * wt)
                     wp.atomic_add(ww, ii, jj, kk, wt)
@@ -1546,9 +1561,17 @@ def k3_g2p_apic_advect(
     dx: float, dt: float,
     nx: int, ny: int, nz: int,
     dom: wp.vec3,
+    off_x: int, off_y: int, off_z: int,
 ):
     """G2P + advect with APIC. Pure PIC sample for velocity; reconstruct C
-    via linear-B-spline approximation D⁻¹ = 3/dx² · I."""
+    via linear-B-spline approximation D⁻¹ = 3/dx² · I.
+
+    B7-alt.3: face fields u/v/w sub-dense (local coords); particles in
+    world coords. Sample-time floor + weight use LOCAL face coords
+    (fx = p/dx - off_*); the C-reconstruction offsets use WORLD face
+    positions (ii + off_*) · dx - p, so C remains a world-frame
+    gradient just like in dense mode. Pass zero offsets for legacy
+    full-dense behaviour."""
     pid = wp.tid()
     p = pos[pid]
     inv_dx2_3 = 3.0 / (dx * dx)
@@ -1560,7 +1583,9 @@ def k3_g2p_apic_advect(
     cw0 = float(0.0); cw1 = float(0.0); cw2 = float(0.0)
 
     # ---- u faces ---------------------------------------------------------
-    fx = p[0] / dx; fy = p[1] / dx - 0.5; fz = p[2] / dx - 0.5
+    fx = p[0] / dx - float(off_x)
+    fy = p[1] / dx - 0.5 - float(off_y)
+    fz = p[2] / dx - 0.5 - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -1583,14 +1608,16 @@ def k3_g2p_apic_advect(
                 wt = wxi * wyi * wzi
                 u_val = u[ii, jj, kk]
                 nu += wt * u_val
-                ox = float(ii) * dx - p[0]
-                oy = (float(jj) + 0.5) * dx - p[1]
-                oz = (float(kk) + 0.5) * dx - p[2]
+                ox = float(ii + off_x) * dx - p[0]
+                oy = (float(jj + off_y) + 0.5) * dx - p[1]
+                oz = (float(kk + off_z) + 0.5) * dx - p[2]
                 fu = wt * u_val * inv_dx2_3
                 cu0 += fu * ox; cu1 += fu * oy; cu2 += fu * oz
 
     # ---- v faces ---------------------------------------------------------
-    fx = p[0] / dx - 0.5; fy = p[1] / dx; fz = p[2] / dx - 0.5
+    fx = p[0] / dx - 0.5 - float(off_x)
+    fy = p[1] / dx - float(off_y)
+    fz = p[2] / dx - 0.5 - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -1613,14 +1640,16 @@ def k3_g2p_apic_advect(
                 wt = wxi * wyi * wzi
                 v_val = v[ii, jj, kk]
                 nv += wt * v_val
-                ox = (float(ii) + 0.5) * dx - p[0]
-                oy = float(jj) * dx - p[1]
-                oz = (float(kk) + 0.5) * dx - p[2]
+                ox = (float(ii + off_x) + 0.5) * dx - p[0]
+                oy = float(jj + off_y) * dx - p[1]
+                oz = (float(kk + off_z) + 0.5) * dx - p[2]
                 fv = wt * v_val * inv_dx2_3
                 cv0 += fv * ox; cv1 += fv * oy; cv2 += fv * oz
 
     # ---- w faces ---------------------------------------------------------
-    fx = p[0] / dx - 0.5; fy = p[1] / dx - 0.5; fz = p[2] / dx
+    fx = p[0] / dx - 0.5 - float(off_x)
+    fy = p[1] / dx - 0.5 - float(off_y)
+    fz = p[2] / dx - float(off_z)
     i0 = int(wp.floor(fx)); j0 = int(wp.floor(fy)); k0 = int(wp.floor(fz))
     sx = fx - float(i0); sy = fy - float(j0); sz = fz - float(k0)
     for di in range(2):
@@ -1643,9 +1672,9 @@ def k3_g2p_apic_advect(
                 wt = wxi * wyi * wzi
                 w_val = w[ii, jj, kk]
                 nw += wt * w_val
-                ox = (float(ii) + 0.5) * dx - p[0]
-                oy = (float(jj) + 0.5) * dx - p[1]
-                oz = float(kk) * dx - p[2]
+                ox = (float(ii + off_x) + 0.5) * dx - p[0]
+                oy = (float(jj + off_y) + 0.5) * dx - p[1]
+                oz = float(kk + off_z) * dx - p[2]
                 fw = wt * w_val * inv_dx2_3
                 cw0 += fw * ox; cw1 += fw * oy; cw2 += fw * oz
 
@@ -3174,8 +3203,8 @@ class FlipSolver3D:
                 unsupported.append(f"pressure_solver={pressure_solver!r}")
             if pressure_block_sparse:
                 unsupported.append("pressure_block_sparse=True")
-            if self.transfer_mode != "flip":
-                unsupported.append(f"transfer_mode={self.transfer_mode!r} (need 'flip')")
+            if self.transfer_mode not in ("flip", "pic", "apic"):
+                unsupported.append(f"transfer_mode={self.transfer_mode!r}")
             if self.surface_tension > 0.0:
                 unsupported.append("surface_tension>0")
             if self.attr_color is not None:
@@ -3257,7 +3286,8 @@ class FlipSolver3D:
                 wp.launch(k3_p2g_apic, dim=self.n_particles,
                           inputs=[self.pos, self.vel, self.affine_C,
                                   self.u, self.v, self.w, self.uw, self.vw, self.ww,
-                                  self.marker, dx, nx, ny, nz], device=dev)
+                                  self.marker, dx, nx, ny, nz,
+                                  ox, oy, oz], device=dev)
             else:
                 wp.launch(k3_p2g, dim=self.n_particles,
                           inputs=[self.pos, self.vel,
@@ -3395,7 +3425,8 @@ class FlipSolver3D:
                 wp.launch(k3_g2p_apic_advect, dim=self.n_particles,
                           inputs=[self.pos, self.vel, self.affine_C,
                                   self.u, self.v, self.w,
-                                  dx, dt, nx, ny, nz, self.dom], device=dev)
+                                  dx, dt, nx, ny, nz, self.dom,
+                                  ox, oy, oz], device=dev)
             else:
                 wp.launch(k3_g2p_and_advect, dim=self.n_particles,
                           inputs=[self.pos, self.vel,
