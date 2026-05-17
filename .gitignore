@@ -32,3 +32,7 @@ Thumbs.db
 
 # Generated obstacle/fluid meshes from examples (regenerable)
 examples/scenes/*.obj
+
+# Claude Code runtime artifacts
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
