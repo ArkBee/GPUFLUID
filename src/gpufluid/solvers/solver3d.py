@@ -2161,7 +2161,10 @@ class FlipSolver3D:
                  transfer_mode: str = "flip",
                  device: Optional[str] = None,
                  enable_timing: bool = False,
-                 enable_cuda_graphs: bool = False):
+                 enable_cuda_graphs: bool = False,
+                 enable_sub_dense: bool = False,
+                 sub_rebuild_every: int = 8,
+                 sub_dilation: int = 4):
         from ..primitives.profiling import StepProfiler
         self._prof = StepProfiler(enabled=enable_timing)
         # B5.2 — CUDA-graph cache. Lazily captures step() for the current
@@ -2230,6 +2233,20 @@ class FlipSolver3D:
         self.attr_temperature = None
         self._sgrid_t = None
         self._sgrid_tw = None
+        # B7-alt.2 sub-dense storage state. With enable_sub_dense=False
+        # (default) the offset stays at (0,0,0) and the shape mirrors
+        # (nx,ny,nz) — every dense kernel sees the original layout. When
+        # the macro lands (B7-alt.3 threads off_x/y/z through ~20 kernels)
+        # prepare_frame may shrink u/v/w/p/p_tmp/div to the active 8³-tile
+        # bbox + sub_dilation, rebuilding every sub_rebuild_every frames
+        # or when active fluid encroaches within sub_dilation cells of the
+        # current edge.
+        self._enable_sub_dense = bool(enable_sub_dense)
+        self._sub_offset = (0, 0, 0)
+        self._sub_shape = (nx, ny, nz)
+        self._sub_rebuild_every = max(1, int(sub_rebuild_every))
+        self._sub_dilation = max(0, int(sub_dilation))
+        self._last_sub_rebuild_frame = -1  # -1 = never rebuilt
 
         # [BLK D4.1] solid wall shell — one-cell solid border
         m = np.zeros((nx, ny, nz), dtype=np.int32)
@@ -3074,6 +3091,17 @@ class FlipSolver3D:
     def step(self, dt: float, pressure_iters: int = 80,
              pressure_solver: str = "jacobi",
              pressure_block_sparse: bool = False):
+        # B7-alt.2 guard. Sub-dense storage is wired up; the dense kernels
+        # invoked below still launch at (nx,ny,nz) without an offset,
+        # which would silently miss the sub-dense bbox. B7-alt.3 threads
+        # off_x/y/z through them and lifts this guard.
+        if self._sub_offset != (0, 0, 0):
+            raise NotImplementedError(
+                "FlipSolver3D.step() cannot run while _sub_offset != (0,0,0). "
+                "B7-alt.2 ships the storage refactor; kernel offset threading "
+                "lands in B7-alt.3. Either disable enable_sub_dense or wait "
+                "for B7-alt.3."
+            )
         # B5.2 — auto-replay through a captured graph when the config is
         # eligible AND the cached graph's key still matches. First call
         # in a topology pays the capture cost; subsequent calls just
@@ -3282,6 +3310,133 @@ class FlipSolver3D:
         # implicitly when they call .numpy(). Removing the explicit sync
         # is what makes step() capturable into a CUDA graph (B5.1 spike).
 
+    # ----------------------------- F3.7 sub-dense storage (B7-alt.2) ---------
+    @block("F3.7", "Compute the 8³-tile bbox of active fluid cells, "
+                  "dilated by sub_dilation and clamped to the domain.")
+    def _compute_active_bbox(self, marker_host: np.ndarray):
+        """Return ((ox, oy, oz), (hx, hy, hz)) in cell coords covering every
+        8³ tile that contains at least one fluid (marker==1) cell, padded
+        by sub_dilation and clamped to [0, nx/ny/nz]. None if there are
+        no fluid cells.
+
+        Tile-aligned on grids whose extents divide BLOCK_SIZE; falls back
+        to a cell-precise scan otherwise (small CPU cost — this runs at
+        most once every sub_rebuild_every frames)."""
+        bs = BLOCK_SIZE
+        nx, ny, nz = self.nx, self.ny, self.nz
+        nbx, nby, nbz = nx // bs, ny // bs, nz // bs
+        d = self._sub_dilation
+        if nbx * bs == nx and nby * bs == ny and nbz * bs == nz:
+            blk = marker_host.reshape(nbx, bs, nby, bs, nbz, bs)
+            blk = blk.transpose(0, 2, 4, 1, 3, 5).reshape(nbx, nby, nbz, -1)
+            tile_has = (blk == 1).any(axis=-1)
+            if not tile_has.any():
+                return None
+            bi, bj, bk = np.where(tile_has)
+            lo = (int(bi.min()) * bs, int(bj.min()) * bs, int(bk.min()) * bs)
+            hi = ((int(bi.max()) + 1) * bs,
+                  (int(bj.max()) + 1) * bs,
+                  (int(bk.max()) + 1) * bs)
+        else:
+            fluid = (marker_host == 1)
+            if not fluid.any():
+                return None
+            ii, jj, kk = np.where(fluid)
+            lo = (int(ii.min()), int(jj.min()), int(kk.min()))
+            hi = (int(ii.max()) + 1, int(jj.max()) + 1, int(kk.max()) + 1)
+        lo = (max(0, lo[0] - d), max(0, lo[1] - d), max(0, lo[2] - d))
+        hi = (min(nx, hi[0] + d), min(ny, hi[1] + d), min(nz, hi[2] + d))
+        return lo, hi
+
+    def _should_rebuild_sub_dense(self, frame_idx: int) -> bool:
+        """True when prepare_frame should rebuild the sub-dense bbox:
+        first call (never rebuilt), periodic timer, or proximity to the
+        current sub-dense edge."""
+        if not self._enable_sub_dense:
+            return False
+        if self._last_sub_rebuild_frame < 0:
+            return True
+        if frame_idx - self._last_sub_rebuild_frame >= self._sub_rebuild_every:
+            return True
+        # Proximity check uses the RAW (non-dilated) active bbox so we don't
+        # double-count the existing dilation margin.
+        saved_d = self._sub_dilation
+        self._sub_dilation = 0
+        try:
+            bbox = self._compute_active_bbox(self._marker_host)
+        finally:
+            self._sub_dilation = saved_d
+        if bbox is None:
+            return False
+        lo, hi = bbox
+        cur_lo = self._sub_offset
+        cur_hi = (cur_lo[0] + self._sub_shape[0],
+                  cur_lo[1] + self._sub_shape[1],
+                  cur_lo[2] + self._sub_shape[2])
+        d = self._sub_dilation
+        for a in range(3):
+            if lo[a] - cur_lo[a] < d:
+                return True
+            if cur_hi[a] - hi[a] < d:
+                return True
+        return False
+
+    @block("F3.7", "Re-allocate u/v/w/p/p_tmp/div at a new sub-dense bbox; "
+                  "copies overlap region from the old buffers (CPU "
+                  "round-trip in B7-alt.2; on-device kernel arrives in "
+                  "B7-alt.8).")
+    def _rebuild_sub_dense(self, new_lo, new_hi):
+        new_lo = tuple(int(c) for c in new_lo)
+        new_hi = tuple(int(c) for c in new_hi)
+        new_shape = (new_hi[0] - new_lo[0],
+                     new_hi[1] - new_lo[1],
+                     new_hi[2] - new_lo[2])
+        if any(s <= 0 for s in new_shape):
+            raise ValueError(f"sub-dense shape {new_shape} non-positive")
+        old_lo = self._sub_offset
+        old_shape = self._sub_shape
+        old_hi = (old_lo[0] + old_shape[0],
+                  old_lo[1] + old_shape[1],
+                  old_lo[2] + old_shape[2])
+        ov_lo = (max(new_lo[0], old_lo[0]),
+                 max(new_lo[1], old_lo[1]),
+                 max(new_lo[2], old_lo[2]))
+        ov_hi = (min(new_hi[0], old_hi[0]),
+                 min(new_hi[1], old_hi[1]),
+                 min(new_hi[2], old_hi[2]))
+        has_overlap = all(ov_hi[a] > ov_lo[a] for a in range(3))
+        dev = self.device
+
+        def rebuild_one(attr: str, face_axis):
+            old_arr = getattr(self, attr)
+            ns = list(new_shape)
+            if face_axis is not None:
+                ns[face_axis] += 1
+            new_arr = zeros(tuple(ns), dev=dev)
+            if has_overlap and old_arr is not None:
+                old_np = old_arr.numpy()
+                new_np = new_arr.numpy()
+                o_slo = tuple(ov_lo[a] - old_lo[a] for a in range(3))
+                o_shi = tuple(ov_hi[a] - old_lo[a] for a in range(3))
+                n_slo = tuple(ov_lo[a] - new_lo[a] for a in range(3))
+                n_shi = tuple(ov_hi[a] - new_lo[a] for a in range(3))
+                # Cell-overlap region only. Face-centered fields get the
+                # extra +1 row left at zero — the next BC pass repopulates
+                # boundary faces from the marker (same as a fresh init).
+                new_np[n_slo[0]:n_shi[0], n_slo[1]:n_shi[1], n_slo[2]:n_shi[2]] = \
+                    old_np[o_slo[0]:o_shi[0], o_slo[1]:o_shi[1], o_slo[2]:o_shi[2]]
+                new_arr = wp.array(new_np, dtype=old_arr.dtype, device=dev)
+            setattr(self, attr, new_arr)
+
+        rebuild_one("p", None)
+        rebuild_one("p_tmp", None)
+        rebuild_one("div", None)
+        rebuild_one("u", 0)
+        rebuild_one("v", 1)
+        rebuild_one("w", 2)
+        self._sub_offset = new_lo
+        self._sub_shape = new_shape
+
     # --------------------------------------------------- F3.6 prepare_frame
     @block("F3.6", "Per-frame hook: rebuild marker for anim obstacles, emit "
                   "inflow particles, drop outflow particles")
@@ -3319,8 +3474,6 @@ class FlipSolver3D:
                     mesh_specs_active, self.cell_centers_np(), frame_idx)
 
         # ---- inflow + outflow
-        if not (self.inflows or self.outflows):
-            return
         # outflow on GPU (stream compaction); falls through to no-op if no active
         if self.outflows:
             self._apply_outflows_gpu(frame_idx)
@@ -3336,6 +3489,22 @@ class FlipSolver3D:
                 self.vel = wp.array(cur_vel, dtype=wp.vec3, device=self.device)
                 self.affine_C = None
                 self.n_particles = len(cur_pos)
+        # B7-alt.2 — sub-dense storage rebuild trigger. No-op when the
+        # flag is off; otherwise shrinks u/v/w/p/p_tmp/div to the active
+        # 8³-tile bbox + sub_dilation, every sub_rebuild_every frames or
+        # when fluid encroaches on the current edge. Kernel offset
+        # threading (B7-alt.3) is required before step() can run with a
+        # non-zero sub_offset — step() has an explicit guard for that.
+        if self._enable_sub_dense and self._should_rebuild_sub_dense(frame_idx):
+            # Use the latest GPU marker so fluid cells from the previous
+            # step's p2g are visible. On the very first prepare_frame
+            # (no step() has run yet) this only carries walls+obstacles
+            # and may return None — skip until particles touch the grid.
+            mh = self.marker.numpy()
+            bbox = self._compute_active_bbox(mh)
+            if bbox is not None:
+                self._rebuild_sub_dense(*bbox)
+                self._last_sub_rebuild_frame = frame_idx
 
     # ----------------------------------------------------- F3.4 step_cfl
     @block("F3.4", "CFL-adaptive substepping: clamps by advection CFL "

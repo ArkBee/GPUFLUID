@@ -73,6 +73,7 @@ passing pytest; **plan** = declared but not yet written.
 | D4.7     | Inflow / outflow                           | D4    | `gpufluid/domain/regions.py`                 | impl,test |
 | F3.5     | Restart / checkpoint                       | F3    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | F3.6     | Per-frame hook (anim+inflow+outflow)       | F3    | `gpufluid/solvers/solver3d.py`               | impl,test |
+| F3.7     | B7-alt.2 sub-dense storage (bbox + rebuild)| F3    | `gpufluid/solvers/solver3d.py`               | impl,test |
 | M5.1     | Density scatter                            | M5    | `gpufluid/meshing/surface.py`                | impl |
 | M5.2     | Density smoothing                          | M5    | `gpufluid/meshing/surface.py`                | impl |
 | M5.3     | Marching cubes (skimage)                   | M5    | `gpufluid/meshing/surface.py`                | impl,test |
