@@ -89,7 +89,8 @@ def test_sparse_jacobi_matches_dense_numerically():
     s.p.zero_(); s.p_tmp.zero_()
     for _ in range(80):
         wp.launch(k3_jacobi_pressure, dim=(nx, nx, nx),
-                  inputs=[s.p, s.p_tmp, s.div, s.marker], device=s.device)
+                  inputs=[s.p, s.p_tmp, s.div, s.marker, 0, 0, 0],
+                  device=s.device)
         s.p, s.p_tmp = s.p_tmp, s.p
     p_dense = s.p.numpy().copy()
     # Sparse pressure (reset, same div). Worst-case launch dim is the same
@@ -136,7 +137,8 @@ def test_sparse_jacobi_speedup_at_128():
         s.p.zero_(); s.p_tmp.zero_()
         for _ in range(iters):
             wp.launch(k3_jacobi_pressure, dim=(N, N, N),
-                      inputs=[s.p, s.p_tmp, s.div, s.marker], device=s.device)
+                      inputs=[s.p, s.p_tmp, s.div, s.marker, 0, 0, 0],
+                  device=s.device)
             s.p, s.p_tmp = s.p_tmp, s.p
 
     def bench_sparse():

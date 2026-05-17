@@ -4,20 +4,27 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **End-of-session state (2026-05-17, B7-alt.2 sub-dense storage shipped):**
-> 182 tests total (181 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
+> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 Jacobi-FLIP slice shipped):**
+> 184 tests total (183 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
 > 81 unique IDs / 105 callables (`gpufluid info`), v0.7 + v0.8 + **v0.9 all
 > closed**. CUDA-graph eligibility matrix is at **9/9** (every shipped
 > pressure-solver path captures cleanly: jacobi/gs-rb/PCG × dense/sparse,
-> with or without CSF). **v1.0 in progress**: B7-alt.1 spike GREEN
-> (18.96× memory drop on connected-blob 128³/5%, bit-exact coord-translation
-> on Jacobi); B7-alt.2 storage refactor + rebuild trigger SHIPPED (default-off
-> via `enable_sub_dense`); remaining macro micros B7-alt.3…B7-alt.8 in BACKLOG.
-> The next session inherits a known-good repo with a clear macro queue.
+> with or without CSF). **v1.0 in progress**: B7-alt.1 spike GREEN; B7-alt.2
+> storage refactor SHIPPED; **B7-alt.3 Jacobi/dense/FLIP slice SHIPPED**
+> end-to-end (bit-exact match vs full-dense on RTX 4080 SUPER). Remaining
+> B7-alt.3 follow-up micros: APIC, viscosity, CSF, PCG, GS-RB, block-sparse,
+> colour, scalar — each ~1 session, mechanical port using the same
+> off_x/y/z pattern. Then B7-alt.4…B7-alt.8.
 >
-> **What this session added (2026-05-17):** B7-alt.2 sub-dense storage
-> refactor + rebuild trigger (default-off via `enable_sub_dense`).
-> Three F3.7 helpers, `step()` guard, 11 regression tests. Suite 170→181.
+> **What this session added (2026-05-17):**
+> 1. B7-alt.2 sub-dense storage refactor + rebuild trigger (default-off
+>    via `enable_sub_dense`). Three F3.7 helpers, `step()` guard, 11
+>    regression tests.
+> 2. B7-alt.3 Jacobi/dense/FLIP slice — 7 kernels gain `off_x/y/z`,
+>    `_step_impl` reads sub-dense extents+offset, step() guard now
+>    config-aware (only blocks APIC/viscosity/CSF/PCG/GS-RB/sparse/
+>    colour/scalar). 2 integration tests prove bit-exact match vs full
+>    dense. Suite 170→183.
 > Previous session (2026-05-16, on `origin/main` at `adfb06c`):
 > ```
 > dcabdbe  docs/HANDOFF refresh post v1.0 spike
@@ -29,15 +36,15 @@
 > ```
 >
 > **Picking the next task:** §12 of this file lists open items in
-> priority order. Default is **B7-alt.3** (thread `off_x/y/z` through
-> the ~20 dense kernels that touch u/v/w/p/p_tmp/div). The storage
-> layer (B7-alt.2) is in place but step() refuses to run with a
-> non-zero `_sub_offset` until those kernels know how to translate
-> local → global indices.
-> See `BACKLOG.md` B7-alt.3…B7-alt.8 for the remaining micro chain.
-> Don't tear out the dense path — B7-alt is a parallel implementation
-> behind a flag, dense stays as the default until 256³ scenes prove
-> out.
+> priority order. Default is **B7-alt.3 follow-up** — extend
+> offset-aware kernels to APIC / viscosity / CSF / PCG / GS-RB /
+> block-sparse / colour / scalar. The Jacobi-FLIP slice is done, so
+> the architecture is proven; each remaining config is the same
+> mechanical pattern (~1 session each). Start with whichever your
+> next test scene needs (e.g., APIC if you're using `transfer_mode="apic"`).
+> See `BACKLOG.md` B7-alt.3 entry for the full pending list. Don't tear
+> out the dense path — B7-alt is a parallel implementation behind a
+> flag, dense stays as the default until 256³ scenes prove out.
 
 ## 1. Identity
 
@@ -468,30 +475,38 @@ pytest -q tests/test_b7_alt_1_spike_deferred_dense.py -s
 
 Sized roughly by session-count and grouped by where they unblock.
 
-**Default next task** (no user direction): **B7-alt.3** — thread
-`off_x/off_y/off_z` through the ~20 dense kernels that touch
-`u/v/w/p/p_tmp/div`. Until this lands, `enable_sub_dense=True` is
-rejected by `step()` (explicit `NotImplementedError`) — the storage
-refactor (B7-alt.2) is in place but unusable end-to-end. See
-`BACKLOG.md` B7-alt.3 … B7-alt.8 for the remaining v1.0 chain. The
-spike (B7-alt.1) is committed (`tests/test_b7_alt_1_spike_deferred_dense.py`);
-the storage layer (B7-alt.2) is committed
-(`tests/test_b7_alt_2_sub_dense_storage.py`).
+**Default next task** (no user direction): **B7-alt.3 follow-up** —
+extend offset-aware kernels to APIC / viscosity / CSF / PCG / GS-RB /
+block-sparse / colour / scalar. The Jacobi/dense/FLIP slice is shipped
+and bit-exact vs full dense; each remaining config is a mechanical
+port using the same off_x/y/z pattern. See `BACKLOG.md` B7-alt.3 entry
+for the full pending list of kernels to port.
 
-**v1.0 macro queue (B7-alt.3 … B7-alt.8 from BACKLOG, in order):**
+The spike (B7-alt.1) is committed (`tests/test_b7_alt_1_spike_deferred_dense.py`);
+the storage layer (B7-alt.2) is committed
+(`tests/test_b7_alt_2_sub_dense_storage.py`); the Jacobi-FLIP slice
+of B7-alt.3 is committed
+(`tests/test_b7_alt_3_jacobi_dense_flip.py`).
+
+**v1.0 macro queue (B7-alt.3 follow-up … B7-alt.8 from BACKLOG):**
 
 1. ~~**B7-alt.2** — sub-dense field storage + rebuild trigger.~~
    *Shipped 2026-05-17.* `FlipSolver3D` gained
    `enable_sub_dense`/`sub_rebuild_every`/`sub_dilation` params,
    `_sub_offset`/`_sub_shape` state, and three F3.7 helpers
    (`_compute_active_bbox`, `_should_rebuild_sub_dense`,
-   `_rebuild_sub_dense`). `prepare_frame` calls the trigger after
-   inflow/outflow processing. Marker stays full-dense; only
-   `u/v/w/p/p_tmp/div` shrink. `step()` is guarded with
-   `NotImplementedError` while `_sub_offset != (0,0,0)` so any user
-   enabling the flag before B7-alt.3 lands fails loud. 11 new tests,
-   suite 170→181.
-2. **B7-alt.3 — thread `offset_xyz` through dense per-step kernels.**
+   `_rebuild_sub_dense` — extended in B7-alt.3 to also shrink
+   `uw/vw/ww/us/vs/ws`). `prepare_frame` calls the trigger after
+   inflow/outflow processing. Marker stays full-dense.
+2. ~~**B7-alt.3 partial** — Jacobi/dense/FLIP slice.~~ *Shipped
+   2026-05-17.* 7 kernels (`k3_clear_grid`, `k3_p2g`,
+   `k3_enforce_solid_bc`, `k3_compute_divergence`, `k3_jacobi_pressure`,
+   `k3_subtract_pressure_grad`, `k3_g2p_and_advect`) take `off_x/y/z`;
+   `_step_impl` reads sub-dense extents+offset; step() guard now
+   enumerates blocking knobs by name. Integration: bit-exact match vs
+   dense over 5 substeps. **Pending follow-up:** port APIC / viscosity
+   / CSF / PCG / GS-RB / block-sparse / colour / scalar kernels.
+3. **B7-alt.3 follow-up — extend offset coverage** (default next task).
    ~20 kernels, each gets a 4-line addition: `gi = li + off_x` for
    marker/div cross-lookups; neighbour pressure reads stay in
    sub-dense coordinates. The spike kernel `k3_jacobi_spike_offset`
@@ -534,10 +549,11 @@ Estimated total: 3-5 sessions to ship B7-alt.2 … B7-alt.8 + 256³ bench.
 
 **Tier 1 (closed this session — for context, do NOT re-open):**
 - ~~B7-alt.2 sub-dense storage refactor + rebuild trigger~~ — **shipped 2026-05-17**.
-  Three F3.7 helpers (`_compute_active_bbox`, `_should_rebuild_sub_dense`,
-  `_rebuild_sub_dense`), `prepare_frame` wired, `step()` guard active,
-  11 new tests, suite 170→181. step() still rejects non-zero
-  `_sub_offset` until B7-alt.3.
+  Three F3.7 helpers, `prepare_frame` wired, 11 tests.
+- ~~B7-alt.3 Jacobi/dense/FLIP slice~~ — **shipped 2026-05-17**. 7
+  kernels port to off_x/y/z, `_step_impl` reads sub-dense extents,
+  step() guard is config-aware. 2 GPU integration tests prove bit-exact
+  match vs dense (0.000e+00 position drift, 1.5e-7 velocity drift).
 
 **Tier 1 (closed prior session — for context, do NOT re-open):**
 - ~~PCG graph-eligibility~~ — **Option A shipped** (`91e35b4`, 4.17× on big_pcg).
@@ -555,12 +571,14 @@ Estimated total: 3-5 sessions to ship B7-alt.2 … B7-alt.8 + 256³ bench.
 
 ---
 
-**State at handoff (2026-05-17, end of session — B7-alt.2 sub-dense storage shipped):**
-* **Tests:** 182 total, 181 green + 1 documented-flaky
+**State at handoff (2026-05-17, end of session — B7-alt.2 + B7-alt.3 Jacobi-FLIP slice shipped):**
+* **Tests:** 184 total, 183 green + 1 documented-flaky
   (`test_gpu_mc_speedup_at_128`). Verified via `pytest -q
   --deselect tests/test_m5_4_gpu_mc.py::test_gpu_mc_speedup_at_128`
   on the user's Windows box (Warp 1.13 + CUDA 12.9 + RTX 4080 SUPER).
-  +11 tests added by `tests/test_b7_alt_2_sub_dense_storage.py`.
+  +13 tests this session: 11 from
+  `tests/test_b7_alt_2_sub_dense_storage.py` + 2 from
+  `tests/test_b7_alt_3_jacobi_dense_flip.py`.
 * **Registry:** 81 unique block IDs / **105** callables via
   `gpufluid info` (+1 ID / +2 callables vs prior session: the new
   F3.7 helpers `_compute_active_bbox` and `_rebuild_sub_dense`).

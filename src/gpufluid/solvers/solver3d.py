@@ -45,7 +45,11 @@ def k3_clear_grid(
     vw: wp.array3d(dtype=float),
     ww: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: u/v/w/uw/vw/ww are sub-dense (local coords); marker is
+    # full-dense and writes translate via (off_x, off_y, off_z). Pass
+    # zeros for the offset to get the legacy (full-dense) behaviour.
     i, j, k = wp.tid()
     if i < u.shape[0] and j < u.shape[1] and k < u.shape[2]:
         u[i, j, k] = 0.0; uw[i, j, k] = 0.0
@@ -53,9 +57,10 @@ def k3_clear_grid(
         v[i, j, k] = 0.0; vw[i, j, k] = 0.0
     if i < w.shape[0] and j < w.shape[1] and k < w.shape[2]:
         w[i, j, k] = 0.0; ww[i, j, k] = 0.0
-    if i < marker.shape[0] and j < marker.shape[1] and k < marker.shape[2]:
-        if marker[i, j, k] != 2:
-            marker[i, j, k] = 0
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if gi < marker.shape[0] and gj < marker.shape[1] and gk < marker.shape[2]:
+        if marker[gi, gj, gk] != 2:
+            marker[gi, gj, gk] = 0
 
 
 # =============================================================================
@@ -74,23 +79,33 @@ def k3_p2g(
     ww: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
     dx: float, nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: particles live in WORLD coords regardless of grid layout.
+    # Marker (full-dense) gets the global cell index. Sub-dense face fields
+    # (u/v/w/uw/vw/ww) take coords translated by the offset; (nx,ny,nz)
+    # passed in are the LOCAL cell extents of the sub-dense bbox so
+    # `scatter_face`'s bounds check fires at the right edges. In legacy
+    # full-dense mode the offset is 0 and `nx`/`ny`/`nz` are full extents.
     pid = wp.tid()
     p = pos[pid]
     velp = vel[pid]
-    ci = clamp_int(int(p[0] / dx), 0, nx - 1)
-    cj = clamp_int(int(p[1] / dx), 0, ny - 1)
-    ck = clamp_int(int(p[2] / dx), 0, nz - 1)
+    # Global cell for marker (full-dense).
+    nmx = marker.shape[0]; nmy = marker.shape[1]; nmz = marker.shape[2]
+    ci = clamp_int(int(p[0] / dx), 0, nmx - 1)
+    cj = clamp_int(int(p[1] / dx), 0, nmy - 1)
+    ck = clamp_int(int(p[2] / dx), 0, nmz - 1)
     if marker[ci, cj, ck] != 2:
         marker[ci, cj, ck] = 1
-    scatter_face(u, uw, velp[0],
-                 p[0] / dx,        p[1] / dx - 0.5, p[2] / dx - 0.5,
+    # Sub-dense face coords (LOCAL).
+    fx = p[0] / dx - float(off_x)
+    fy = p[1] / dx - float(off_y)
+    fz = p[2] / dx - float(off_z)
+    scatter_face(u, uw, velp[0], fx,         fy - 0.5,  fz - 0.5,
                  nx + 1, ny, nz)
-    scatter_face(v, vw, velp[1],
-                 p[0] / dx - 0.5,  p[1] / dx,       p[2] / dx - 0.5,
+    scatter_face(v, vw, velp[1], fx - 0.5,   fy,        fz - 0.5,
                  nx, ny + 1, nz)
-    scatter_face(w, ww, velp[2],
-                 p[0] / dx - 0.5,  p[1] / dx - 0.5, p[2] / dx,
+    scatter_face(w, ww, velp[2], fx - 0.5,   fy - 0.5,  fz,
                  nx, ny, nz + 1)
 
 
@@ -756,25 +771,35 @@ def k3_enforce_solid_bc(
     solid_v: wp.array3d(dtype=float),
     solid_w: wp.array3d(dtype=float),
     nx: int, ny: int, nz: int,
+    off_x: int, off_y: int, off_z: int,
 ):
     """Enforce normal velocity at solid faces. For static obstacles this is 0;
-    for moving obstacles it is the obstacle's velocity component (solid_u/v/w)."""
+    for moving obstacles it is the obstacle's velocity component (solid_u/v/w).
+
+    B7-alt.3: u/v/w are sub-dense (local coords); marker and solid_u/v/w
+    stay full-dense and are indexed by the translated global coords
+    (gi, gj, gk). `nx`/`ny`/`nz` passed in are the LOCAL cell extents;
+    grid-edge tests fire when the GLOBAL index hits 0 or the full extent.
+    Pass zeros for `off_*` to recover legacy full-dense behaviour.
+    """
     i, j, k = wp.tid()
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
     if i <= nx and j < ny and k < nz:
-        left = (i == 0) or (i > 0 and marker[i - 1, j, k] == 2)
-        right = (i == nx) or (i < nx and marker[i, j, k] == 2)
+        left = (gi == 0) or (gi > 0 and marker[gi - 1, gj, gk] == 2)
+        right = (gi == gnx) or (gi < gnx and marker[gi, gj, gk] == 2)
         if left or right:
-            u[i, j, k] = solid_u[i, j, k]
+            u[i, j, k] = solid_u[gi, gj, gk]
     if i < nx and j <= ny and k < nz:
-        bot = (j == 0) or (j > 0 and marker[i, j - 1, k] == 2)
-        top = (j == ny) or (j < ny and marker[i, j, k] == 2)
+        bot = (gj == 0) or (gj > 0 and marker[gi, gj - 1, gk] == 2)
+        top = (gj == gny) or (gj < gny and marker[gi, gj, gk] == 2)
         if bot or top:
-            v[i, j, k] = solid_v[i, j, k]
+            v[i, j, k] = solid_v[gi, gj, gk]
     if i < nx and j < ny and k <= nz:
-        back = (k == 0) or (k > 0 and marker[i, j, k - 1] == 2)
-        front = (k == nz) or (k < nz and marker[i, j, k] == 2)
+        back = (gk == 0) or (gk > 0 and marker[gi, gj, gk - 1] == 2)
+        front = (gk == gnz) or (gk < gnz and marker[gi, gj, gk] == 2)
         if back or front:
-            w[i, j, k] = solid_w[i, j, k]
+            w[i, j, k] = solid_w[gi, gj, gk]
 
 
 block("S2.4", "Solid boundary condition: faces = obstacle velocity (zero for static)")(k3_enforce_solid_bc)
@@ -830,11 +855,16 @@ def k3_compute_divergence(
     div: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
     dx: float, dt: float, rho: float,
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: u/v/w/div are sub-dense (local coords); marker is full-dense
+    # and indexed by (gi, gj, gk) = (i + off_x, j + off_y, k + off_z). Pass
+    # zero offsets for legacy full-dense behaviour.
     i, j, k = wp.tid()
     if i >= div.shape[0] or j >= div.shape[1] or k >= div.shape[2]:
         return
-    if marker[i, j, k] != 1:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    if marker[gi, gj, gk] != 1:
         div[i, j, k] = 0.0
         return
     d = (u[i + 1, j, k] - u[i, j, k]
@@ -857,45 +887,54 @@ def k3_jacobi_pressure(
     p_out: wp.array3d(dtype=float),
     div: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: p_in/p_out/div are sub-dense (local coords); marker is
+    # full-dense and indexed by (gi, gj, gk). Neighbour pressure reads
+    # stay in LOCAL coords (the sub-dense buffer holds the pressure for
+    # the active region; cells outside the bbox are implicitly "non-fluid,
+    # zero pressure", which matches the dilation=1+ boundary strategy
+    # from the B7-alt.1 spike). Pass zero offsets for legacy behaviour.
     i, j, k = wp.tid()
     nx = p_in.shape[0]; ny = p_in.shape[1]; nz = p_in.shape[2]
     if i >= nx or j >= ny or k >= nz:
         return
-    if marker[i, j, k] != 1:
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    if marker[gi, gj, gk] != 1:
         p_out[i, j, k] = 0.0
         return
     sum_nb = float(0.0); diag = float(0.0)
-    if i > 0:
-        m = marker[i - 1, j, k]
+    if gi > 0:
+        m = marker[gi - 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i - 1, j, k]
-    if i < nx - 1:
-        m = marker[i + 1, j, k]
+            if m == 1 and i > 0: sum_nb += p_in[i - 1, j, k]
+    if gi < gnx - 1:
+        m = marker[gi + 1, gj, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i + 1, j, k]
-    if j > 0:
-        m = marker[i, j - 1, k]
+            if m == 1 and i < nx - 1: sum_nb += p_in[i + 1, j, k]
+    if gj > 0:
+        m = marker[gi, gj - 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j - 1, k]
-    if j < ny - 1:
-        m = marker[i, j + 1, k]
+            if m == 1 and j > 0: sum_nb += p_in[i, j - 1, k]
+    if gj < gny - 1:
+        m = marker[gi, gj + 1, gk]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j + 1, k]
-    if k > 0:
-        m = marker[i, j, k - 1]
+            if m == 1 and j < ny - 1: sum_nb += p_in[i, j + 1, k]
+    if gk > 0:
+        m = marker[gi, gj, gk - 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j, k - 1]
-    if k < nz - 1:
-        m = marker[i, j, k + 1]
+            if m == 1 and k > 0: sum_nb += p_in[i, j, k - 1]
+    if gk < gnz - 1:
+        m = marker[gi, gj, gk + 1]
         if m != 2:
             diag += 1.0
-            if m == 1: sum_nb += p_in[i, j, k + 1]
+            if m == 1 and k < nz - 1: sum_nb += p_in[i, j, k + 1]
     if diag < 0.5:
         p_out[i, j, k] = 0.0
         return
@@ -1281,30 +1320,40 @@ def k3_subtract_pressure_grad(
     p: wp.array3d(dtype=float),
     marker: wp.array3d(dtype=int),
     dx: float, dt: float, rho: float,
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: u/v/w/p are sub-dense (local coords); marker is full-dense
+    # and indexed by (gi, gj, gk). Pressure-neighbour reads stay in LOCAL
+    # coords. The grid-edge tests (1 ≤ i ≤ nx-1) now check the LOCAL bbox
+    # edges via the sub-dense `marker`-derived gnx/gny/gnz against `gi`.
+    # Pass zero offsets for legacy behaviour.
     i, j, k = wp.tid()
-    nx = marker.shape[0]; ny = marker.shape[1]; nz = marker.shape[2]
+    gnx = marker.shape[0]; gny = marker.shape[1]; gnz = marker.shape[2]
+    gi = i + off_x; gj = j + off_y; gk = k + off_z
+    snx = u.shape[0] - 1
+    sny = v.shape[1] - 1
+    snz = w.shape[2] - 1
     scale = dt / (rho * dx)
-    if i >= 1 and i <= nx - 1 and j < ny and k < nz:
-        ml = marker[i - 1, j, k]; mr = marker[i, j, k]
+    if gi >= 1 and gi <= gnx - 1 and j < sny and k < snz and i <= snx:
+        ml = marker[gi - 1, gj, gk]; mr = marker[gi, gj, gk]
         if (ml == 1 or mr == 1) and ml != 2 and mr != 2:
             pl = float(0.0); pr = float(0.0)
-            if ml == 1: pl = p[i - 1, j, k]
-            if mr == 1: pr = p[i, j, k]
+            if ml == 1 and i > 0:        pl = p[i - 1, j, k]
+            if mr == 1 and i < snx:      pr = p[i, j, k]
             u[i, j, k] = u[i, j, k] - scale * (pr - pl)
-    if j >= 1 and j <= ny - 1 and i < nx and k < nz:
-        mb = marker[i, j - 1, k]; mt = marker[i, j, k]
+    if gj >= 1 and gj <= gny - 1 and i < snx and k < snz and j <= sny:
+        mb = marker[gi, gj - 1, gk]; mt = marker[gi, gj, gk]
         if (mb == 1 or mt == 1) and mb != 2 and mt != 2:
             pb = float(0.0); pt = float(0.0)
-            if mb == 1: pb = p[i, j - 1, k]
-            if mt == 1: pt = p[i, j, k]
+            if mb == 1 and j > 0:        pb = p[i, j - 1, k]
+            if mt == 1 and j < sny:      pt = p[i, j, k]
             v[i, j, k] = v[i, j, k] - scale * (pt - pb)
-    if k >= 1 and k <= nz - 1 and i < nx and j < ny:
-        mba = marker[i, j, k - 1]; mfr = marker[i, j, k]
+    if gk >= 1 and gk <= gnz - 1 and i < snx and j < sny and k <= snz:
+        mba = marker[gi, gj, gk - 1]; mfr = marker[gi, gj, gk]
         if (mba == 1 or mfr == 1) and mba != 2 and mfr != 2:
             pba = float(0.0); pfr = float(0.0)
-            if mba == 1: pba = p[i, j, k - 1]
-            if mfr == 1: pfr = p[i, j, k]
+            if mba == 1 and k > 0:       pba = p[i, j, k - 1]
+            if mfr == 1 and k < snz:     pfr = p[i, j, k]
             w[i, j, k] = w[i, j, k] - scale * (pfr - pba)
 
 
@@ -1329,16 +1378,25 @@ def k3_g2p_and_advect(
     nx: int, ny: int, nz: int,
     flip_blend: float,
     dom: wp.vec3,
+    off_x: int, off_y: int, off_z: int,
 ):
+    # B7-alt.3: u/v/w/us/vs/ws are sub-dense; (nx, ny, nz) are SUB-DENSE
+    # cell extents; particle positions stay in world coords. Sample-time
+    # coords get translated by (off_x, off_y, off_z). `dom` is the full
+    # world extent — particles can still advect across the whole domain;
+    # the rebuild trigger in prepare_frame grows the bbox in step.
     pid = wp.tid()
     p = pos[pid]
     ov = vel[pid]
-    pic_u = sample3(u, p[0]/dx,        p[1]/dx - 0.5, p[2]/dx - 0.5, nx + 1, ny,     nz)
-    old_u = sample3(us, p[0]/dx,       p[1]/dx - 0.5, p[2]/dx - 0.5, nx + 1, ny,     nz)
-    pic_v = sample3(v, p[0]/dx - 0.5,  p[1]/dx,       p[2]/dx - 0.5, nx,     ny + 1, nz)
-    old_v = sample3(vs, p[0]/dx - 0.5, p[1]/dx,       p[2]/dx - 0.5, nx,     ny + 1, nz)
-    pic_w = sample3(w, p[0]/dx - 0.5,  p[1]/dx - 0.5, p[2]/dx,       nx,     ny,     nz + 1)
-    old_w = sample3(ws, p[0]/dx - 0.5, p[1]/dx - 0.5, p[2]/dx,       nx,     ny,     nz + 1)
+    lx = p[0]/dx - float(off_x)
+    ly = p[1]/dx - float(off_y)
+    lz = p[2]/dx - float(off_z)
+    pic_u = sample3(u,  lx,        ly - 0.5,  lz - 0.5, nx + 1, ny,     nz)
+    old_u = sample3(us, lx,        ly - 0.5,  lz - 0.5, nx + 1, ny,     nz)
+    pic_v = sample3(v,  lx - 0.5,  ly,        lz - 0.5, nx,     ny + 1, nz)
+    old_v = sample3(vs, lx - 0.5,  ly,        lz - 0.5, nx,     ny + 1, nz)
+    pic_w = sample3(w,  lx - 0.5,  ly - 0.5,  lz,       nx,     ny,     nz + 1)
+    old_w = sample3(ws, lx - 0.5,  ly - 0.5,  lz,       nx,     ny,     nz + 1)
     flip_u = ov[0] + (pic_u - old_u)
     flip_v = ov[1] + (pic_v - old_v)
     flip_w = ov[2] + (pic_w - old_w)
@@ -3091,17 +3149,39 @@ class FlipSolver3D:
     def step(self, dt: float, pressure_iters: int = 80,
              pressure_solver: str = "jacobi",
              pressure_block_sparse: bool = False):
-        # B7-alt.2 guard. Sub-dense storage is wired up; the dense kernels
-        # invoked below still launch at (nx,ny,nz) without an offset,
-        # which would silently miss the sub-dense bbox. B7-alt.3 threads
-        # off_x/y/z through them and lifts this guard.
+        # B7-alt.3 guard. Sub-dense storage now works end-to-end for the
+        # Jacobi / dense / FLIP / no-CSF / no-viscosity / no-color /
+        # no-scalar-attribute config — that's the only path with
+        # offset-aware kernels so far. The other configs still launch
+        # legacy kernels at (nx, ny, nz) which would silently miss the
+        # sub-dense bbox; reject them loudly until follow-up micros
+        # extend coverage (APIC, viscosity, CSF, PCG, GS-RB, sparse,
+        # colour, temperature).
         if self._sub_offset != (0, 0, 0):
-            raise NotImplementedError(
-                "FlipSolver3D.step() cannot run while _sub_offset != (0,0,0). "
-                "B7-alt.2 ships the storage refactor; kernel offset threading "
-                "lands in B7-alt.3. Either disable enable_sub_dense or wait "
-                "for B7-alt.3."
-            )
+            unsupported = []
+            if pressure_solver != "jacobi":
+                unsupported.append(f"pressure_solver={pressure_solver!r} (need 'jacobi')")
+            if pressure_block_sparse:
+                unsupported.append("pressure_block_sparse=True")
+            if self.transfer_mode != "flip":
+                unsupported.append(f"transfer_mode={self.transfer_mode!r} (need 'flip')")
+            if self.surface_tension > 0.0:
+                unsupported.append("surface_tension>0")
+            if self.viscosity > 0.0:
+                unsupported.append("viscosity>0")
+            if self.attr_color is not None:
+                unsupported.append("attr_color (per-particle colour)")
+            if self.attr_temperature is not None:
+                unsupported.append("attr_temperature (per-particle scalar)")
+            if unsupported:
+                raise NotImplementedError(
+                    "FlipSolver3D.step() with sub-dense storage active only "
+                    "supports jacobi / dense / FLIP / no-CSF / no-viscosity / "
+                    "no-colour / no-scalar configs in B7-alt.3. Unsupported: "
+                    + ", ".join(unsupported)
+                    + ". Either disable enable_sub_dense or wait for the "
+                    "follow-up micros that extend coverage."
+                )
         # B5.2 — auto-replay through a captured graph when the config is
         # eligible AND the cached graph's key still matches. First call
         # in a topology pays the capture cost; subsequent calls just
@@ -3142,13 +3222,22 @@ class FlipSolver3D:
         """Original per-step pipeline. step() may call this directly or
         wrap it in a CUDA-graph capture. Keep the body sync-free so the
         capture-path stays valid (see B5.1 audit)."""
-        nx, ny, nz, dx = self.nx, self.ny, self.nz, self.dx
+        # B7-alt.3: with sub-dense storage active, `nx/ny/nz` are the
+        # SUB-DENSE cell extents (the shape of the active bbox), and
+        # (ox, oy, oz) translate local sub-dense indices into the global
+        # marker frame. In legacy full-dense mode `_sub_shape == (self.nx,
+        # self.ny, self.nz)` and `_sub_offset == (0,0,0)`, so the launches
+        # below are bit-identical to the v0.9 layout.
+        nx, ny, nz = self._sub_shape
+        ox, oy, oz = self._sub_offset
+        dx = self.dx
         full = (max(nx + 1, nx), max(ny + 1, ny), max(nz + 1, nz))
         dev = self.device
         prof = self._prof
         with prof.section("clear"):
             wp.launch(k3_clear_grid, dim=full,
-                      inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww, self.marker], device=dev)
+                      inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww,
+                              self.marker, ox, oy, oz], device=dev)
         with prof.section("p2g"):
             if self.transfer_mode == "apic":
                 if self.affine_C is None or self.affine_C.shape[0] != self.n_particles:
@@ -3163,7 +3252,7 @@ class FlipSolver3D:
                 wp.launch(k3_p2g, dim=self.n_particles,
                           inputs=[self.pos, self.vel,
                                   self.u, self.v, self.w, self.uw, self.vw, self.ww,
-                                  self.marker, dx, nx, ny, nz], device=dev)
+                                  self.marker, dx, nx, ny, nz, ox, oy, oz], device=dev)
         with prof.section("normalize"):
             wp.launch(k3_normalize, dim=full,
                       inputs=[self.u, self.v, self.w, self.uw, self.vw, self.ww,
@@ -3174,7 +3263,7 @@ class FlipSolver3D:
             wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
                       inputs=[self.u, self.v, self.w, self.marker,
                               self.solid_u, self.solid_v, self.solid_w,
-                              nx, ny, nz], device=dev)
+                              nx, ny, nz, ox, oy, oz], device=dev)
         # S2.13 viscosity (semi-implicit). Solve (I - r·Lap) u_new = u for each
         # MAC component using Jacobi. Re-uses uw/vw/ww as scratch buffers.
         if self.viscosity > 0.0:
@@ -3196,7 +3285,7 @@ class FlipSolver3D:
             wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
                       inputs=[self.u, self.v, self.w, self.marker,
                               self.solid_u, self.solid_v, self.solid_w,
-                              nx, ny, nz], device=dev)
+                              nx, ny, nz, ox, oy, oz], device=dev)
         # S2.14 surface tension (Brackbill-Kothe CSF). Apply *before* divergence
         # so the impulse is projected to a divergence-free field by the pressure
         # solve. Allocations are lazy: only paid when surface_tension>0.
@@ -3206,10 +3295,11 @@ class FlipSolver3D:
             wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
                       inputs=[self.u, self.v, self.w, self.marker,
                               self.solid_u, self.solid_v, self.solid_w,
-                              nx, ny, nz], device=dev)
+                              nx, ny, nz, ox, oy, oz], device=dev)
         with prof.section("divergence"):
             wp.launch(k3_compute_divergence, dim=(nx, ny, nz),
-                      inputs=[self.u, self.v, self.w, self.div, self.marker, dx, dt, self.rho], device=dev)
+                      inputs=[self.u, self.v, self.w, self.div, self.marker,
+                              dx, dt, self.rho, ox, oy, oz], device=dev)
         with prof.section("pressure"):
             if pressure_solver == "pcg":
                 if pressure_block_sparse:
@@ -3246,7 +3336,8 @@ class FlipSolver3D:
                 else:
                     for _ in range(pressure_iters):
                         wp.launch(k3_jacobi_pressure, dim=(nx, ny, nz),
-                                  inputs=[self.p, self.p_tmp, self.div, self.marker], device=dev)
+                                  inputs=[self.p, self.p_tmp, self.div, self.marker,
+                                          ox, oy, oz], device=dev)
                         self.p, self.p_tmp = self.p_tmp, self.p
                 self.last_pressure_iters = pressure_iters
             elif pressure_solver == "gsrb":
@@ -3281,11 +3372,12 @@ class FlipSolver3D:
                 raise ValueError(f"unknown pressure_solver: {pressure_solver!r}")
         with prof.section("grad_subtract_bc"):
             wp.launch(k3_subtract_pressure_grad, dim=(nx + 1, ny + 1, nz + 1),
-                      inputs=[self.u, self.v, self.w, self.p, self.marker, dx, dt, self.rho], device=dev)
+                      inputs=[self.u, self.v, self.w, self.p, self.marker,
+                              dx, dt, self.rho, ox, oy, oz], device=dev)
             wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
                       inputs=[self.u, self.v, self.w, self.marker,
                               self.solid_u, self.solid_v, self.solid_w,
-                              nx, ny, nz], device=dev)
+                              nx, ny, nz, ox, oy, oz], device=dev)
         with prof.section("g2p_advect"):
             if self.transfer_mode == "apic":
                 wp.launch(k3_g2p_apic_advect, dim=self.n_particles,
@@ -3296,7 +3388,8 @@ class FlipSolver3D:
                 wp.launch(k3_g2p_and_advect, dim=self.n_particles,
                           inputs=[self.pos, self.vel,
                                   self.u, self.v, self.w, self.us, self.vs, self.ws,
-                                  dx, dt, nx, ny, nz, self.flip_blend, self.dom], device=dev)
+                                  dx, dt, nx, ny, nz, self.flip_blend, self.dom,
+                                  ox, oy, oz], device=dev)
         # S2.15 — color transfer at end of step (positions are now current)
         with prof.section("color"):
             self._apply_color_transfer()
@@ -3434,6 +3527,16 @@ class FlipSolver3D:
         rebuild_one("u", 0)
         rebuild_one("v", 1)
         rebuild_one("w", 2)
+        # Weight accumulators (k3_p2g target, k3_normalize source) and the
+        # pre-pressure copies (k3_g2p_and_advect's FLIP reference) must
+        # shrink in lockstep with u/v/w — they share the same face-cell
+        # topology and feed the same per-step kernels.
+        rebuild_one("uw", 0)
+        rebuild_one("vw", 1)
+        rebuild_one("ww", 2)
+        rebuild_one("us", 0)
+        rebuild_one("vs", 1)
+        rebuild_one("ws", 2)
         self._sub_offset = new_lo
         self._sub_shape = new_shape
 

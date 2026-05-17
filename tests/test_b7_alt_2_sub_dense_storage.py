@@ -238,15 +238,17 @@ def test_should_rebuild_proximity_trigger():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.gpu
-def test_step_raises_when_sub_offset_active_pending_b7_alt_3():
-    """Sanity check: until B7-alt.3 threads off_x/y/z through the dense
-    kernels, calling step() while sub-dense is active would silently
-    launch kernels at the wrong dimensions. Guard with an explicit
-    NotImplementedError so a user enabling enable_sub_dense early gets
-    a helpful message instead of a kernel crash."""
+def test_step_raises_with_sub_offset_active_for_unsupported_config():
+    """B7-alt.3 enables Jacobi / dense / FLIP / no-CSF / no-viscosity /
+    no-colour / no-scalar end-to-end. Other configs still need their
+    kernels threaded with off_x/y/z, so step() rejects them loudly
+    rather than launching at the wrong dimensions.
+
+    The covered path is tested separately by
+    tests/test_b7_alt_3_jacobi_dense_flip.py.
+    """
     s = FlipSolver3D(nx=16, ny=16, nz=16, enable_sub_dense=True,
-                     sub_dilation=0)
-    # Force sub_offset to be non-zero by faking a rebuild.
+                     sub_dilation=0, transfer_mode="apic")
     s._rebuild_sub_dense((0, 0, 8), (8, 8, 16))
     assert s._sub_offset == (0, 0, 8)
     s.pos = wp.array(np.zeros((0, 3), dtype=np.float32),
@@ -254,5 +256,5 @@ def test_step_raises_when_sub_offset_active_pending_b7_alt_3():
     s.vel = wp.array(np.zeros((0, 3), dtype=np.float32),
                      dtype=wp.vec3, device=s.device)
     s.n_particles = 0
-    with pytest.raises(NotImplementedError, match=r"B7-alt\.3"):
+    with pytest.raises(NotImplementedError, match=r"transfer_mode"):
         s.step(dt=0.01, pressure_iters=1)
