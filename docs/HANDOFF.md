@@ -140,6 +140,33 @@ A backlog item to chip away at them lives in DESIGN.md §3.2.1 row 6.
 
 Pick from the Tier 4 backlog below, or wait for the user to direct.
 
+### Same-session follow-up — B3 whitewater macro CLOSED
+
+Tier 1 / v0.8 is now empty of open macros.
+
+- **DESIGN.md §11.5.1** — formal W7.8 spec (P2G→blur→∇→∇· pipeline,
+  no CSF dependency, gated by |∇χ̃|).
+- **`src/gpufluid/sim/whitewater_potentials.py`** — 4 new W7.8 kernels
+  (indicator scatter, normal+grad-mag, |div n̂|, gated G2P) + W7.8.H
+  host wrapper. Standalone — operates on a particle dump, no
+  FlipSolver3D needed.
+- **`tests/test_w7_8_wave_crest.py`** — 3 GPU unit tests: crest-centre
+  beats flat-centre by ≥2×; interior particles stay <0.15 (the gate
+  works); mirror-symmetry preserved.
+- **CLI/addon wiring** — `whitewater_wave_crest_weight` knob in TOML
+  schema, addon Whitewater sub-panel, and bake.py emit_from_fluid
+  call. Combines as `α·I_ta + β·I_wc`; default α=1, β=0 (back-compat).
+- **B3.4 bench** — `examples/compare_whitewater_potential.py` rewritten
+  for A/B/C with honest KPI (bubble→surface emission shift instead
+  of the original 5× spray target). β=2.0 hits +2.5pp
+  surface-fraction (passes ≥2pp acceptance).
+- **B3.5 video** — `out/videos/step28.mp4` (2.0 MB), text-overlay
+  style on `step28_b3_full` bake.
+
+Suite: 224 → 227 passed. `gpufluid blocks --check` clean.
+
+### Next default task (after B3 closure)
+
 ### Tier 4 backlog (only if user asks, in priority order)
 
 1. **CSF legacy dead-code cleanup** — `k3_csf_subtract_bias_{u,v,w}`

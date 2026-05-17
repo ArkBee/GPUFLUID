@@ -209,6 +209,12 @@ class OutputCfg:
     whitewater_use_potential: bool = False
     whitewater_potential_radius: float = 0.0   # 0 ⇒ auto = 2.5·dx
     whitewater_potential_v_max: float = 10.0   # velocity normaliser
+    # B3.2 — when use_potential AND wave_crest_weight > 0, emit weight is
+    # `alpha * I_ta + beta * I_wc`. I_wc fires on surface curvature
+    # (wave crests, breaking ridges) where I_ta misses static-but-curving
+    # geometry. Default beta=1.0 (equal blend with trapped-air) once on.
+    whitewater_wave_crest_weight: float = 0.0
+    whitewater_trapped_air_weight: float = 1.0
 
 
 @dataclass
@@ -422,6 +428,8 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         whitewater_use_potential=bool(out.get("whitewater_use_potential", False)),
         whitewater_potential_radius=float(out.get("whitewater_potential_radius", 0.0)),
         whitewater_potential_v_max=float(out.get("whitewater_potential_v_max", 10.0)),
+        whitewater_wave_crest_weight=float(out.get("whitewater_wave_crest_weight", 0.0)),
+        whitewater_trapped_air_weight=float(out.get("whitewater_trapped_air_weight", 1.0)),
         particles=bool(out.get("particles", False)),
         preview=bool(out.get("preview", False)),
     )

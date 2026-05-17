@@ -354,10 +354,23 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 r = scene.output.whitewater_potential_radius
                 if r <= 0.0:
                     r = 2.5 * float(solver.dx)
-                ww_potential = trapped_air_potential(
+                alpha = float(scene.output.whitewater_trapped_air_weight)
+                beta = float(scene.output.whitewater_wave_crest_weight)
+                ww_potential = alpha * trapped_air_potential(
                     fpos, fvel, radius=r,
                     v_max=scene.output.whitewater_potential_v_max,
                 )
+                # B3.2 — wave-crest blend. Reuses solver grid resolution so
+                # the indicator scatter matches the simulation's spatial
+                # scale; gives surface curvature on top of velocity-divergence.
+                if beta > 0.0:
+                    from ..sim.whitewater_potentials import wave_crest_potential
+                    grid_res = max(int(max(solver.nx, solver.ny, solver.nz)), 16)
+                    iwc = wave_crest_potential(
+                        fpos, grid_res=grid_res, dx=float(solver.dx),
+                        n_blur=int(scene.simulation.csf_smoothing_passes or 2),
+                    )
+                    ww_potential = ww_potential + beta * iwc
             ww_sys.emit_from_fluid(fpos, fvel, density=ww_density, dx=solver.dx,
                                    potential=ww_potential)
             ww_sys.step(1.0 / scene.simulation.fps,

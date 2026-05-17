@@ -641,6 +641,48 @@ exception.
 | W7.6  | Kind sidecar I/O (`whitewater/frame_NNNN.npy`)         | `gpufluid/cli/commands.py`                     |
 | W7.7  | Trapped-air potential (Ihmsen 2012)                    | `gpufluid/sim/whitewater_potentials.py`        |
 | W7.7.H| Host wrapper (numpy → numpy) for W7.7                  | `gpufluid/sim/whitewater_potentials.py`        |
+| W7.8  | Wave-crest potential I_wc = |∇·n̂| via standalone P2G→blur→∇→∇· pipeline (no CSF dependency) | `gpufluid/sim/whitewater_potentials.py` |
+| W7.8.H| Host wrapper for W7.8                                  | `gpufluid/sim/whitewater_potentials.py`        |
+
+### 11.5.1 W7.8 wave-crest formulation
+
+The whitewater classifier wants high emission rates exactly where the
+free surface curves outward — i.e. wave crests and breaking ridges.
+Ihmsen 2012 §3.2 defines the wave-crest potential as
+
+```
+I_wc(i) = |∇·n̂(x_i)|
+```
+
+where `n̂` is the unit surface normal at particle `i`. The natural
+particle-only evaluation:
+
+1. **Scatter** unit indicator to a cell-centred grid χ via trilinear P2G.
+2. **Smooth** χ → χ̃ with N box-blur passes (reuses [BLK G1.7]).
+3. **Normal** n̂ = ∇χ̃ / (|∇χ̃| + ε) on cell centres.
+4. **Divergence** ∇·n̂ via central differences.
+5. **Sample** |∇·n̂| back per-particle via trilinear gather.
+
+W7.8 ships the kernels for steps 1, 3, 4, 5 (step 2 reuses G1.7). The
+host wrapper W7.8.H mirrors W7.7.H — numpy in, numpy out, no solver
+state — so callers can run whitewater on a particle dump without
+constructing a `FlipSolver3D`.
+
+**Why not reuse S2.14.1/2/3?** Those kernels live on the solver's MAC
+grid and take the `marker` field as input (encodes fluid/solid cells).
+Reusing them would chain whitewater to solver state and require σ>0
+(CSF only allocates its grids when surface tension is enabled). W7.8
+is intentionally standalone so the wave-crest classifier works on
+scenes without CSF and on offline particle dumps.
+
+**Range:** raw |∇·n̂| has units of 1/length and is unbounded; W7.8
+normalises by `1/dx` (cells per meter) and clamps to [0, 1]. Wave
+crests typically saturate near 1; flat surface and interior particles
+sit below 0.05.
+
+**Inputs:** particle positions (N,3) float32, grid resolution
+(nx,ny,nz), cell size `dx`, blur passes `n_blur` (default 2). No
+velocities needed — wave-crest is a geometric measure.
 
 ---
 

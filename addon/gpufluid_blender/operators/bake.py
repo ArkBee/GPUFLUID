@@ -220,6 +220,9 @@ def _output_dict(dprops):
             out["whitewater_use_potential"] = True
             out["whitewater_potential_radius"] = float(ww.potential_radius)
             out["whitewater_potential_v_max"] = float(ww.potential_v_max)
+            wcw = float(getattr(ww, "wave_crest_weight", 0.0))
+            if wcw > 0.0:
+                out["whitewater_wave_crest_weight"] = wcw
     return out
 
 

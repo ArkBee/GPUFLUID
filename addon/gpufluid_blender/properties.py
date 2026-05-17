@@ -67,6 +67,15 @@ class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
         name="Potential v_max", default=10.0, min=0.1, max=100.0,
         description="Velocity normaliser for the (1 - |v_ij|/v_max) factor",
     )
+    # B3.2 — wave-crest potential weight. 0 = trapped-air only (current).
+    # >0 adds beta * |div n_hat| to the emit weight, so wave crests and
+    # breaking ridges emit more spray than the velocity-only heuristic.
+    wave_crest_weight: bpy.props.FloatProperty(
+        name="Wave-Crest Weight (W7.8)", default=0.0, min=0.0, max=4.0,
+        description="Blend in surface-curvature emission (Ihmsen 2012 §3.2). "
+                    "0 = trapped-air only; 1 = equal blend; higher = "
+                    "crest-dominated. Off by default for back-compat.",
+    )
 
 
 # [BLK A8.2]

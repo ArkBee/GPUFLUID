@@ -85,7 +85,7 @@ additionally has at least one `test_*` matching the block ID slug;
 | I6.1 | Binary little-endian PLY reader (mirror of write_ply) (2 kernels) | I6 | `src/gpufluid/io/ply.py` | impl,test |
 | I6.2 | Read cache manifest (cache.json) (2 kernels) | I6 | `src/gpufluid/io/cache.py` | impl,test |
 | I6.3 | Particle dump (numpy .npy of positions) | I6 | `src/gpufluid/io/ply.py` | impl,test |
-| I6.5 | USD time-sampled mesh sequence writer | I6 | `src/gpufluid/io/usd.py` | impl |
+| I6.5 | USD time-sampled mesh sequence writer | I6 | `src/gpufluid/io/usd.py` | impl,test |
 | C7.2 | simulate command: run a scene and write a mesh cache | C7 | `src/gpufluid/cli/commands.py` | impl,test |
 | C7.3 | bench command: solver throughput | C7 | `src/gpufluid/cli/commands.py` | impl |
 | C7.4 | info command: version, devices, registry counts | C7 | `src/gpufluid/cli/commands.py` | impl,test |
@@ -95,6 +95,8 @@ additionally has at least one `test_*` matching the block ID slug;
 | W7.5 | Per-class advect: foam/spray/bubble with distinct rules | W7 | `src/gpufluid/sim/whitewater.py` | impl |
 | W7.7 | Trapped-air potential (Ihmsen 2012 §3.1) — GPU HashGrid | W7 | `?` | impl,test |
 | W7.7.H | Host wrapper: numpy pos/vel → numpy trapped-air potential | W7 | `src/gpufluid/sim/whitewater_potentials.py` | impl |
+| W7.8 | Wave-crest G2P: gather \|div n\| gated by \|grad chi\|, clamped to [0,1] (4 kernels) | W7 | `?` | impl,test |
+| W7.8.H | Host wrapper: numpy pos → numpy wave-crest potential I_wc | W7 | `src/gpufluid/sim/whitewater_potentials.py` | impl |
 | G1.4 | Trilinear weights | G1 | — | plan |
 | S2.9 | Particle advection + clamp | S2 | — | plan |
 | S2.10 | CFL substep count (host helper) | S2 | — | plan |
