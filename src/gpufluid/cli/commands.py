@@ -122,7 +122,10 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                           csf_smoothing_passes=scene.simulation.csf_smoothing_passes,
                           transfer_mode=scene.simulation.transfer_mode,
                           enable_timing=bool(getattr(args, "timings", False)),
-                          enable_cuda_graphs=bool(getattr(args, "enable_cuda_graphs", False)))
+                          enable_cuda_graphs=bool(getattr(args, "enable_cuda_graphs", False)),
+                          enable_sub_dense=bool(getattr(args, "enable_sub_dense", False)),
+                          sub_rebuild_every=int(getattr(args, "sub_rebuild_every", 8)),
+                          sub_dilation=int(getattr(args, "sub_dilation", 4)))
     grid_xyz = solver.cell_centers_np()
     obstacle_sdf = _build_obstacle_sdf(scene, grid_xyz)
     if obstacle_sdf is not None:
@@ -499,6 +502,18 @@ def main(argv=None) -> int:
                             "across substeps with the same topology. ~2x speedup "
                             "at 64^3 for jacobi/gsrb + no CSF + no block-sparse. "
                             "Other configs fall through to direct execution.")
+    p_sim.add_argument("--enable-sub-dense", action="store_true",
+                       help="(B7-alt) deferred-dense field storage: shrink "
+                            "u/v/w/p/p_tmp/div + scratch to the active 8^3-tile "
+                            "bbox + sub_dilation. 256^3/10%%-fill dam-break sees "
+                            "~6x memory drop. Rebuild every --sub-rebuild-every "
+                            "frames or when fluid encroaches on the edge.")
+    p_sim.add_argument("--sub-rebuild-every", type=int, default=8,
+                       help="(B7-alt) frames between forced sub-dense rebuilds")
+    p_sim.add_argument("--sub-dilation", type=int, default=4,
+                       help="(B7-alt) cells of safety margin around the active "
+                            "fluid bbox; raise if particles drift past edge "
+                            "between rebuilds (B7-alt.4 prints a warning)")
     p_sim.set_defaults(func=cmd_simulate)
 
     p_bench = sub.add_parser("bench", help="solver throughput benchmark")
