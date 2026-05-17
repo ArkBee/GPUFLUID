@@ -4,17 +4,15 @@
 > Then read `docs/DESIGN.md` for the architecture contract and `docs/BLOCKS.md`
 > for the block index.
 >
-> **End-of-session state (2026-05-17, B7-alt.2 + B7-alt.3 FULL kernel coverage shipped):**
-> 195 tests total (194 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
-> 81 unique IDs / 105 callables (`gpufluid info`), v0.7 + v0.8 + **v0.9 all
-> closed**. CUDA-graph eligibility matrix is at **9/9** (every shipped
-> pressure-solver path captures cleanly: jacobi/gs-rb/PCG × dense/sparse,
-> with or without CSF). **v1.0 in progress**: B7-alt.1 spike GREEN; B7-alt.2
-> storage refactor SHIPPED; **B7-alt.3 Jacobi/dense/FLIP slice SHIPPED**
-> end-to-end (bit-exact match vs full-dense on RTX 4080 SUPER). Remaining
-> B7-alt.3 follow-up micros: APIC, viscosity, CSF, PCG, GS-RB, block-sparse,
-> colour, scalar — each ~1 session, mechanical port using the same
-> off_x/y/z pattern. Then B7-alt.4…B7-alt.8.
+> **End-of-session state (2026-05-17, v1.0 B7-alt MACRO FULLY CLOSED):**
+> 211 tests total (210 green + 1 documented-flaky `test_gpu_mc_speedup_at_128`),
+> v0.7 + v0.8 + v0.9 + **v1.0 all closed**. Every B7-alt micro (B7-alt.1
+> spike → B7-alt.2 storage → B7-alt.3 full kernel coverage → B7-alt.4
+> particle bounds → B7-alt.5 graph rehit → B7-alt.6 256³ bench →
+> B7-alt.7 scattered warning → B7-alt.8 on-device rebuild) shipped in
+> one session. **Headline: 6.11× memory drop on 256³/10%-fill dam-break,
+> sub-dense step 1 ms, on-device rebuild 3 ms.** CUDA-graph rehit rate
+> 87.5% across rebuilds (identical to dense baseline).
 >
 > **What this session added (2026-05-17):**
 > 1. B7-alt.2 sub-dense storage refactor + rebuild trigger (default-off
@@ -52,16 +50,12 @@
 > de18bfe  B11.3 lava demo + v0.9 closure
 > ```
 >
-> **Picking the next task:** §12 of this file lists open items in
-> priority order. Default is **B7-alt.3 follow-up** — extend
-> offset-aware kernels to APIC / viscosity / CSF / PCG / GS-RB /
-> block-sparse / colour / scalar. The Jacobi-FLIP slice is done, so
-> the architecture is proven; each remaining config is the same
-> mechanical pattern (~1 session each). Start with whichever your
-> next test scene needs (e.g., APIC if you're using `transfer_mode="apic"`).
-> See `BACKLOG.md` B7-alt.3 entry for the full pending list. Don't tear
-> out the dense path — B7-alt is a parallel implementation behind a
-> flag, dense stays as the default until 256³ scenes prove out.
+> **Picking the next task:** v1.0 is closed. §12 lists Tier 4
+opportunistic items: addon UI per-source temperature, B10 Alembic
+writer, B2 Mixbox LUT (license-blocked), flaky-test threshold relax.
+The bigger v1.x bets in `BACKLOG.md` are B8 differentiable solver and
+B9 multi-GPU — both research, work on them only with a concrete user
+need.
 
 ## 1. Identity
 

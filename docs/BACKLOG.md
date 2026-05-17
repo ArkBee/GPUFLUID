@@ -24,7 +24,7 @@ which milestone we're inside.
 | v0.7    | Solver feature complete  | (10-item original roadmap)     | done          | ✅ closed 2026-05-16 |
 | **v0.8** | **"Reachable" — Blender exposes the v0.7 features** | **Tier 1: B1, B2, B3**     | **3-5**       | **▶ next** |
 | v0.9    | "Production-fast" — hot path squeezed              | Tier 2: B4, B5, B6 + B11, B12  | 4-6           | ✅ closed 2026-05-16 (B5 ships **9/9** graph configs after Options A + B — no remaining v0.9 polish) |
-| v1.0    | "Scale" — 256³+ scenes via sparse storage          | Tier 3: B7 (aborted, see B7.1) → B7-alt deferred-allocation | 3-5 | ▶ next — B7-alt.1 spike GREEN 2026-05-16 (18.96× memory drop on connected-blob 128³/5%, bit-exact coord-translation). Macro micros B7-alt.2..B7-alt.8 ready. |
+| v1.0    | "Scale" — 256³+ scenes via sparse storage          | Tier 3: B7 (aborted, see B7.1) → B7-alt deferred-allocation | 3-5 | ✅ closed 2026-05-17 — B7-alt.1 spike + B7-alt.2..B7-alt.8 all shipped. 256³ dam-break runs at 6.11× memory drop, sub-dense step 1 ms, rebuild 3 ms on-device. |
 | v1.x+   | Research extensions      | B8 differentiable, B9 multi-GPU | open-ended    | optional |
 
 **Why these splits:**
