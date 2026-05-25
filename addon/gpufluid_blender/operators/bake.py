@@ -559,10 +559,10 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 # via toml_overrides, CLI honored that — comparing
                 # against scene_dict (pre-merge) gave spurious truncation
                 # warnings. Source of truth is the actual emitted TOML.
-                try:
-                    import tomllib  # py 3.11+
-                except ImportError:
-                    import tomli as tomllib  # type: ignore
+                # Round-12 reviewer #6 dropped tomli fallback — Blender 4.5+
+                # ships Python 3.11+ which guarantees tomllib; the fallback
+                # was dead code that hid import failure.
+                import tomllib
                 emitted = tomllib.loads(toml_str)
                 expected = int(emitted.get("simulation", {}).get(
                     "frames", scene_dict["simulation"]["frames"]))

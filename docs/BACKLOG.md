@@ -737,20 +737,141 @@ the UI to stop users from toggling a no-op flag. To unhide: wire an
 `_export_obj` call (the obstacle path already has one in `bake.py`) and
 emit `kind="mesh", path=..., scale=avg_inv` in the fluid_sources entry.
 
-### Core MPM truncates at high res without reporting failure `risk:medium value:user` — DEFERRED (core, not addon)
+### Senior architectural debt (round-12 staff-grade review 2026-05-26) `risk:medium-high value:eng` — DEFERRED
 
-Live-found 2026-05-26 during round-10 stress test: at res 96, 200-frame
-MPM bake CLI exits **rc=0** after producing only ~26 mesh frames. No
-stderr, no log line, no .npy truncation marker — the addon's sync_bake
-correctly reports FINISHED (because rc=0 is the success contract) and
-auto-attaches a 26-frame cache. Addon-side workaround already shipped
-(round-10): post-bake sanity check compares mesh count to expected and
-downgrades to WARNING `produced 26/200 frames`. But the **underlying
-solver behavior** — silent early-exit at res 96 + multi-frame — is
-unexplained and lives in `src/gpufluid/sim/mpm/`. Could be OOM (no
-WARP-level OOM guard?), CFL-divergence early-stop heuristic, or kernel
-launch failure being swallowed. Repro: run `examples/_ci_stress_bake.py`
-with res 96 + frames=200 instead of round-10's res 64 + frames=100.
+Independent principal-grade review on the 31-commit audit branch
+(senior-architect agent). 11 reviewer rounds + 5 unit-test passes
+cleared the bug surface; this entry tracks the **architectural debt
+that no reviewer can fix** — only a refactor sprint can.
+
+**Ranked by ROI (re-opens bug class):**
+
+1. **Module-global `_PRELOAD` mutable state in `cache_loader/__init__.py`**
+   is the single biggest source of round-3/-5/-7/-8 bugs (stale
+   pointers, ReferenceError, leaked datablocks, hot-loop prune).
+   Wants to be a `PreloadCache` class with explicit
+   `attach/detach/invalidate/touch/free` API + handlers as 5-line
+   shims. Until then every new feature carries ~50% chance of
+   re-opening one of those bug classes.
+
+2. **`bake.py::collect_scene` is a 250-line bpy→dict adapter** mixing
+   (a) bpy traversal, (b) world→unit-cube math, (c) validation,
+   (d) OBJ export side-effects, (e) per-solver param mapping.
+   Wants split into `scene_collector.py` (bpy I/O) + `domain_transform.py`
+   (pure numerics, unit-testable) + `scene_validator.py`. Current
+   shape is why `config_builder._FLIP_ONLY_SIM_KEYS` filters leaked
+   across layers.
+
+3. **Subprocess lifecycle duplicated in `OT_bake` + `OT_render`.**
+   Both carry identical `_proc/_stdout_q/_stdout_thread/_timer/_is_running`
+   + Popen+drain+modal+abort+cancel+sync+watchdog+OSError-guard.
+   `helpers.subprocess_drain` factors out only the drain loop.
+   Extract `ModalSubprocessRunner` base; mirror-drift (lesson 9.6)
+   stops biting permanently.
+
+4. **Custom properties as inter-operator data bus.** ~10 stringly-typed
+   magic keys (`gpufluid_origin`, `gpufluid_dom_size`,
+   `gpufluid_cache_dir`, `gpufluid_cache_pattern`,
+   `gpufluid_cache_frame_offset`, etc.) consumed across `bake._finish`,
+   `cache_loader._frame_change_handler`, `_on_load_post`, render
+   bridge. No schema, no migration. Round-5 found one missing-key
+   path; there will be more on the next `.blend`-format change.
+   A typed `PropertyGroup` on the cache object would eliminate the
+   stringly-typed bus.
+
+5. **`addon_root_pkg()` discovery via `__package__.rsplit('.', 1)[0]`**
+   in cache_loader L160. Works for legacy + 4.2-extension layouts by
+   coincidence; a nested submodule would break it silently (lesson
+   9.10 anti-pattern). Extract helper with logging on fallback,
+   consume everywhere prefs are read.
+
+**Code smell that survived 11 rounds:**
+
+- `scene_dict: Dict[str, Any]` end-to-end. Only `test_addon_schema_roundtrip.py`
+  enforces contract, by example not by type. Typed dataclass +
+  `tomli_w` would have caught round-9's `_emit_table` data-loss bug
+  at compile time.
+- `bake.py::execute` is 300 lines mixing pre-flight cleanup +
+  sync branch + modal branch.
+- `_is_running` as class attribute works but a second instance of the
+  operator is theoretically allowed by Blender; real guard wants a
+  process-wide lock on an addon-level state object.
+- `try/except Exception` swallowing at cache_loader L298/344/506,
+  bake L574 — each needs `_addon_logger.exception` + a panel-visible
+  suppression counter.
+
+**Test-quality plateau:**
+
+- **No CLI integration test.** Zero pytest exercises that addon-emitted
+  TOML actually parses end-to-end through `python -m gpufluid.cli
+  simulate`. Round-9 `_emit_table` data-loss would have been caught
+  first-time-someone-added an `[[array]]` field with this.
+- **No headless Blender pytest gate.** `_ci_headless_bake.py` exists
+  as smoke; CI doesn't enforce it. Should be `pytest -m blender_headless`
+  with a fixture that boots `blender -b`.
+- **No perf regression gate.** `_ci_stress_bake.py` is one-shot.
+  Frame-change handler perf (lesson 9.5) should have a 5000-object
+  benchmark with 50ms/frame budget in CI.
+- **No fuzz on `config_builder`.** Hypothesis on random `scene_dict`
+  shapes would replace 4 round-N regression tests with one invariant.
+- **Mocks are bug-specific, not invariant-driven** (lesson 9.7
+  taken literally). `_PRELOAD` never holds dead Meshes after any
+  operator sequence — that's an invariant; we have a changelog
+  instead.
+
+**Day-1 senior rewrites (one-line plan each):**
+
+1. `cache_loader/__init__.py` → extract `class PreloadCache` with
+   explicit `attach/invalidate/touch/free` + single `register()` entry.
+   Eliminates round-3/-5/-8 regression class.
+2. `operators/bake.py` + `render.py` → introduce
+   `operators/_runner.py::ModalSubprocessRunner(cmd, on_progress,
+   on_done, sync_timeout)`. Both ops shrink to ~150 lines of
+   scene-collection + UI. Kills mirror-drift permanently.
+3. `config_builder.py` → replace `Dict[str, Any]` plumbing with
+   typed `SceneDict` dataclasses + `tomli_w`. Delete `_emit_scalar`/
+   `_emit_table` — hand-rolled emitter is single highest-bug-density
+   file on the branch.
+
+**What the reviewer praised** (kept for morale + so we don't gut
+the right parts): `_lru_install` pre-swap pattern (senior-grade
+comment+code), 11 reviewer rounds with trust-but-verify discipline,
+sync mode born from root-cause not bandage, symmetric watchdog on
+both ops.
+
+### Core MPM silently early-exits on NaN divergence — ✅ ROOT CAUSE FOUND, FIX DEFERRED
+
+Live-found 2026-05-26 during round-10 stress test. Round-12 research
+agent (`mpm-truncation-researcher`) traced the root cause:
+
+**`src/gpufluid/sim/mpm/solver.py:469` — `MpmSolver.run()` has a
+deliberate `break` on NaN-divergence with only a `print()` to stdout,
+no exception, no return code change.** CLI wrapper
+`_cmd_simulate_mpm` then writes a happy `cache.json` and exits 0.
+Trigger at res 96: dx≈0.0104, dt=0.001 → CFL margin too tight,
+inflow velocity hits the cube collider and APIC velocity blows up
+to NaN within ~26 frames.
+
+**Two real fixes needed:**
+1. Solver should raise a typed `MpmDivergenceError` (or set a status
+   flag on `MpmSolver`) instead of silent `break`. CLI translates
+   to a non-zero exit code so callers see the failure.
+2. `cache.json` should carry a `truncated_at_frame` field when the
+   actual frame count is less than requested. Currently writes the
+   expected frame count blindly.
+
+**Addon-side mitigation already shipped (round-10 cf20a63):** post-
+bake sanity reads `cache.json:frame_count` vs requested + emits
+WARNING when truncated. But this only catches the case where
+cache.json itself reflects the truncation — if solver fixes #2 above
+properly, the addon warning becomes redundant; if not, the warning
+is the only signal users get.
+
+Out of scope for the addon-audit branch (`fix/addon-audit-fixes`).
+Repro: run `examples/_ci_stress_bake.py` with `dp.resolution=96` and
+`dp.frames=200` instead of round-10's downsized 64+100. Look for
+the `print("MPM solver hit NaN ...")` line on stdout, then count
+`mesh/frame_*.ply` files.
 
 ### TOML overrides path drops table-valued fields in [[array-of-tables]] — ✅ FIXED 2026-05-26 (round-10, cf20a63)
 

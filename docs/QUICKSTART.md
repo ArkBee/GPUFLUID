@@ -39,7 +39,9 @@ In the 3D viewport sidebar (**N panel → gpufluid** tab):
 3. *(Optional)* Add an obstacle: mark a mesh as **Obstacle**, pick
    BBOX / Sphere / Cylinder / Plane / Mesh.
 4. *(Optional)* Set frame range, FPS, resolution on the Domain object.
-   Defaults: 240 frames @ 60 fps, 128³ grid.
+   Defaults: 120 frames @ 24 fps, 64³ grid (properties.py:84,96,97).
+   Bump `resolution=128` and `frames=240` from the Domain panel for
+   the timing numbers below.
 
 ## 3. Bake
 
@@ -55,7 +57,9 @@ Click **Bake** in the sidebar.
   `gpufluid_cache` mesh appears in the outliner with a frame-change
   handler swapping pre-loaded meshes per frame.
 
-Typical bake on a 4080 SUPER: **~45 s** for 240 frames @ 128³.
+Typical bake on a 4080 SUPER: **~12 s** for 100 frames @ res 64
+(measured by `examples/_ci_stress_bake.py`). Scale roughly linearly
+with `frames`, ~8× per resolution doubling.
 
 **Cancel:** press **Esc** anywhere in the 3D viewport while the bake is
 running. The addon terminates the subprocess and reports `aborted (user
