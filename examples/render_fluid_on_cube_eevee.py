@@ -13,6 +13,7 @@ Run from inside Blender:
 
     blender --background --python examples/render_fluid_on_cube_eevee.py -- \\
             --cache out/step30_water_on_cube \\
+            --scene examples/scenes/step30_water_on_cube.toml \\
             --out   out/step30_eevee_frames \\
             --label "Water" \\
             --color 0.20 0.50 0.70
@@ -20,14 +21,59 @@ Run from inside Blender:
 Each fluid pass uses a different label/colour but otherwise identical
 camera, lighting, ground, cube obstacle so the three videos compare
 directly.
+
+Iteration mode (for tuning passes — render 24 frames spread across the
+bake instead of all 600, ~25x faster):
+
+    blender --background --python examples/render_fluid_on_cube_eevee.py -- \\
+            --cache out/step30_water_on_cube \\
+            --scene examples/scenes/step30_water_on_cube.toml \\
+            --out   C:/out/step30_test \\
+            --label "Water" --color 0.20 0.50 0.70 \\
+            --test-frames 24
+
+Output files are named test_fXXXX.png where XXXX is the sim-frame index.
 """
 from __future__ import annotations
-import argparse, json, math, re, sys
+import argparse, json, math, re, sys, tomllib
 from pathlib import Path
 
 import bpy
 import mathutils
 import numpy as np
+
+# Make gpufluid + the addon importable when running inside Blender. The
+# example lives next to addon/ and src/, so walk up to the repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+for p in (_REPO_ROOT / "src", _REPO_ROOT / "addon"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+# Library helpers — promoted from inline copies (B17.8 / A8.9 / A8.10 / A8.11)
+from gpufluid.io.ply import read_ply  # noqa: E402
+from gpufluid_blender.render_bridge import (  # noqa: E402
+    apply_eevee_preset,
+    FrameMeshLoader,
+    rebuild_surface_mesh,
+)
+
+
+def _load_obstacle_from_scene(scene_toml: Path) -> tuple[tuple[float, float, float],
+                                                          tuple[float, float, float]]:
+    """Read the first [[obstacle]] from a scene TOML and return (center, half_size)
+    in sim coords. Renderer authoritative source: TOML, never hardcoded — otherwise
+    bake collides with an invisible obstacle at sim coords while the renderer draws
+    the cube at a different (hardcoded) location, producing a positional desync that
+    looks like "chaotic" fluid behaviour to the viewer.
+    """
+    data = tomllib.loads(scene_toml.read_text())
+    obs_list = data.get("obstacle", [])
+    if not obs_list:
+        raise ValueError(f"{scene_toml}: no [[obstacle]] section")
+    obs = obs_list[0]
+    if obs.get("type", "box") != "box":
+        raise ValueError(f"{scene_toml}: only box obstacles are renderable here")
+    return tuple(obs["center"]), tuple(obs["half_size"])
 
 
 def _argv_after_doubledash():
@@ -37,45 +83,13 @@ def _argv_after_doubledash():
 
 
 def _read_ply_minimal(path):
-    with open(path, "rb") as f:
-        header = b""
-        while True:
-            line = f.readline()
-            if not line:
-                return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32)
-            header += line
-            if line.strip() == b"end_header":
-                break
-        text = header.decode("ascii", errors="replace")
-        n_v = n_f = 0
-        for ln in text.splitlines():
-            if ln.startswith("element vertex"):
-                n_v = int(ln.split()[2])
-            elif ln.startswith("element face"):
-                n_f = int(ln.split()[2])
-        verts = np.frombuffer(f.read(n_v * 12), dtype=np.float32).reshape(n_v, 3).copy()
-        faces = np.empty((n_f, 3), dtype=np.int32)
-        fb = f.read(n_f * 13)
-        for i in range(n_f):
-            base = i * 13
-            faces[i] = np.frombuffer(fb[base + 1: base + 13], dtype=np.int32)
-        return verts, faces
+    # Thin wrapper around library reader (I6.1 + I6.1.MESH vectorized face parse).
+    return read_ply(path)
 
 
 def _rebuild_surface_mesh(obj, verts, faces):
-    me = obj.data
-    me.clear_geometry()
-    if verts.shape[0] == 0 or faces.shape[0] == 0:
-        return
-    me.vertices.add(verts.shape[0])
-    me.vertices.foreach_set("co", verts.ravel())
-    loop_total = faces.shape[0] * 3
-    me.loops.add(loop_total)
-    me.polygons.add(faces.shape[0])
-    me.polygons.foreach_set("loop_start", np.arange(0, loop_total, 3, dtype=np.int32))
-    me.polygons.foreach_set("loop_total", np.full(faces.shape[0], 3, dtype=np.int32))
-    me.polygons.foreach_set("vertices", faces.ravel())
-    me.update(calc_edges=True)
+    # Thin wrapper around library helper (A8.11).
+    rebuild_surface_mesh(obj, verts, faces)
 
 
 def _add_text(name, body, location, scale=0.10, color=(1.0, 1.0, 1.0, 1.0),
@@ -124,7 +138,9 @@ def _parse_wallclock_from_cache_json(cache: Path) -> tuple[float, float]:
 
 def build_scene(cache: Path, label: str, fluid_color: tuple,
                 fps: int, n_frames: int,
-                sim_s: float, mesh_s: float):
+                sim_s: float, mesh_s: float,
+                cube_center: tuple, cube_half: tuple,
+                samples: int = 16):
     sc = bpy.data.scenes.get("fluidcube_render") or bpy.data.scenes.new("fluidcube_render")
     bpy.context.window.scene = sc
     for o in list(sc.objects):
@@ -144,6 +160,9 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     except (TypeError, ValueError):
         sc.render.engine = "BLENDER_EEVEE"
     sc.render.image_settings.file_format = "PNG"
+
+    # A8.9 Eevee perf preset (single line — library handles the version drift)
+    apply_eevee_preset(sc, samples=samples)
 
     cam_data = bpy.data.cameras.new("Cam"); cam = bpy.data.objects.new("Cam", cam_data)
     sc.collection.objects.link(cam)
@@ -195,7 +214,7 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
         # water is highly transmissive.
         if label.lower() == "water":
             fbsdf.inputs["Roughness"].default_value = 0.05
-            trans = 0.7
+            trans = 0.0  # TEMP for B16.2 visibility eval
         elif label.lower() == "oil":
             fbsdf.inputs["Roughness"].default_value = 0.15
             trans = 0.4
@@ -210,18 +229,19 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             fbsdf.inputs["IOR"].default_value = 1.45
     surf.data.materials.append(fluid_mat)
 
-    # Cube obstacle — TOML places it at center=(0.5, 0.4, 0.5) with half_size=0.15.
-    # In sim-space the domain is (0,0,0)..(1,1,1) and the pivot rotates Y->Z,
-    # then translates -0.5 on X. So the cube ends up at world ~(0.0, 0.0, 0.4).
-    bpy.ops.mesh.primitive_cube_add(size=0.30,
-                                    location=(0.0, 0.0, 0.4))
+    # Cube obstacle — position + size read from the scene TOML so the rendered
+    # cube tracks whatever the bake actually collided with. (Past bug: hardcoded
+    # location had Y/Z swapped, so the visible cube was 10cm off from where the
+    # solver placed the invisible obstacle — fluid behaviour looked chaotic.)
+    edge = 2.0 * cube_half[0]
+    bpy.ops.mesh.primitive_cube_add(size=edge, location=(0.0, 0.0, 0.0))
     cube = bpy.context.active_object
     cube.name = "fluidcube_obstacle"
     cube.parent = pivot
     # Cancel the pivot's Y-up rotation on the cube so it stays axis-aligned
     # in world frame regardless of the pivot transform.
     cube.rotation_euler = (math.radians(-90), 0, 0)
-    cube.location = (0.5, 0.5, 0.4)  # in pivot-local sim coords
+    cube.location = tuple(cube_center)  # sim coords, pivot-local
     cmat = bpy.data.materials.new("fluidcube_cube_mat")
     cmat.use_nodes = True
     cbsdf = cmat.node_tree.nodes.get("Principled BSDF")
@@ -276,30 +296,15 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     return sc, surf, sim_time_text
 
 
-class FrameLoader:
-    def __init__(self, cache: Path, surf, sim_time_text, fps: int):
-        self.cache = cache
-        self.surf = surf
-        self.sim_time_text = sim_time_text
-        self.fps = fps
-
-    def __call__(self, scene, depsgraph=None):
-        f = scene.frame_current
-        idx = f - 1
-        # Update sim-time overlay: this frame represents (idx / fps) seconds
-        # of simulated time. Counter ticks visibly through the clip.
-        t = idx / float(self.fps)
-        self.sim_time_text.data.body = f"sim time: {t:6.3f} s"
-        # Swap the surface mesh for the baked frame's PLY.
-        ply_path = self.cache / "mesh" / f"frame_{idx:04d}.ply"
-        if ply_path.exists():
-            verts, faces = _read_ply_minimal(str(ply_path))
-            _rebuild_surface_mesh(self.surf, verts, faces)
+# FrameLoader was promoted to library — see gpufluid_blender.render_bridge.FrameMeshLoader (A8.10).
+FrameLoader = FrameMeshLoader
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", required=True)
+    ap.add_argument("--scene", required=True,
+                    help="Path to the scene TOML — read for obstacle geometry")
     ap.add_argument("--out", required=True)
     ap.add_argument("--label", required=True,
                     help="Water / Oil / Honey — drives fluid material + overlay text")
@@ -307,25 +312,66 @@ def main():
                     metavar=("R", "G", "B"),
                     help="Fluid colour (RGB in [0,1])")
     ap.add_argument("--fps", type=int, default=60)
-    ap.add_argument("--frames", type=int, default=600)
+    # `None` (not 600) so we can detect "user didn't ask for a count" and fall
+    # back to cache.json's frame_count. The headless wrapper (A8.12) only
+    # forwards --frames when it's a positive int, so this default kicks in for
+    # both the CLI `gpufluid render` path and direct invocations.
+    ap.add_argument("--frames", type=int, default=None)
+    ap.add_argument("--samples", type=int, default=16,
+                    help="Eevee TAA samples per frame (A8.9 preset). 16 is "
+                         "the speed-tuned default; bump to 64 for hero shots.")
+    ap.add_argument("--test-frames", type=int, default=0,
+                    help="Iteration mode: render N frames spaced evenly across "
+                         "the full bake (e.g. 24 instead of 600). Output names "
+                         "are test_fXXXX.png so the sim-frame index stays "
+                         "visible. ~25x faster than a full render for picking "
+                         "between tuning iterations.")
     args = ap.parse_args(_argv_after_doubledash())
     cache = Path(args.cache).resolve()
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
 
+    cube_center, cube_half = _load_obstacle_from_scene(Path(args.scene).resolve())
     sim_s, mesh_s = _parse_wallclock_from_cache_json(cache)
+
+    # Frame count fallback: if --frames was omitted (or 0) read cache.json's
+    # frame_count. This is what the headless wrapper relies on — see Bug #2
+    # in _headless_render.py.
+    n_frames = int(args.frames) if (args.frames and args.frames > 0) else 0
+    if n_frames <= 0:
+        try:
+            cache_meta = json.loads((cache / "cache.json").read_text())
+            n_frames = int(cache_meta.get("frame_count", 0))
+        except Exception as e:
+            print(f"[warn] could not read frame_count from cache.json: {e}")
+        if n_frames <= 0:
+            n_frames = 600  # last-ditch fallback matches the old hardcoded default
     print(f"[render] {args.label}: cache={cache}  "
-          f"sim={sim_s:.1f}s mesh={mesh_s:.1f}s")
+          f"sim={sim_s:.1f}s mesh={mesh_s:.1f}s  "
+          f"cube={cube_center} half={cube_half}  frames={n_frames} samples={args.samples}")
 
     sc, surf, sim_time_text = build_scene(
         cache, args.label, tuple(args.color),
-        args.fps, args.frames, sim_s, mesh_s,
+        args.fps, n_frames, sim_s, mesh_s,
+        cube_center, cube_half,
+        samples=args.samples,
     )
     loader = FrameLoader(cache, surf, sim_time_text, args.fps)
     bpy.app.handlers.frame_change_pre.clear()
     bpy.app.handlers.frame_change_pre.append(loader)
 
-    sc.render.filepath = str(out_dir / "f_")
-    bpy.ops.render.render(animation=True)
+    if args.test_frames > 0:
+        n = args.test_frames
+        last = max(n_frames - 1, 0)
+        indices = [round(i * last / max(n - 1, 1)) for i in range(n)]
+        print(f"[render] test mode: {n} frames @ indices {indices}")
+        for sim_idx in indices:
+            sc.frame_current = sim_idx + 1
+            loader(sc)
+            sc.render.filepath = str(out_dir / f"test_f{sim_idx:04d}")
+            bpy.ops.render.render(write_still=True)
+    else:
+        sc.render.filepath = str(out_dir / "f_")
+        bpy.ops.render.render(animation=True)
 
 
 if __name__ == "__main__":

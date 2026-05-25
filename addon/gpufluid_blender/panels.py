@@ -269,6 +269,7 @@ class GPUFLUID_PT_bake(bpy.types.Panel):
         col = layout.column(align=True)
         col.scale_y = 1.3
         col.operator("gpufluid.bake", icon="PLAY")
+        col.operator("gpufluid.render", text="Render", icon="RENDER_STILL")
         row = layout.row(align=True)
         row.operator("gpufluid.clear_cache", icon="TRASH")
         row.operator("gpufluid.open_cache_dir", icon="FILE_FOLDER")

@@ -42,6 +42,7 @@ if bpy is not None:
     from . import preferences
     from .operators import bake as op_bake
     from .operators import helpers as op_helpers
+    from .operators import render as op_render
     from . import cache_loader
     from . import panels
 
@@ -60,6 +61,7 @@ def _collect_classes():
         properties.GpufluidInflowProps,
         properties.GpufluidOutflowProps,
         op_bake.GPUFLUID_OT_bake,
+        op_render.GPUFLUID_OT_render,
         op_helpers.GPUFLUID_OT_add_domain,
         op_helpers.GPUFLUID_OT_mark_fluid,
         op_helpers.GPUFLUID_OT_mark_obstacle,

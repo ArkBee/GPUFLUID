@@ -102,6 +102,303 @@ def _build_obstacle_sdf(scene: SceneCfg, grid_xyz) -> Optional[np.ndarray]:
 
 # [BLK C7.2]
 @block("C7.2", "simulate command: run a scene and write a mesh cache")
+def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
+    """[BLK F3.7] MPM dispatch path inside `gpufluid simulate`.
+
+    Translates the TOML scene config (FLIP-shaped — first [[fluid]] box, all
+    [[obstacle]] boxes, single domain) into an :class:`MpmConfig` and runs
+    the bake. Writes points-only PLYs into ``output.cache_dir/mesh/`` plus a
+    minimal ``cache.json`` so the addon's Attach Cache (A8.6) and the
+    `gpufluid render` command (A8.12) can find the result.
+    """
+    import json
+    from ..sim.mpm import MpmSolver
+    from ..sim.mpm.solver import (
+        MpmConfig, MpmCubeCollider, MpmTap, MpmAntiSplash, make_column,
+    )
+    from ..sim.mpm.inflow import MpmInflow
+    sim = scene.simulation
+    # Build initial column from the single [fluid] box (the multi-source
+    # [[fluids]] list seeds get coloured-per-source for FLIP; MPM uses
+    # only the first geometric region). Fall back to first [[inflow]].
+    # Source selection. scene.fluid is auto-populated with a default
+    # FluidBoxCfg whose `lo`/`hi` are set, so a naive `hasattr` check would
+    # silently swallow the user's real source. Order of preference:
+    #   1) explicit [[fluids]] from TOML (addon emission)
+    #   2) explicit [fluid] from TOML — but ONLY if no [[inflow]] is set,
+    #      otherwise we assume the bake is inflow-driven and the default
+    #      scene.fluid is a leftover artefact.
+    f0 = None
+    if scene.fluids:
+        for cand in scene.fluids:
+            if hasattr(cand, "lo") and hasattr(cand, "hi"):
+                f0 = cand
+                break
+    elif not scene.inflow and hasattr(scene.fluid, "lo"):
+        f0 = scene.fluid
+    if f0 is not None:
+        lo, hi = f0.lo, f0.hi
+        cx = 0.5 * (lo[0] + hi[0])
+        cy = 0.5 * (lo[1] + hi[1])
+        half = max(0.005, 0.5 * min(hi[0] - lo[0], hi[1] - lo[1]))
+        z_lo, z_hi = lo[2], hi[2]
+        n_xy = max(4, int(2 * half / scene.dx))
+        n_z = max(20, int((z_hi - z_lo) / scene.dx))
+        column = make_column((cx, cy), half, z_lo, z_hi, n_xy, n_z)
+    elif scene.inflow:
+        # No static fluid box — the bake is driven entirely by continuous
+        # [[inflow]] zones (S2.17.7). Start with an empty initial column;
+        # all particles are pre-allocated under inflow gates below.
+        column = np.empty((0, 3), dtype=np.float32)
+    else:
+        print("[mpm] no [fluid] or [[inflow]] zone — nothing to seed")
+        return 2
+    # S2.17.7 — continuous emission. Each [[inflow]] from the TOML becomes
+    # a time-gated particle batch pre-allocated inside MpmSolver.
+    inflows = tuple(
+        MpmInflow(
+            lo=tuple(inf.lo), hi=tuple(inf.hi),
+            velocity=tuple(inf.velocity) if any(inf.velocity) else (0.0, 0.0, -1.0),
+            rate_per_sec=float(inf.rate_per_sec),
+            frame_start=int(inf.frame_start),
+            frame_end=int(min(inf.frame_end, sim.frames)),
+            keyframes=tuple(tuple(row) for row in getattr(inf, "keyframes", ()) or ()),
+            # B18 — forward per-source attributes (None ⇒ source contributes
+            # no colour/temperature; if any other source carries one, this
+            # inflow's particles get the default white / 20 °C).
+            color=tuple(inf.color) if inf.color is not None else None,
+            temperature=float(inf.temperature) if inf.temperature is not None else None,
+        )
+        for inf in scene.inflow
+    )
+
+    # Each [[obstacle]] of type box becomes a slip-with-top-friction cube
+    cubes = []
+    for ob in scene.obstacle:
+        if isinstance(ob, ObstacleBoxCfg):
+            cubes.append(MpmCubeCollider(
+                centre=tuple(ob.center),
+                half_size=tuple(ob.half_size),
+                tangential_friction=sim.mpm_cube_friction,
+            ))
+    # Place tap zone just above the highest cube top; if no cube, above floor
+    if cubes:
+        tap_z_min = max(c.centre[2] + c.half_size[2] + 0.005 for c in cubes)
+        anti_splash_z = max(c.centre[2] for c in cubes)
+    else:
+        tap_z_min = 0.61
+        anti_splash_z = 0.50
+    # If we have no static column, derive tap XY from the first inflow zone.
+    if f0 is None and scene.inflow:
+        inf0 = scene.inflow[0]
+        cx = 0.5 * (inf0.lo[0] + inf0.hi[0])
+        cy = 0.5 * (inf0.lo[1] + inf0.hi[1])
+        half = max(0.005, 0.5 * min(inf0.hi[0] - inf0.lo[0],
+                                     inf0.hi[1] - inf0.lo[1]))
+    elif f0 is None:
+        # neither — shouldn't reach here (early-return above) but be safe
+        cx, cy, half = 0.5, 0.5, 0.05
+    # sim.frames is the count of OUTPUT frames at sim.fps. MPM internally counts
+    # solver steps at dt, so total steps = frames * dump_every. Without this
+    # multiplication a 240-frame request would bake only 0.24s @ dt=0.001.
+    dump_every = max(1, int((1.0 / sim.fps) / max(sim.dt, 1e-6)))
+    total_steps = sim.frames * dump_every
+    # ── Gravity scaling for non-unit domains ───────────────────────────────
+    # The MPM solver runs in a unit cube [0,1]³ (see solver.MpmDomainWalls).
+    # One normalized unit equals `dom_size_z` real metres. To preserve real
+    # falling time, gravity in normalised units = real_g (m/s²) / dom_size_z.
+    # Without this, a 2.32 m domain has particles falling 2.32× too fast
+    # (looks "cartoonish"); a 0.5 m domain has them falling 2× too slow.
+    dom_size = scene.domain_size
+    dom_z = float(dom_size[2]) if dom_size[2] > 1e-9 else 1.0
+    g_world = float(sim.gravity)   # m/s², scalar (-9.81 default)
+    g_norm = (0.0, 0.0, g_world / dom_z)
+    # Velocities are in m/s real-world; convert to normalised units/s so the
+    # solver (which lives in [0,1]³) sees them in the same space as gravity.
+    inv_dom_z = 1.0 / dom_z
+    # B18.1 — per-particle attributes for the initial column. Pull from
+    # the resolved [fluid]/[[fluids]] entry (`f0`); broadcast to N rows.
+    initial_color_arr = None
+    initial_temp_arr = None
+    n_col = column.shape[0]
+    if n_col > 0 and f0 is not None:
+        if getattr(f0, "color", None) is not None:
+            initial_color_arr = np.tile(
+                np.asarray(f0.color, dtype=np.float32), (n_col, 1)
+            )
+        if getattr(f0, "temperature", None) is not None:
+            initial_temp_arr = np.full(
+                (n_col,), float(f0.temperature), dtype=np.float32
+            )
+    cfg = MpmConfig(
+        initial_column=column,
+        initial_color=initial_color_arr,
+        initial_temperature=initial_temp_arr,
+        color_mix_mode=str(scene.output.color_mix_mode),
+        initial_velocity_z=sim.mpm_initial_velocity * inv_dom_z,
+        n_grid=max(scene.domain.resolution),
+        n_frames=total_steps,
+        dump_every=dump_every,
+        inflows=inflows,
+        fps=int(sim.fps),
+        cubes=tuple(cubes),
+        gravity=g_norm,
+        tap=MpmTap(
+            lo_x=cx - half - 0.005, hi_x=cx + half + 0.005,
+            lo_y=cy - half - 0.005, hi_y=cy + half + 0.005,
+            z_min=tap_z_min,
+            v_terminal=sim.mpm_v_terminal * inv_dom_z,
+        ),
+        anti_splash=MpmAntiSplash(
+            z_threshold=anti_splash_z,
+            vz_min=-2.0 * inv_dom_z,
+            vz_max=sim.mpm_vz_max_splash * inv_dom_z,
+        ),
+        dt=sim.dt,
+    )
+    cfg.fluid.bulk_modulus = sim.mpm_bulk_modulus
+    cfg.fluid.rpic_damping = sim.mpm_rpic_damping
+    cfg.fluid.grid_v_damping_scale = sim.mpm_grid_v_damping
+    cache_dir = Path(scene.output.cache_dir).resolve()
+    particles_dir = cache_dir / "particles_raw"  # raw MpmSolver dump location
+    mesh_dir = cache_dir / "mesh"
+    particles_dir.mkdir(parents=True, exist_ok=True)
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    solver = MpmSolver(cfg)
+    n_init = int(solver.n_initial)
+    n_inflow = int(solver.n_particles - solver.n_initial)
+    print(f"[mpm] particles={solver.n_particles} "
+          f"(initial={n_init}, inflow_pool={n_inflow})  "
+          f"cubes={len(cubes)}  inflows={len(inflows)}  out={cache_dir}")
+    solver.run(particles_dir, progress=True)
+
+    # Mesh pass — turn the per-frame point clouds into triangle meshes
+    # the addon's Attach Cache (A8.6) can stream.
+    out_cfg = scene.output
+    frame_count = 0
+    if out_cfg.mesh:
+        from ..io.ply import read_points_ply, write_ply
+        nx = max(scene.domain.resolution)
+        mesher = MeshExtractor(nx, nx, nx, 1.0 / nx, use_gpu_mc=True)
+        sdf_search_cells = 5.0
+        search_r_world = sdf_search_cells * (1.0 / nx)
+        has_color_path = solver.attr_color is not None
+        has_temp_path = solver.attr_temperature is not None
+        colors_dir = cache_dir / "colors"
+        temps_dir = cache_dir / "temperatures"
+        # B11.3 — when [output] temperature_colormap is set, derive vertex
+        # RGB from the temperature sidecar (preferred over the colour
+        # sidecar when both exist). When the knob is unset (default),
+        # behaviour is unchanged: the regular colour sidecar drives RGB.
+        cmap_name = out_cfg.temperature_colormap
+        cmap_fn = None
+        t_min_cfg, t_max_cfg = out_cfg.temperature_range
+        if cmap_name:
+            from ..meshing.colormap import get_colormap
+            cmap_fn = get_colormap(cmap_name)
+        use_temp_color = bool(cmap_fn) and has_temp_path
+        frame_idx = 0
+        for step in range(0, cfg.n_frames + 1, cfg.dump_every):
+            ply = particles_dir / f"sim_{step:010d}.ply"
+            if not ply.exists():
+                continue
+            pts = read_points_ply(ply)
+            if pts.shape[0] == 0:
+                write_ply(mesh_dir / f"frame_{frame_idx:04d}.ply",
+                          np.zeros((0, 3), np.float32),
+                          np.zeros((0, 3), np.int32))
+                frame_idx += 1
+                continue
+            pos_wp = wp.array(pts, dtype=wp.vec3, device=mesher.device)
+            v, fc = mesher.extract(
+                pos_wp, mesh_method="sdf",
+                smooth_passes=2, mesh_smooth_passes=5,
+                mesh_smooth_method=out_cfg.mesh_smooth_method,
+                sdf_particle_radius_cells=2.2,
+                sdf_search_radius_cells=sdf_search_cells,
+            )
+            if v is None:
+                v = np.zeros((0, 3), np.float32)
+                fc = np.zeros((0, 3), np.int32)
+            # B18.4 / B11.3 — per-vertex colour. Load the matching sidecar
+            # (already mask-filtered to active particles → same row order
+            # as PLY). When [output] temperature_colormap is set AND a
+            # temperatures sidecar exists, derive RGB from temperature
+            # (preferred over the colour sidecar); otherwise fall back to
+            # the regular colour sidecar.
+            vc_u8 = None
+            cols_np = None  # (P, 3) float32 in [0,1] for whichever source
+            if use_temp_color and v.shape[0] > 0:
+                temp_path = temps_dir / f"frame_{frame_idx:04d}.npy"
+                if temp_path.exists():
+                    temps_np = np.load(temp_path).astype(np.float32)
+                    if temps_np.shape[0] == pts.shape[0]:
+                        cols_np = cmap_fn(temps_np, t_min_cfg, t_max_cfg)
+            if cols_np is None and has_color_path and v.shape[0] > 0:
+                col_path = colors_dir / f"frame_{frame_idx:04d}.npy"
+                if col_path.exists():
+                    loaded = np.load(col_path).astype(np.float32)
+                    if loaded.shape[0] == pts.shape[0]:
+                        cols_np = loaded
+            if cols_np is not None and v.shape[0] > 0:
+                cols_wp = wp.array(
+                    cols_np, dtype=wp.vec3, device=mesher.device,
+                )
+                vc_u8 = mesher.compute_vertex_colors(
+                    v, pos_wp, cols_wp, search_r_world,
+                )
+                # B18.5 — pigment-space remix (Mixbox). The GPU pass already
+                # produced a linear-RGB average; when mix_mode="mixbox" is
+                # configured at the CLI level (forwarded via
+                # cfg.color_mix_mode), re-do the blend on the CPU using the
+                # pairwise Mixbox LUT. No-op when the mode is "linear"
+                # (default). Reused unchanged for both colour & temperature
+                # paths since both produce identically-shaped (P,3) RGB.
+                if cfg.color_mix_mode == "mixbox":
+                    from ..meshing.mixbox import remix_vertices_mixbox
+                    vc_u8 = remix_vertices_mixbox(
+                        v, pts, cols_np, search_r_world,
+                    )
+            write_ply(mesh_dir / f"frame_{frame_idx:04d}.ply", v, fc,
+                      vertex_colors=vc_u8)
+            frame_idx += 1
+        frame_count = frame_idx
+        if use_temp_color:
+            cmode = f" (vertex colour from temperature: {cmap_name})"
+        elif has_color_path:
+            cmode = " (with vertex colour)"
+        else:
+            cmode = ""
+        print(f"[mpm] meshed {frame_count} frames -> {mesh_dir}{cmode}")
+
+        # I6.2.ABC — PLY → Alembic conversion is intentionally disabled.
+        # Blender 5.1's wm.alembic_export writes 240-sub-object .abc files
+        # via the addon's mesh-preload trick, and MeshSequenceCache modifier
+        # then plays them back with a phantom domain-origin offset on the
+        # empty `object_path`. The addon's PLY-preload path renders the same
+        # cache correctly (~150 MB peak RAM, 14 s one-shot attach), so we
+        # default to it. Re-enable once we have a single-object animated-
+        # vertex Alembic writer (likely via pyalembic, not wm.alembic_export).
+    else:
+        frame_count = cfg.n_frames // cfg.dump_every + 1
+
+    # Cache manifest so A8.6 / A8.12 can locate the bake.
+    (cache_dir / "cache.json").write_text(json.dumps({
+        "schema_version": 1,
+        "gpufluid_version": __version__,
+        "solver": "mpm",
+        "fps": sim.fps,
+        "frame_count": frame_count,
+        "mesh_pattern": "mesh/frame_{:04d}.ply" if out_cfg.mesh else None,
+        "particles_pattern": "particles_raw/sim_{:010d}.ply",
+        "domain_size": list(scene.domain_size),
+        "resolution": list(scene.domain.resolution),
+        "dx": scene.dx,
+        "notes": f"sim={sim.frames * sim.dt:.2f}s",
+    }, indent=2))
+    return 0
+
+
 def cmd_simulate(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     scene = load_scene(config_path)
@@ -111,6 +408,10 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     print(f"[gpufluid] simulate: {config_path}")
     print(f"           resolution {nx}x{ny}x{nz}   dx={dx:.5f}   domain={scene.domain_size}")
     print(f"           frames={scene.simulation.frames}  fps={scene.simulation.fps}  dt={scene.simulation.dt}")
+
+    if scene.simulation.solver == "mpm":
+        print(f"           solver=MPM (F3.7 shell-out)")
+        return _cmd_simulate_mpm(args, scene)
 
     solver = FlipSolver3D(nx=nx, ny=ny, nz=nz, dx=dx,
                           gravity=scene.simulation.gravity,
@@ -308,10 +609,35 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 mesh_smooth_method=scene.output.mesh_smooth_method,
                 wall_margin_cells=scene.output.wall_margin_cells,
                 decimate_ratio=scene.output.decimate_ratio,
+                mesh_method=scene.output.mesh_method,
+                cubic_radius_cells=scene.output.cubic_radius_cells,
+                sdf_particle_radius_cells=scene.output.sdf_particle_radius_cells,
+                sdf_search_radius_cells=scene.output.sdf_search_radius_cells,
             )
             t_mesh_total += time.time() - tm
+            # B2 — per-vertex colour for FLIP (mirrors B18.4/B18.5 on MPM).
+            # When the solver carries per-particle colour, build vertex colours
+            # via KNN blend against the current particle cloud; optionally remix
+            # in pigment space (Mixbox) for green-not-grey contact zones.
+            vc_u8 = None
+            if (verts is not None and verts.shape[0] > 0
+                    and solver.attr_color is not None
+                    and solver.n_particles > 0):
+                search_r_world = float(scene.output.sdf_search_radius_cells) * float(solver.dx)
+                cols_np = solver.attr_color.numpy().astype(np.float32)
+                if cols_np.shape[0] == int(solver.pos.shape[0]):
+                    vc_u8 = extractor.compute_vertex_colors(
+                        verts, solver.pos, solver.attr_color, search_r_world,
+                    )
+                    if str(scene.output.color_mix_mode) == "mixbox":
+                        from ..meshing.mixbox import remix_vertices_mixbox
+                        pos_np = solver.pos.numpy().astype(np.float32)
+                        vc_u8 = remix_vertices_mixbox(
+                            verts, pos_np, cols_np, search_r_world,
+                        )
             if verts is not None:
-                write_ply(mesh_dir / f"frame_{frame:04d}.ply", verts, faces)
+                write_ply(mesh_dir / f"frame_{frame:04d}.ply", verts, faces,
+                          vertex_colors=vc_u8)
                 if scene.output.usd:
                     usd_frames.append((frame, verts.copy(), faces.copy()))
             else:
@@ -444,6 +770,49 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# A8.12 — render
+# ---------------------------------------------------------------------------
+
+# [BLK A8.12]
+@block("A8.12",
+       "Headless render CLI command — spawns Blender with the addon render bridge")
+def cmd_render(args: argparse.Namespace) -> int:
+    """Spawn a headless Blender process to render a baked cache.
+
+    The actual Eevee work happens inside Blender's Python via the
+    addon's ``render_bridge`` module (A8.9-A8.11). This command just
+    constructs the subprocess command line.
+    """
+    import subprocess, json as _json
+    cache_dir = Path(args.cache).resolve()
+    scene_toml = Path(args.scene).resolve()
+    out_dir = Path(args.out).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_json = cache_dir / "cache.json"
+    if not cache_json.exists():
+        raise BlockError("A8.12", f"cache.json not found in {cache_dir}")
+    blender = args.blender or "blender"
+    # Locate the bundled render driver script
+    driver = Path(__file__).resolve().parents[3] / "addon" / "gpufluid_blender" / "_headless_render.py"
+    if not driver.exists():
+        raise BlockError("A8.12", f"render driver missing: {driver}")
+    payload = _json.dumps({
+        "cache":  str(cache_dir),
+        "scene":  str(scene_toml),
+        "out":    str(out_dir),
+        "label":  args.label,
+        "color":  args.color,
+        "samples": args.samples,
+        "fps":    args.fps,
+        "frames": args.frames,
+    })
+    cmd = [blender, "--background", "--python", str(driver), "--", payload]
+    print(f"[render] launching: {' '.join(cmd[:3])} ... ({len(payload)} bytes config)")
+    r = subprocess.run(cmd, check=False)
+    return r.returncode
+
+
+# ---------------------------------------------------------------------------
 # C7.3 — bench
 # ---------------------------------------------------------------------------
 
@@ -543,6 +912,24 @@ def main(argv=None) -> int:
                             "fluid bbox; raise if particles drift past edge "
                             "between rebuilds (B7-alt.4 prints a warning)")
     p_sim.set_defaults(func=cmd_simulate)
+
+    p_render = sub.add_parser("render",
+        help="Headless Eevee render of a baked cache (A8.12)")
+    p_render.add_argument("cache", help="path to cache_dir (must contain cache.json + mesh/)")
+    p_render.add_argument("scene", help="path to scene.toml (read for cube obstacle geometry)")
+    p_render.add_argument("--out", required=True, help="output directory for PNG frames")
+    p_render.add_argument("--label", default="gpufluid",
+        help="overlay label drawn into each frame")
+    p_render.add_argument("--color", nargs=3, type=float, default=[0.20, 0.50, 0.70],
+        metavar=("R", "G", "B"), help="fluid surface RGB in [0,1]")
+    p_render.add_argument("--samples", type=int, default=16,
+        help="Eevee TAA samples per frame (A8.9 preset)")
+    p_render.add_argument("--fps", type=int, default=60)
+    p_render.add_argument("--frames", type=int, default=0,
+        help="number of frames to render; 0 = read from cache.json")
+    p_render.add_argument("--blender", default=None,
+        help="path to Blender executable; falls back to 'blender' on $PATH")
+    p_render.set_defaults(func=cmd_render)
 
     p_bench = sub.add_parser("bench", help="solver throughput benchmark")
     p_bench.set_defaults(func=cmd_bench)
