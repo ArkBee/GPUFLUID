@@ -398,6 +398,24 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                         "addon.bake.cache_files_remove_failed",
                         extra={"name": cf.name, "err": str(e)})
 
+        # Strip stale per-frame artefacts so a re-bake with a shorter range
+        # (or a different solver) doesn't leave previous-bake .ply files in
+        # mesh/, particles_raw/, colors/. Without this the preloader would
+        # pick up the leftovers and the viewport would show a frame from
+        # the prior bake at frames beyond the new frame_count.
+        # Live-found 2026-05-25 during round-3 testing.
+        import shutil as _shutil
+        out_root = Path(str(scene_dict["output"]["cache_dir"]))
+        for sub in ("mesh", "particles_raw", "colors"):
+            d = out_root / sub
+            if d.is_dir():
+                try:
+                    _shutil.rmtree(d)
+                except Exception as e:
+                    logger.warning(
+                        "addon.bake.stale_subdir_clean_failed",
+                        extra={"dir": str(d), "err": str(e)})
+
         self._proc = subprocess.Popen(
             [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

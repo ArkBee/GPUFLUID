@@ -149,11 +149,15 @@ def _domain_whitewater_visibility(scene):
 _PRELOAD: "OrderedDict[str, dict[int, bpy.types.Mesh]]" = OrderedDict()
 
 
-# Blender's addon prefs are keyed by the TOP-level package, not the
-# nested module __package__ (which here is "gpufluid_blender.cache_loader").
-# Using __package__ directly made the lookup miss every time and silently
-# fall through to the default cap. Strip to the top segment.
-_ADDON_PKG = (__package__ or "").split(".")[0]
+# Blender's addon prefs are keyed by the addon-root package, which is the
+# parent of this module — NOT __package__ verbatim and NOT the top-level
+# segment. Examples seen live:
+#   * Legacy install: __package__ == "gpufluid_blender.cache_loader"
+#     → addon-root = "gpufluid_blender"
+#   * 4.2+ extension: __package__ == "bl_ext.user_default.gpufluid_blender.cache_loader"
+#     → addon-root = "bl_ext.user_default.gpufluid_blender"
+# rsplit one level off — works for both layouts.
+_ADDON_PKG = (__package__ or "").rsplit(".", 1)[0]
 
 
 def _preload_cap() -> int:
@@ -235,6 +239,22 @@ def _preload_sequence(obj, cache_dir, pattern, origin, max_frames=None,
     n_loaded = 0
     if max_frames is None:
         max_frames = _preload_max_frames()
+    # Respect cache.json:frame_count — without this, a re-bake that shrank
+    # the frame range leaks stale .ply files from the previous bake into
+    # the preview (live-found 2026-05-25: 20-frame MPM re-bake over a
+    # 30-frame FLIP bake → 29 frames preloaded with mixed solver output).
+    cache_json_path = os.path.join(cache_dir, "cache.json")
+    if os.path.isfile(cache_json_path):
+        try:
+            import json
+            with open(cache_json_path, "r", encoding="utf-8") as fh:
+                fc = int(json.load(fh).get("frame_count", max_frames))
+            if fc > 0:
+                max_frames = min(max_frames, fc)
+        except Exception as exc:  # noqa: BLE001
+            _addon_logger.warning(
+                "cache: cache.json read failed (%s) — falling back to dir scan",
+                exc)
     for idx in range(max_frames):
         path = os.path.join(cache_dir, pattern.format(idx))
         if not os.path.exists(path):
