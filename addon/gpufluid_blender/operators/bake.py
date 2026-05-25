@@ -349,6 +349,35 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 f"({', '.join(other)}) are ignored — select one to switch.")
         self._domain_obj_name = domain.name
 
+        # Reject obviously-broken scenes early so the CLI doesn't waste
+        # time launching, init'ing, then crashing silently. Live-found
+        # 2026-05-25 (round-4 test #24): inflow with frame_start > frame_end
+        # produced valid TOML, CLI accepted it, then bake quit with 0
+        # mesh frames written and no error report.
+        for o in context.scene.objects:
+            if o.gpufluid_inflow.is_inflow:
+                fs = int(o.gpufluid_inflow.frame_start)
+                fe = int(o.gpufluid_inflow.frame_end)
+                if fs > fe:
+                    self.report({"ERROR"},
+                        f"Inflow '{o.name}' has frame_start ({fs}) > "
+                        f"frame_end ({fe}) — emission window is empty. "
+                        f"Fix the inflow's frame range and re-bake.")
+                    return {"CANCELLED"}
+            if o.gpufluid_outflow.is_outflow:
+                fs = int(o.gpufluid_outflow.frame_start)
+                fe = int(o.gpufluid_outflow.frame_end)
+                if fs > fe:
+                    self.report({"ERROR"},
+                        f"Outflow '{o.name}' has frame_start ({fs}) > "
+                        f"frame_end ({fe}). Fix the range and re-bake.")
+                    return {"CANCELLED"}
+        if int(domain.gpufluid_domain.frames) <= 0:
+            self.report({"ERROR"},
+                f"Domain frames is {domain.gpufluid_domain.frames} — "
+                f"set it to a positive integer.")
+            return {"CANCELLED"}
+
         # Auto-fill empty cache_dir so the user gets a working bake on first
         # click even if they marked an existing Empty as Domain manually
         # (instead of using `Add Domain` which sets cache_dir for them).

@@ -364,7 +364,14 @@ def _preload_sequence(obj, cache_dir, pattern, origin, max_frames=None,
     return n_loaded
 
 
+@bpy.app.handlers.persistent
 def _frame_change_handler(scene, depsgraph=None):
+    # @persistent so Blender doesn't clear us on file-load. Without it,
+    # opening a .blend that has a previously-baked gpufluid_cache obj
+    # leaves the mesh frozen at whichever frame the file was saved on
+    # — scrubbing the timeline does nothing because no handler is
+    # registered to swap obj.data anymore. Live-found 2026-05-25
+    # (round-4 test #23 save/load).
     f = scene.frame_current
     visible_kinds = _domain_whitewater_visibility(scene)
     for obj in scene.objects:
@@ -431,28 +438,64 @@ def _frame_change_handler(scene, depsgraph=None):
                             f, obj.name, exc)
 
 
+@bpy.app.handlers.persistent
+def _on_load_post(_dummy):
+    """File-load recovery: wipe the stale _PRELOAD dict (its mesh pointers
+    refer to freed StructRNAs after .blend reload) and re-attach every
+    cache-bearing object using its saved custom props. Without this, a
+    saved-and-reopened scene shows the cache at exactly one frame
+    (the frame the file was saved on) and scrubbing does nothing —
+    live-found 2026-05-25 (round-4 test #23).
+    """
+    _PRELOAD.clear()
+    for obj in bpy.data.objects:
+        cache_dir = obj.get("gpufluid_cache_dir")
+        if not cache_dir or not os.path.isdir(str(cache_dir)):
+            continue
+        pattern = obj.get("gpufluid_cache_pattern", "mesh/frame_{:04d}.ply")
+        origin = list(obj.get("gpufluid_cache_origin", [0.0, 0.0, 0.0]))
+        dom_size = tuple(obj.get("gpufluid_cache_dom_size", [1.0, 1.0, 1.0]))
+        try:
+            _preload_sequence(obj, str(cache_dir), str(pattern),
+                              origin, dom_size=dom_size)
+        except Exception as exc:  # noqa: BLE001
+            _addon_logger.warning(
+                "cache_loader: load_post auto-reattach failed for '%s': %s",
+                obj.name, exc)
+
+
 def register_handler():
-    """Register frame_change handler and strip any orphans from past reloads.
+    """Register frame_change + load_post handlers and strip any orphans
+    from past reloads.
 
     When the addon is hot-reloaded (`del sys.modules[*]` then re-enable),
-    the OLD module's `_frame_change_handler` function object stays in
-    `bpy.app.handlers.frame_change_pre` referencing a dead module. Firing
-    it later either no-ops (handler reads None _PRELOAD) or in worst-case
+    the OLD module's handler function objects stay in
+    `bpy.app.handlers.*` referencing a dead module. Firing them later
+    either no-ops (handler reads None _PRELOAD) or in worst-case
     triggers a hard crash inside Blender's depsgraph when accessing freed
-    Python state. Strip every handler that *looks like ours* by name, then
-    install the fresh one.
+    Python state. Strip every handler that *looks like ours* by name,
+    then install the fresh ones.
     """
     bpy.app.handlers.frame_change_pre[:] = [
         h for h in bpy.app.handlers.frame_change_pre
         if getattr(h, "__name__", "") != "_frame_change_handler"
     ]
     bpy.app.handlers.frame_change_pre.append(_frame_change_handler)
+    bpy.app.handlers.load_post[:] = [
+        h for h in bpy.app.handlers.load_post
+        if getattr(h, "__name__", "") != "_on_load_post"
+    ]
+    bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister_handler():
     bpy.app.handlers.frame_change_pre[:] = [
         h for h in bpy.app.handlers.frame_change_pre
         if getattr(h, "__name__", "") != "_frame_change_handler"
+    ]
+    bpy.app.handlers.load_post[:] = [
+        h for h in bpy.app.handlers.load_post
+        if getattr(h, "__name__", "") != "_on_load_post"
     ]
 
 

@@ -50,10 +50,29 @@ class GPUFLUID_OT_add_domain(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# Single-role sticky: each mark op activates its own role and EXPLICITLY
+# clears the other three. Without this, double-marking (live-found
+# 2026-05-25 round-4 #23) leaves the object in an invalid is_obstacle=True
+# AND is_inflow=True state — the CLI then emits both `[[obstacle]]` and
+# `[[inflow]]` entries for the same mesh, which the solver mis-interprets
+# (solid surface that also emits particles into itself).
+_ROLE_FLAGS = (
+    ("gpufluid_fluid", "is_fluid"),
+    ("gpufluid_obstacle", "is_obstacle"),
+    ("gpufluid_inflow", "is_inflow"),
+    ("gpufluid_outflow", "is_outflow"),
+)
+
+
+def _set_single_role(obj, role_attr: str) -> None:
+    for grp, attr in _ROLE_FLAGS:
+        setattr(getattr(obj, grp), attr, attr == role_attr)
+
+
 class GPUFLUID_OT_mark_fluid(bpy.types.Operator):
     bl_idname = "gpufluid.mark_fluid"
     bl_label = "Mark as Fluid Source"
-    bl_description = "Mark the active object as a gpufluid source (uses its bounding box)"
+    bl_description = "Mark the active object as a gpufluid source (uses its bounding box). Clears obstacle/inflow/outflow roles."
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -61,14 +80,14 @@ class GPUFLUID_OT_mark_fluid(bpy.types.Operator):
         return context.active_object is not None
 
     def execute(self, context):
-        context.active_object.gpufluid_fluid.is_fluid = True
+        _set_single_role(context.active_object, "is_fluid")
         return {"FINISHED"}
 
 
 class GPUFLUID_OT_mark_obstacle(bpy.types.Operator):
     bl_idname = "gpufluid.mark_obstacle"
     bl_label = "Mark as Obstacle"
-    bl_description = "Mark the active object as a gpufluid obstacle"
+    bl_description = "Mark the active object as a gpufluid obstacle. Clears fluid/inflow/outflow roles."
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -76,31 +95,31 @@ class GPUFLUID_OT_mark_obstacle(bpy.types.Operator):
         return context.active_object is not None
 
     def execute(self, context):
-        context.active_object.gpufluid_obstacle.is_obstacle = True
+        _set_single_role(context.active_object, "is_obstacle")
         return {"FINISHED"}
 
 
 class GPUFLUID_OT_mark_inflow(bpy.types.Operator):
     bl_idname = "gpufluid.mark_inflow"
     bl_label = "Mark as Inflow"
-    bl_description = "Mark the active object as a continuous fluid emitter (uses its bounding box)"
+    bl_description = "Mark the active object as a continuous fluid emitter (uses its bounding box). Clears fluid/obstacle/outflow roles."
     bl_options = {"REGISTER", "UNDO"}
     @classmethod
     def poll(cls, context): return context.active_object is not None
     def execute(self, context):
-        context.active_object.gpufluid_inflow.is_inflow = True
+        _set_single_role(context.active_object, "is_inflow")
         return {"FINISHED"}
 
 
 class GPUFLUID_OT_mark_outflow(bpy.types.Operator):
     bl_idname = "gpufluid.mark_outflow"
     bl_label = "Mark as Outflow"
-    bl_description = "Mark the active object as a fluid drain (particles inside it are removed)"
+    bl_description = "Mark the active object as a fluid drain (particles inside it are removed). Clears fluid/obstacle/inflow roles."
     bl_options = {"REGISTER", "UNDO"}
     @classmethod
     def poll(cls, context): return context.active_object is not None
     def execute(self, context):
-        context.active_object.gpufluid_outflow.is_outflow = True
+        _set_single_role(context.active_object, "is_outflow")
         return {"FINISHED"}
 
 

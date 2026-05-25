@@ -34,7 +34,11 @@ if "bpy" not in sys.modules:
     # exercise the same import graph the real addon takes.
     fake_bpy = types.ModuleType("bpy")
     fake_bpy.app = types.SimpleNamespace(
-        handlers=types.SimpleNamespace(frame_change_pre=[])
+        handlers=types.SimpleNamespace(
+            frame_change_pre=[],
+            load_post=[],
+            persistent=lambda f: f,    # no-op decorator
+        )
     )
 
     class _FakeMeshes:
