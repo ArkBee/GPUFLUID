@@ -737,6 +737,34 @@ the UI to stop users from toggling a no-op flag. To unhide: wire an
 `_export_obj` call (the obstacle path already has one in `bake.py`) and
 emit `kind="mesh", path=..., scale=avg_inv` in the fluid_sources entry.
 
+### Render scene with real obstacles `risk:low value:user` — DEFERRED
+
+`examples/render_fluid_on_cube_eevee.py` hardcodes the staging scene: a
+unit cube + grey floor + fixed lighting. The CLI `gpufluid render` and
+the addon's `OT_render` (A8.13) both invoke it as the headless-render
+script, so what the user sees in the final PNG sequence is always
+"fluid on a cube" — even if the actual simulation had a flat plate
+(or sphere, or imported mesh) as the obstacle. Live-found during
+round-3 addon testing (2026-05-25): the splash *pattern* in the render
+correctly reflected the real obstacle's effect on the fluid, but the
+visible solid in the render did not match what the user placed in
+Blender.
+
+Two paths:
+
+* **(a) Parametrise the existing renderer** — accept `--obstacles
+  <scene.toml>` and at scene-build time read `[[obstacle]]` entries,
+  emitting a Blender primitive per entry (box/sphere/cylinder/plane/
+  mesh-import). Lowest delta; keeps the "lava on a cube" preset as the
+  default when no obstacles arg is passed.
+* **(b) New renderer** `render_fluid_with_obstacles_eevee.py` that owns
+  the obstacle-from-scene loading path, leaving the cube preset for
+  the lava demos that depend on it.
+
+Either way: A8.13's `OT_render` would gain a checkbox "match obstacles
+to simulation" defaulting to True; CLI gets a `--match-obstacles`
+flag for parity.
+
 ### B10. Alembic writer (I6.4) `risk:low value:user` — DEFERRED (no PyPI binding)
 
 USD already covers the Blender import path. Some studios prefer Alembic.
