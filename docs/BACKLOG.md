@@ -737,24 +737,19 @@ the UI to stop users from toggling a no-op flag. To unhide: wire an
 `_export_obj` call (the obstacle path already has one in `bake.py`) and
 emit `kind="mesh", path=..., scale=avg_inv` in the fluid_sources entry.
 
-### Renderer respects mesh Col attribute `risk:low value:user` — DEFERRED
+### Renderer respects mesh Col attribute — ✅ SHIPPED 2026-05-25
 
-Live-found 2026-05-25 (round-3 addon test): the bake pipeline correctly
-populates `mesh.color_attributes["Col"]` (FLOAT_COLOR, per-vertex) with
-the actual per-particle colours — verified at the mesh level with
-`mixbox` mode emitting visible red↔blue blending in the splash zone
-(195→237 mixed verts across frames). But the example renderer
-`examples/render_fluid_on_cube_eevee.py` builds its material from the
-`--color` CLI flag only and never wires an Attribute node, so the
-final PNG sequence shows a uniform colour regardless of what the per-
-vertex data contains. Mixbox / multi-source-colour demos look identical
-to a single-source bake in the rendered output.
+Was DEFERRED, then fixed same session (commit `9951f1a`). Three layers:
+* `render_bridge.FrameMeshLoader` now calls `read_ply(return_colors=True)`
+  and forwards the RGB into a new `Col` FLOAT_COLOR POINT attribute.
+* `rebuild_surface_mesh` gained an optional `colors=` kwarg that builds
+  the attribute layer (matches addon preload's name).
+* `examples/render_fluid_on_cube_eevee.py` adds Attribute("Col") + Mix
+  RGBA between `--color` and Principled BSDF Base Color; Factor =
+  Attribute.Alpha so missing Col falls back to `--color` automatically.
 
-Fix: in the example renderer's material setup, add an Attribute node
-(`type='GEOMETRY'`, `attribute_type='GEOMETRY'`, `attribute_name='Col'`)
-feeding `base_color`, with a mix-by-factor fallback to `--color` when
-the mesh has no Col layer (e.g. obstacle-only previews). Adds 6-8 lines
-to the renderer; no addon changes needed.
+Visual proof: multi-source mixbox bake renders with clear red↔blue
+regions + purple mix boundary (pre-fix: flat uniform grey).
 
 ### Render scene with real obstacles `risk:low value:user` — DEFERRED
 
