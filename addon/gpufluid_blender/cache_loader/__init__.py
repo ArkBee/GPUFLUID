@@ -374,17 +374,13 @@ def _frame_change_handler(scene, depsgraph=None):
     # (round-4 test #23 save/load).
     f = scene.frame_current
     visible_kinds = _domain_whitewater_visibility(scene)
-    # Round-7: prune stale _PRELOAD keys whose objects are gone from
-    # the scene (Ctrl+Z deleted them, user moved to another scene, etc.).
-    # Without this each delete-rebake cycle would orphan a ~200 KB dict
-    # entry + N mesh datablocks with users==0. Cheap O(K) check where
-    # K=preload_cap=8 by default.
-    if _PRELOAD:
-        live_names = {o.name for o in scene.objects}
-        stale = [k for k in _PRELOAD.keys() if k not in live_names]
-        for k in stale:
-            _free_table(_PRELOAD[k])
-            del _PRELOAD[k]
+    # Round-8 reviewer flag #5: round-7 added stale-key prune here, but
+    # it builds `{o.name for o in scene.objects}` on EVERY frame_change.
+    # For a 5000-object production scene + 24fps playback that's 120k
+    # set-insertions/sec just to defend a corner case. Moved to
+    # `_prune_stale()` which is called from OT_detach, OT_clear, and
+    # _on_load_post — the only paths that legitimately invalidate
+    # _PRELOAD keys behind our back. Hot frame loop now skips it.
     for obj in scene.objects:
         # Cache loading only applies to mesh objects. The Domain Empty also
         # carries a `gpufluid_cache_dir` custom prop (for the bake operator's
@@ -449,6 +445,24 @@ def _frame_change_handler(scene, depsgraph=None):
                             f, obj.name, exc)
 
 
+def _prune_stale(scene=None):
+    """Drop _PRELOAD entries whose obj.name no longer exists in any scene.
+    Call from detach/clear ops and load_post — paths that legitimately
+    invalidate keys. NOT from frame_change (too hot)."""
+    if not _PRELOAD:
+        return
+    live_names = set()
+    if scene is not None:
+        live_names = {o.name for o in scene.objects}
+    else:
+        for s in bpy.data.scenes:
+            live_names.update(o.name for o in s.objects)
+    stale = [k for k in _PRELOAD.keys() if k not in live_names]
+    for k in stale:
+        _free_table(_PRELOAD[k])
+        del _PRELOAD[k]
+
+
 @bpy.app.handlers.persistent
 def _on_load_post(_dummy):
     """File-load recovery: wipe the stale _PRELOAD dict (its mesh pointers
@@ -459,6 +473,8 @@ def _on_load_post(_dummy):
     live-found 2026-05-25 (round-4 test #23).
     """
     _PRELOAD.clear()
+    # _prune_stale not needed after clear, but pattern: any path that
+    # invalidates obj→table mapping should ensure the dict is sane.
     for obj in bpy.data.objects:
         cache_dir = obj.get("gpufluid_cache_dir")
         if not cache_dir or not os.path.isdir(str(cache_dir)):

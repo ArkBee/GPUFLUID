@@ -289,7 +289,13 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
         context.workspace.status_text_set(None)
+        # Round-8 reviewer flag #6: bake._abort cleans all three instance
+        # attrs (_proc, _stdout_q, _stdout_thread) after round-7. Render
+        # only cleared _proc — drift from the symmetric contract. Same
+        # re-fire-modal-on-same-instance hazard, fix the same way.
         self._proc = None
+        self._stdout_q = None
+        self._stdout_thread = None
         self.report({"WARNING"}, f"gpufluid render aborted ({reason})")
         return {"CANCELLED"}
 

@@ -520,11 +520,26 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             return {"FINISHED"}
 
         # ─── MODAL PATH ───────────────────────────────────────────────
-        self._proc = subprocess.Popen(
-            [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=1, text=True, encoding="utf-8", errors="replace",
-        )
+        # Round-8 reviewer flag: bug #1. _is_running was set True above
+        # for both sync + modal paths. Sync's try/finally cleared it.
+        # The modal Popen below had NO try/except OSError, so if interp
+        # vanished between Path(interp).exists() check (line ~342) and
+        # this spawn (race with antivirus/network drive/venv cleanup),
+        # OSError propagated and _is_running stayed True forever — every
+        # subsequent OT_bake reported "already running" until Blender
+        # restart. OT_render already had this guard at render.py:226-235;
+        # bake didn't.
+        try:
+            self._proc = subprocess.Popen(
+                [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=1, text=True, encoding="utf-8", errors="replace",
+            )
+        except OSError as e:
+            GPUFLUID_OT_bake._is_running = False
+            self.report({"ERROR"},
+                        f"could not spawn bake subprocess: {e}")
+            return {"CANCELLED"}
         # Drain stdout in a background thread → queue, so modal() never
         # blocks on readline() (which freezes Blender UI when the subprocess
         # spends time silently, e.g. inside a nested Blender headless run

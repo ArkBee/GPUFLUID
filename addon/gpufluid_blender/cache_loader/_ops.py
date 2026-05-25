@@ -17,6 +17,7 @@ from . import (
     _free_table,
     _frame_change_handler,
     _preload_sequence,
+    _prune_stale,
 )
 
 
@@ -269,5 +270,8 @@ class GPUFLUID_OT_detach_cache(bpy.types.Operator):
             if o.name in _PRELOAD:
                 _free_table(_PRELOAD[o.name])
                 del _PRELOAD[o.name]
+        # Round-8: also sweep stale _PRELOAD entries (objects that may
+        # have been removed from the scene since last attach).
+        _prune_stale(context.scene)
         self.report({"INFO"}, f"detached cache from {n_cleaned} object(s)")
         return {"FINISHED"}
