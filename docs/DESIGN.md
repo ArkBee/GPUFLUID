@@ -469,8 +469,44 @@ mutates arrays out.
 | S2.15   | Per-particle color attribute (RGB), P2G/G2P transfer         | impl |
 | S2.18   | Per-particle scalar attribute (temperature), P2G/G2P transfer | impl |
 | S2.11.GPU | Reseed particles fully on GPU (count → rank → compact → emit) | impl |
+| S2.17   | MPM contact/inflow auxiliaries (rigid-body shell-out helpers) | —    |
+| S2.17.1 |   SDF box collider on grid (separate-surface near boundary, zero deep interior, optional tangential friction on a chosen face) | impl |
+| S2.17.2 |   Particle pushback inside cube body (snap to nearest face + F/C reset) | impl |
+| S2.17.3 |   Particle pushback at domain walls (slip-clamp + F/C reset)  | impl |
+| S2.17.4 |   Terminal-velocity cap in narrow tap zone (mimics air drag on laminar stream) | impl |
+| S2.17.5 |   Anti-splash `|v_z|` cap above cube top (suppresses APIC stress-launch artifacts at rigid edges) | impl |
+| S2.17.6 |   Active-only PLY save (filters `particle_selection==1`)      | impl |
+| S2.17.PATCH.SLIP | Overlay fix for warp-mpm `add_surface_collider` slip-branch bug (was overwriting projected `v` with zero at end of kernel) | impl |
+| S2.17.PATCH.EOS  | Overlay J floor on `kirchoff_stress_water` (J_safe = max(J, 0.5)) — caps unbounded pressure spike when fluid is numerically overcompressed at a rigid collider | impl |
 
-### 5.3 D4.3.GPU.BVH — BVH-accelerated mesh-inside test
+### 5.3 S2.17 — MPM contact / inflow auxiliaries
+
+Bundle of small kernels that make a third-party MPM solver (currently
+[zeshunzong/warp-mpm](https://github.com/zeshunzong/warp-mpm), see F3.7)
+behave well when fluid hits a rigid cube and forms a floor pool. These
+are NOT part of any MPM scheme paper; they are numerical safety nets
+for known failure modes at rigid-collider boundaries:
+
+| Sub-block | Failure mode it fixes | Approach |
+|-----------|----------------------|----------|
+| S2.17.1 | Particles compressed in cube interior → stress explosion | Zero grid velocity deep inside; project only inward-normal component in a 1.5-cell shell; optional tangential friction on the chosen face (e.g. cube top → accumulation behavior) |
+| S2.17.2 | P2G smoothing leaks particles into the cube body → mass accumulation → NaN | Pre- and post-P2G snap to nearest face; reset F/F_trial/C to identity (rigid contact history is ill-defined; standard production MPM trick) |
+| S2.17.3 | Particle escapes [0, n_grid·dx]³ → CUDA OOB on next P2G | Slip-clamp at safe interior `[0.05, 0.95]³`; zero normal velocity, preserve tangential; F/C reset on contact |
+| S2.17.4 | Free-falling tap arrives at cube top with 2-3 m/s → splash | Cap `v_z ≥ v_terminal` (e.g. −1.0 m/s) inside a narrow tap column above the cube; off the column, particles fall freely |
+| S2.17.5 | APIC's velocity-gradient C-matrix at the discontinuous cube edge transfers downward momentum into upward "fountains" | Hard clamp `|v_z| ≤ v_splash_max` (e.g. 0.3 m/s) above the cube; physically: real water cannot bounce upward at >0.3 m/s without a hydraulic jump |
+| S2.17.6 | Killed/inactive particles (selection=1) clutter the PLY dump and produce visible "ghost piles" in renders | Write only particles with `selection==0`. Mesh visualisation reads the filtered dump |
+| S2.17.PATCH.SLIP | `add_surface_collider(surface="slip")` in upstream warp-mpm computes projected `v` correctly then overwrites with `wp.vec3(0,0,0)` on the last line of the kernel (`mpm_solver_warp.py:707` of `warp-mpm@v1.0`) | Replace the final write with `state.grid_v_out[...] = v` (the computed projection). Without this, "slip" behaves identical to "sticky" |
+| S2.17.PATCH.EOS | `kirchoff_stress_water` uses `J^{-1.1}` which → +∞ when fluid is compressed (J → 0) at a rigid wall. One overcompressed particle launches the rest of the local pool. | Clamp `J_safe = max(J, 0.5)` before the pow. Compression beyond 50% is unphysical for weakly-compressible water; this just bounds the artifact |
+
+All S2.17.* kernels are pure Warp launchers, no global state. The full
+F3.7 step pipeline is responsible for invoking them in the correct
+order (see §6.7 below). The two `PATCH.*` entries live as runtime
+overlay patches applied at `F3.7` import time — we do not maintain a
+fork of warp-mpm, just monkey-patch the two kernels via Warp's module
+re-compilation hook. This way upgrading warp-mpm requires only
+re-applying the two patches, not merging a fork.
+
+### 5.4 D4.3.GPU.BVH — BVH-accelerated mesh-inside test
 
 Replaces the O(cells × tris) brute-force ray-cast (`D4.3.GPU`) with a
 single `wp.mesh_query_point_sign_winding_number(mesh.id, p, accuracy)`
@@ -585,6 +621,37 @@ Owns state arrays, runs the per-step pipeline by calling S2.x in order.
 | F3.3  | `step(dt, pressure_iters)` pipeline (calls S2.1..S2.9)         | impl |
 | F3.4  | `step_cfl(target_dt)` with substepping                         | planned |
 | F3.5  | Restart / checkpoint state                                     | planned |
+| F3.7  | `MpmSolver` shell-out adapter around third-party warp-mpm      | impl |
+| F3.7.1 | Init: load TOML scene, build particle cloud, configure water EOS + colliders | impl |
+| F3.7.2 | Per-step pipeline: pre-pushback → tap-cap → p2g2p → post-pushback → dump | impl |
+| F3.7.3 | Patch overlay: applies S2.17.PATCH.SLIP and S2.17.PATCH.EOS at import time | impl |
+
+### 6.7 F3.7 — MPM solver shell-out
+
+Alternate solver path. The FLIP/APIC class (F3.1..F3.3) cannot resolve
+lateral spread when a vertical water column hits a flat rigid plate —
+pressure projection alone does not generate the necessary in-plane
+forces (documented incident, see [memory: project-mpm-pivot]). F3.7
+delegates the timestep to the GPU MLS-MPM solver in
+`third_party/warp-mpm/`, wrapped in `gpufluid.sim.mpm.solver:MpmSolver`.
+
+Pipeline per call to `MpmSolver.step()`:
+
+```
+pre_step:  S2.17.2 cube_pushback     (snap any particles already inside cube out)
+           S2.17.3 wall_pushback     (slip-clamp escapees, if any)
+           S2.17.4 tap_velocity_cap  (laminar inflow + above-cube anti-splash)
+core:      warp_mpm.p2g2p(dt)        (the third-party solver, patches S2.17.PATCH.* active)
+post_step: S2.17.2 cube_pushback     (catch G2P-induced cube leakage)
+           S2.17.3 wall_pushback     (catch G2P-induced wall escape)
+```
+
+`MpmSolver` is **not** a drop-in replacement for `FlipSolver3D`. The
+output is particle positions only (no MAC velocity field); the mesher
+(M5.11) and the cache writer (I6.5) consume positions directly. Coupling
+with FLIP/APIC stages is not planned.
+
+The TOML scene config (C7.1) gets a new top-level key `[simulation].solver = "mpm" | "flip"` that the CLI bake (C7.2) inspects to pick between F3.2 and F3.7. Default is "flip" so existing scenes are not affected.
 
 The pipeline order in F3.3 is fixed:
 
@@ -593,6 +660,54 @@ clear_grid → P2G(S2.1) → normalize(S2.2) → gravity(S2.3) → bc(S2.4)
   → divergence(S2.5) → pressure(S2.6) → grad_subtract(S2.7) → bc(S2.4)
   → G2P_advect(S2.8 + S2.9)
 ```
+
+### 6.7.1 Coordinate system convention (MPM path)
+
+The MPM solver and the marching-cubes mesher both operate in a **fixed
+unit cube `[0, 1]³`**. The user, however, authors scenes in world metres
+inside Blender — the Domain Empty has an arbitrary world AABB. Mapping
+between those spaces happens at two ring boundaries, both of which the
+addon owns:
+
+**Input (Blender → solver) — `bake.collect_scene`:**
+
+For every position, AABB, half-extent, velocity, and gravity that the
+solver consumes, the addon applies
+
+```
+v_sim = (v_world − domain.origin) / domain.size
+```
+
+componentwise (anisotropic domains supported). `domain.origin` is the
+world-space lower corner of the Domain Empty's AABB; `domain.size` is
+the world-space extent. Gravity is in m/s² and divided by
+`domain.size_z` so a particle covers real metres in real time inside the
+solver's `[0, 1]³`. Without this division, water in a 2.32 m domain
+falls 2.32× too fast (one of the visual "tells" before this layer was
+written).
+
+**Output (solver → Blender) — `cache_loader._preload_sequence`:**
+
+The mesher writes PLY vertices in `[0, 1]³`. The addon's attach step
+reverses the transform when populating each preloaded mesh datablock:
+
+```
+v_world = v_sim * domain.size + domain.origin
+```
+
+baked directly into the vertex array. The `gpufluid_cache` object then
+sits at world `(0, 0, 0)` with identity scale — what you see in the
+viewport is what's in the mesh data, no per-frame transform tricks.
+
+This is symmetric: the same `(domain.origin, domain.size)` pair is used
+on the way in and the way out, so the rendered fluid lines up with the
+Inflow/Fluid sources the user placed in the scene to within a cell.
+
+Solver-internal constants (`MpmDomainWalls.lo/hi`, anti-splash z, tap
+geometry, etc.) are all expressed in `[0, 1]` because they only ever
+see the normalised space. Material parameters (`bulk_modulus`,
+`density`, `rpic_damping`, `grid_v_damping_scale`) are dimensionless or
+in normalised units after the gravity / velocity scaling above.
 
 ---
 
@@ -725,16 +840,709 @@ Particles → triangle surface mesh per frame.
 
 | ID    | Block | Status |
 |-------|-------|--------|
-| M5.1  | Particle density grid scatter                                | impl |
-| M5.2  | Density grid smoothing (box-blur N passes)                   | impl |
-| M5.3  | Marching cubes (skimage, CPU)                                | impl |
-| M5.4  | Marching cubes on Warp (GPU port)                            | planned |
-| M5.5  | Taubin / Laplacian mesh smoothing                            | planned |
-| M5.6  | Mesh decimation                                              | planned |
+| M5.1  | Particle density grid scatter (isotropic, trilinear, atomic)  | impl |
+| M5.2  | Density grid smoothing (box-blur N passes)                    | impl |
+| M5.3  | Marching cubes (skimage, CPU)                                 | impl |
+| M5.4  | Marching cubes on Warp (GPU port)                             | impl |
+| M5.5  | Taubin / Laplacian mesh smoothing                             | impl |
+| M5.6  | Mesh decimation                                               | impl |
+| M5.7  | GPU wall-mask kernel (zero density within margin cells)       | impl |
+| M5.8  | Yu-Turk anisotropic kernel surface reconstruction             | eval, deferred |
+| M5.9  | Wider cubic kernel particle scatter (isotropic, opt-in)       | impl |
+| M5.10 | Akinci adaptive cubic kernel (per-particle R via neighbour count) | planned |
+| M5.11 | Bridson SDF surface reconstruction (signed-distance from particle cloud) | planned |
 
 ---
 
-## 9. Layer I6 — I/O
+### 8.3 M5.9 — Wider cubic kernel particle scatter
+
+**Discovered as B13.8 fallout (2026-05-17):** evaluating Yu-Turk on real
+step30 water bake data showed the **dominant** surface-quality win came
+from the wider cubic kernel, **not** from the anisotropic ellipsoid
+shape. CPU eval at frame 200 of step30 (96³, 26733 particles, iso=0.2):
+
+| Kernel                              | Mesh CC count |
+|-------------------------------------|---------------|
+| M5.1 trilinear (current default)    | 5942          |
+| Yu-Turk forced-isotropic (k_r=1)    | 205 (29× less)|
+| Yu-Turk anisotropic k_r=4 (default) | 227           |
+| Yu-Turk anisotropic k_r=8           | 242           |
+
+The isotropic→anisotropic shape change moved the needle by ≤10%; the
+M5.1→isotropic kernel change moved it by 29×. So M5.9 ships the **cheap
+part** (isotropic cubic scatter, ~30 lines of Warp) standalone, deferring
+the SVD/covariance machinery of M5.8 until / unless a use case actually
+needs the shape information.
+
+#### Algorithm
+
+For each particle `p_i` at world position `x_i`:
+
+1. Determine support radius `r_world = radius_cells * dx` (default
+   `radius_cells = 2.0` cells, so support ≈ 2 voxels).
+2. Compute AABB: `[x_i - r_world, x_i + r_world]` in grid index space,
+   clipped to `[0, n)`.
+3. For each cell `c` in AABB at cell-centre `x_c = (c + 0.5) * dx`:
+     `r_sq = ||x_c - x_i||² / r_world²`
+     if `r_sq < 1`: `density[c] += (1 - r_sq)³` (Müller-style cubic kernel)
+4. Atomic-add into the M5.2 density field. M5.4 MC runs unchanged on
+   the result.
+
+No neighbour search, no eigendecomposition, no fallback paths. The
+kernel is a fixed-radius sphere with cubic falloff — uniform across
+all particles. Mass per particle (integral of cubic kernel over its
+3D support) is a fixed constant ≈ `0.21 * 4π/3 * r_world³`, so any iso
+threshold tuned for M5.1 needs re-tuning for M5.9 (cubic kernel
+concentrates mass differently than the trilinear delta).
+
+#### Sub-blocks
+
+| Sub-ID  | Role                                                   |
+|---------|--------------------------------------------------------|
+| M5.9.1  | Cubic scatter Warp kernel (per-particle AABB iter)     |
+| M5.9.H  | Host wrapper integrated into `MeshExtractor` as a
+           `mesh_method = "cubic"` opt-in (default stays M5.1)  |
+
+#### Config knob
+
+In `[output]` section of scene TOML:
+
+```toml
+mesh_method = "cubic"          # default: "trilinear" (M5.1)
+cubic_radius_cells = 2.0       # support radius in cells
+```
+
+Defaults chosen so a scene that doesn't set `mesh_method` is byte-for-
+byte unchanged. `mesh_method = "cubic"` swaps M5.1 for M5.9 in the
+`MeshExtractor._scatter()` call.
+
+#### Cost expectations
+
+Per-particle: AABB is `(2*r+1)³` cells ≈ `5³ = 125` cells at default
+`radius_cells = 2.0`. Each cell does one cubic-falloff evaluation +
+one atomic add. For 50k particles at 96³: 6.25M atomic_add → estimated
+**3-6 ms per frame** on RTX 4080 SUPER (M5.1 trilinear is ~1 ms for
+the same particle count; the 5× ratio matches the AABB cell-count
+ratio 125/8). 
+
+At 192³ / 500k: ~50-100 ms per frame. Still bake-able, no longer
+realtime.
+
+#### Acceptance criteria
+
+1. **Parity with CPU reference.** GPU output matches `cubic_isotropic_density_cpu`
+   from `gpufluid/meshing/cubic_ref.py` element-wise to fp32 precision
+   on 1k random particles. Test: `tests/test_m5_9_gpu_cpu_parity.py`.
+
+2. **Demo30 surface quality.** Frame 200 of the step30 water bake
+   meshed with M5.9 produces ≤ 300 connected components (down from
+   ~6000 with M5.1). Test: `tests/test_m5_9_demo30_cc_count.py`.
+
+3. **No regression on existing scenes.** All scenes that omit
+   `mesh_method` produce bit-identical output to before. Test:
+   `tests/test_m5_9_default_is_m5_1.py` runs an existing test scene
+   with default config and asserts mesh hash unchanged.
+
+4. **Performance budget.** Per-frame meshing time at 96³ / 50k
+   particles ≤ 10 ms. Test: `tests/test_m5_9_perf_budget.py`
+   (marked `slow`).
+
+#### What this does NOT do
+
+* Does not produce a continuous **mid-air** stream for sparse particles
+  spaced > 2 cells apart — that's a fundamental kernel-reach limit
+  (B14 reach = 2 cells, beyond that gaps remain). Akinci 2012
+  adaptive sampling (kernel widens in sparse regions) is the next
+  step for that, tracked separately as future work.
+* Does not give "production water" surface smoothness — for a truly
+  smooth water look you still need either Bridson SDF (next-tier
+  algorithm) or aggressive `mesh_smooth_passes` (we already proved
+  with `mesh_smooth_passes = 20` that Taubin smoothing alone gives
+  ~80% of the way to water-looking surface).
+* Does not implement Yu-Turk anisotropic shape — that's M5.8, left
+  on the shelf as evaluated-and-deferred.
+
+#### Risk
+
+* **Iso threshold needs re-tuning.** M5.1 trilinear and M5.9 cubic
+  have different integral mass per particle (~8× different) and
+  different peak density. Existing iso thresholds in TOML scenes are
+  tuned for M5.1 and will need to be raised by ~5-10× for M5.9. The
+  default `iso_level = 0.2` should become `iso_level = 1.5-2.0` for
+  M5.9. Migration note in BACKLOG.md B14.4.
+* **Atomic contention.** 6× more atomic adds than M5.1. We've already
+  shown this is fine at 50k particles, but at 500k particles the
+  atomic-add throughput may become the meshing bottleneck. M5.9.1
+  GPU bench (B14.4) will measure this.
+
+---
+
+### 8.4 M5.10 — Akinci adaptive cubic kernel
+
+**Reference:** Adams, Pauly, Keiser, Guibas 2007 *Adaptively Sampled
+Particle Fluids* (SIGGRAPH); Akinci/Solenthaler-line follow-ups on
+SPH adaptive sampling. The specific "per-particle kernel radius from
+local neighbour count" formulation we use here.
+
+#### Why this fix
+
+M5.9 ships a wider cubic kernel of **fixed** radius (default 2 cells).
+B14.3 / B14.6 demo30 evaluation (2026-05-17) showed M5.9 gives a
+visibly smooth surface on the **cube** and the **pool** — but the
+**mid-air column** between emitter and cube remains broken. The
+diagnostic histogram (frame 200, cubic R=2, iso=0.8) shows a
+**17 cm empty band** in mid-air vertex y-positions: mesh exists near
+the emitter, mesh exists near the cube, **nothing in between**. Cause:
+gravity accelerates the falling particles → particle spacing in mid-air
+grows from ~1 cell (top) to ~3-4 cells (bottom) → fixed R=2 cell kernel
+can't bridge that.
+
+Two pivots we tried and rejected:
+
+* **Brute-force R=4 + iso=6** (B14.3 retrospect, 2026-05-18). Mid-air
+  column appears but cube becomes a **gel-cube** — surface inflates
+  everywhere, no separation between "stream" and "pool".
+* **Brute-force rate=30k + R=4 + iso=6** (Option A retro 2026-05-18).
+  Same gel-cube failure mode, worse — entire cube engulfed in one
+  cohesive blob.
+
+The lesson: **a single radius can't be right for both regions**. The
+mid-air column needs *wider* kernel to bridge sparse particles; the
+cube/pool needs *narrower* kernel to stay sharp. **Per-particle
+adaptive radius** is the only way to satisfy both simultaneously.
+
+#### Algorithm
+
+For each particle `p_i`:
+
+1. **Neighbour count.** Use `wp.HashGrid` (reuse the per-frame one
+   built by W7.7 or build a dedicated one) to count
+   `n_i = | { p_j : ||p_j - p_i|| < base_radius_world } |`.
+
+2. **Adaptive radius.** Compute
+     `R_i = base_radius_cells × (n_target / n_i)^(1/3)`
+   * `n_target` is the desired neighbour count for a "well-supported"
+     particle (default 30 — matches Akinci/Adams reference scenes;
+     n_target tuned empirically for our 96³ regime).
+   * Cube-root exponent because volume scales as R³: doubling R for
+     a particle gives it 8× the support volume → 8× more neighbours
+     in expectation.
+   * Clamp R_i to `[R_min, R_max]` (defaults `[base_R, 4·base_R]`) so
+     dense regions don't shrink below the resolution floor and sparse
+     regions don't extend past sensible bounds.
+
+3. **Per-particle scatter.** Each particle scatters its cubic kernel
+   with its own `R_i` into the density grid (same kernel form as
+   M5.9.1, only the radius is now per-particle).
+
+The output is the same `density: wp.array3d(dtype=float)` that M5.2
+smooths and M5.4 meshes. **M5.2 / M5.4 / M5.5 / M5.6 unchanged.** Only
+M5.9.1's `k_cubic_scatter` (or its M5.10 sibling) needs the per-particle
+radius input.
+
+#### Sub-blocks
+
+| Sub-ID   | Role                                                        |
+|----------|-------------------------------------------------------------|
+| M5.10.1  | `wp.HashGrid` build + per-particle neighbour-count kernel   |
+| M5.10.2  | Per-particle adaptive radius kernel (cube-root scaling + clamp) |
+| M5.10.3  | Cubic scatter with per-particle radius (variant of M5.9.1)  |
+| M5.10.H  | Host wrapper, `mesh_method = "adaptive_cubic"` opt-in       |
+
+All sub-blocks are device-resident; no D→H syncs introduced.
+
+#### Config knobs
+
+In `[output]` section of scene TOML:
+
+```toml
+mesh_method = "adaptive_cubic"   # default stays "trilinear" (M5.1)
+adaptive_base_cells = 2.0        # base R, same as M5.9
+adaptive_n_target = 30           # target neighbours (Akinci default)
+adaptive_R_max_factor = 4.0      # clamp: R_i ≤ R_max_factor * adaptive_base_cells
+adaptive_R_min_factor = 1.0      # clamp: R_i ≥ R_min_factor * adaptive_base_cells
+```
+
+Hashgrid cell size is set internally to `R_max = R_max_factor * base_R`
+so neighbour queries see all potential contributors.
+
+#### Cost expectations
+
+For 50k particles at 96³, per frame:
+
+* HashGrid build: ~1 ms (same pattern as W7.7).
+* Neighbour count: per-particle queries hashgrid with `R_max` radius,
+  yields ~50-100 neighbours per query → ~5-10M memory reads,
+  **~2-4 ms**.
+* Adaptive R compute: trivial per-particle math, **<0.5 ms**.
+* Per-particle scatter: same atomic-add pattern as M5.9 but with
+  per-particle AABB size. Average AABB now larger because some
+  particles have R_i > base_R. Estimate **2-3× M5.9 cost = ~15-30 ms**.
+
+**Total realistic budget: 20-40 ms per frame at 96³ / 50k.** Sim is
+unaffected. At our 600-frame bake, M5.10 adds ~10-20 s to the total
+bake compared to M5.9 — still acceptable for offline rendering.
+
+#### Acceptance criteria
+
+1. **Mid-air column visible.** Demo30 frame 200 baked with M5.10
+   produces a continuous mid-air mesh column between emitter
+   (y=0.95) and cube top (y=0.55). Quantified: the 17 cm "empty
+   band" gap (B14.3 baseline) shrinks to ≤ 5 cm. Test:
+   `tests/test_m5_10_demo30_midair_gap.py`.
+
+2. **Cube + pool surface unchanged.** Demo30 frame 200's vertex
+   distribution in `y < 0.55` (cube + pool) is within 20% of the
+   M5.9 baseline (vertex count, surface area). Test:
+   `tests/test_m5_10_no_pool_regression.py`. Acceptance: the
+   adaptive kernel must NOT inflate cube/pool surfaces (the
+   "gel-cube" failure mode that brute-force R=4 produced).
+
+3. **GPU/CPU parity.** `cubic_adaptive_density_cpu` reference matches
+   GPU output to fp32. Test: `tests/test_m5_10_gpu_cpu_parity.py`.
+
+4. **Determinism.** Same input → same output (atomic-add commutes on
+   floats up to fp32 noise). Test:
+   `tests/test_m5_10_deterministic.py`.
+
+5. **Default unchanged.** Scenes that omit `mesh_method` produce
+   bit-identical output to M5.1. Test (extend existing
+   `test_m5_9_default_is_m5_1.py`).
+
+6. **Visual on demo30.** Test-render at frame 200 shows a visible
+   smooth column from emitter to cube. Manual inspection, anchor
+   PNG committed under `docs/images/m5_10_before_after/`.
+
+#### What this does NOT do
+
+* Does not produce *production-quality* smoothness on the surface — the
+  ellipsoid bumps stay. SDF-based reconstruction (Bridson 2007) is
+  still the next-tier upgrade after this; tracked separately.
+* Does not solve the **flux mismatch** in demo30 (we still emit ~1 L/s
+  on a 30 cm cube). Scene-design TOML pass needed in parallel; not
+  blocking on M5.10.
+* Does not add whitewater spray/foam — W7.x is a separate system.
+
+#### Risk
+
+* **Hashgrid cell-size mismatch.** If `R_max_factor` increases the
+  required hashgrid cell size beyond what W7.7 uses, we cannot reuse
+  W7.7's hashgrid — need our own. Solved by always building a
+  dedicated hashgrid sized for `R_max` (cost: ~1 ms cold per frame).
+* **Per-particle AABB variance.** Particles in sparse zones get large
+  AABBs (up to ~10³ = 1000 cells). This is fine on average but creates
+  load imbalance across GPU threads. Mitigated by Warp's per-particle
+  parallelism — slow particles don't block fast ones, just shift the
+  tail latency.
+* **Adaptive R-range tuning.** `n_target`, `R_min_factor`, `R_max_factor`
+  are scene-dependent. Defaults from Akinci/Adams are reasonable but
+  may need per-scene tuning. Documented as known limitation; if it
+  becomes a pain point, add a `--mesh-method-auto-tune` pass that
+  measures the per-particle n_i distribution and suggests defaults.
+
+---
+
+### 8.5 M5.11 — Bridson SDF surface reconstruction
+
+**Reference:** Bridson 2007 *Fluid Simulation for Computer Graphics*
+§5.4 (surface reconstruction); Bridson 2008 SIGGRAPH course "Fluid
+Simulation" notes. Adapted for per-cell signed-distance computation
+on a regular grid using `wp.HashGrid` for neighbour queries.
+
+#### Why this fix and why not another
+
+M5.1, M5.9, M5.10 all belong to the **same algorithm class**:
+*density-then-MC*. Each particle deposits "mass" into a kernel, the
+sum of all particle kernels gives a density field, marching cubes
+extracts an iso-contour. This class has **fundamental visual limits**:
+
+* Surface is intrinsically **bumpy**: it's a level set of summed
+  kernels, so individual particle bumps always show.
+* Thin features get **chunky or vanish**: a single-particle-wide
+  stream is a single kernel sphere, not a smooth thin tube.
+* Reduces to a parameter chase: M5.10 adaptive vs M5.9 vs heavy
+  smoothing all trade off "fragmented" vs "gel-cube" without
+  delivering a clean **production-water look**.
+
+The B14.6 / B15.x demo30 evaluations made this concrete: at 96³ and
+192³, with cubic and adaptive cubic kernels, with smoothing tuned from
+0 to 20 passes, the *best* result is still "water tower of bumps on
+cube" — never a thin smooth laminar line.
+
+**Bridson SDF is a different algorithm class.** Each cell stores
+**`phi = distance(cell, nearest_particle) - particle_radius`**, then
+MC at `level = 0`. The surface is the union of particle-spheres,
+*by construction smooth*: every contour is at a fixed distance from
+the nearest particle, so isolated particles paint clean spheres,
+overlapping particles form clean fillets, and the resulting mesh
+has the surface area of a real geometric union of spheres — not the
+sum of kernel bumps.
+
+Houdini, Mantaflow, RealFlow all use SDF reconstruction (often with
+extensions like Akinci/Yu-Turk anisotropic SDF). This is the
+production-tier algorithm.
+
+#### Algorithm
+
+For each cell `c` at world position `x_c`:
+
+1. **Nearest particle search.** Query `wp.HashGrid` for particles
+   within `search_radius_world = search_cells * dx`. Compute squared
+   distance to each, track the minimum.
+2. **Signed distance.** Let `d_min` be the nearest distance.
+     `phi(c) = d_min - particle_radius_world`
+   * Inside-particle cells get negative phi.
+   * Outside-but-near-particle cells get positive phi.
+   * Cells with no particle within `search_radius` get
+     `phi = +search_radius` (positive sentinel — they're outside).
+
+3. **Mean-curvature smoothing** (optional but recommended). Apply a
+   few box-blur passes (M5.2 kernel reused) directly on `phi`. This
+   smooths the level set without changing topology — fixes
+   particle-radius discretisation artefacts at near-contact between
+   sphere boundaries.
+
+4. **Marching cubes at level 0.** MC threshold = 0 (instead of a
+   positive iso). Cells with `phi < 0` are inside fluid; cells with
+   `phi > 0` are outside; the mesh tracks the `phi = 0` contour.
+
+The output is a `phi: wp.array3d(dtype=float)` field — same shape as
+M5.1's density field — but the MC threshold semantic flips. M5.2 box-
+blur reuses unchanged (smoothing a SDF gives a smoothed SDF). M5.4 GPU
+MC reuses with threshold=0. M5.5 mesh smoothing + M5.6 decimate
+unchanged.
+
+#### Sub-blocks
+
+| Sub-ID   | Role                                                          |
+|----------|---------------------------------------------------------------|
+| M5.11.1  | `wp.HashGrid` build sized for `search_radius_cells`           |
+| M5.11.2  | Per-cell SDF compute kernel (nearest-particle distance)        |
+| M5.11.3  | SDF smoothing (level-set Laplacian, reuses M5.2 box-blur)      |
+| M5.11.H  | Host wrapper, `mesh_method = "sdf"` opt-in                    |
+
+All device-resident; no D→H syncs introduced.
+
+#### Config knobs
+
+In `[output]` section of scene TOML:
+
+```toml
+mesh_method = "sdf"                     # default stays "trilinear" (M5.1)
+sdf_particle_radius_cells = 1.0         # radius per particle in cells
+sdf_search_radius_cells = 4.0           # how far to look for nearest particle
+sdf_smooth_passes = 2                   # box-blur passes on phi
+```
+
+`iso_level` is **ignored** when `mesh_method = "sdf"` — MC threshold is
+hardcoded to 0 (the SDF zero contour). Documented as migration note.
+
+#### Cost expectations
+
+For 50k particles at 96³, per frame:
+
+* HashGrid build: ~1 ms (reuses W7.7 pattern).
+* Per-cell SDF compute: 96³ ≈ 884k cells, each does a hashgrid query
+  (~30 cells / ~5-15 particles checked) plus distance arithmetic.
+  Estimated **5-15 ms**. Dominant cost.
+* SDF smoothing: 2 box-blur passes on a 96³ field, ~1-2 ms.
+* MC at level 0: same cost as before (~10-20 ms).
+
+**Total realistic budget: 20-40 ms per frame at 96³ / 50k.** Roughly
+matches M5.10's budget (the per-cell work is comparable). Sim time
+unaffected.
+
+At 192³ / 50k particles: per-cell scales to 7M cells → **40-80 ms** per
+frame. Bake-able.
+
+At 192³ / 500k particles: hashgrid queries return ~5× more candidates,
+SDF compute may rise to **100-200 ms** per frame. Acceptable for
+offline.
+
+#### Acceptance criteria
+
+1. **Surface smoothness.** Per-vertex roughness on a synthetic thin
+   sheet of particles (200 points in single-cell-thick slab) is
+   ≤ 30% of the M5.9 cubic baseline roughness. Test:
+   `tests/test_m5_11_sheet_smoothness.py`. (Reusing the same
+   synthetic setup as M5.10 tests.)
+
+2. **Thin-feature preservation.** A synthetic 1-cell-wide column of
+   200 particles produces **1 connected mesh component** with mean
+   cross-sectional thickness ≤ 2.5 cells (i.e. the mesh is a thin
+   tube, not a fat blob). Test: `tests/test_m5_11_thin_column.py`.
+
+3. **Demo30 visual.** Re-bake step30 with `mesh_method = "sdf"` →
+   anchor frames show a **smooth thin water stream from emitter to
+   cube** (subjective acceptance — anchor PNG diffed against current
+   M5.9 baseline). Test: manual inspection + `docs/images/m5_11_sdf/`.
+
+4. **CPU/GPU parity.** GPU SDF output matches `sdf_density_cpu`
+   reference to fp32 absolute tolerance 1e-3 on a 200-particle
+   random cloud at 32³. Test: `tests/test_m5_11_gpu_cpu_parity.py`.
+
+5. **Default unchanged.** Scenes without `mesh_method` produce
+   bit-identical output to M5.1. Existing
+   `test_m5_9_default_is_m5_1.py` extends to cover M5.11.
+
+6. **Determinism.** Same input → same output (atomic-add isn't used
+   here — per-cell is independent — so determinism is structural).
+   Test: `tests/test_m5_11_deterministic.py`.
+
+#### What this does NOT do
+
+* **Flux mismatch unchanged.** demo30 still emits ~1 L/s on a 30 cm
+  cube. SDF gives smooth surface but water still accumulates on cube
+  faster than it drains. Scene-design pass remains separate work
+  (tracked in HANDOFF, not B16).
+* **No whitewater spray/foam.** W7.x is a separate system; SDF on
+  the bulk surface composes with W7 layered render.
+* **No adaptive radius.** All particles use the same
+  `particle_radius_cells`. An adaptive-radius extension (Akinci-style
+  SDF) could ship as a follow-on M5.12 if the fixed radius proves
+  insufficient.
+* **No mean curvature flow (proper).** We use box-blur on `phi` as a
+  cheap approximation. True mean curvature flow (`∂φ/∂t = κ|∇φ|`)
+  preserves the SDF property better but costs more — could ship as
+  M5.11.3-alt if box-blur drifts the surface visibly.
+
+#### Risk
+
+* **Particle radius tuning.** Too small → discrete spheres with visible
+  gaps between particles. Too large → fat blob hiding fluid structure.
+  Default `sdf_particle_radius_cells = 1.0` (= 1 voxel = ~dx) is the
+  Bridson book recommendation; tuned upward to 1.5-2 for sparse-fluid
+  scenes if needed.
+* **Hashgrid query cost at high particle count.** 500k particles +
+  finer grid → more candidates per query. If perf becomes the
+  bottleneck, narrow-band SDF (only compute phi for cells near
+  particles, leave the rest at sentinel) cuts this 10×. Tracked as
+  M5.11.X follow-on if needed.
+* **Sentinel value for "no particle nearby".** Set to
+  `+search_radius_world` so MC sees these cells as cleanly "outside".
+  If search_radius is too small, cells genuinely outside fluid can
+  end up with phi values close to 0 instead of +search_radius, causing
+  spurious mesh fragments. Documented + asserted in B16 tests.
+
+
+
+**Reference:** Yu & Turk 2013, *Reconstructing Surfaces of Particle-Based
+Fluids Using Anisotropic Kernels*, ACM TOG 32(1).
+
+Replaces the isotropic spherical kernel that M5.1 scatters into the
+density grid with a per-particle *oriented ellipsoid* whose shape is
+derived from the local neighbourhood geometry. This is the single biggest
+surface-quality lever for particle fluids that exists today and is what
+Houdini / Mantaflow / RealFlow use under the hood.
+
+#### Why this fix and not another
+
+M5.1's isotropic scatter draws each particle as a sphere. When the fluid
+is **thick** (10+ particles per voxel) the spheres overlap into a smooth
+sheet — fine. When the fluid is **thin or sparse** (a tap stream, a
+splash droplet, the leading edge of a wave) every particle paints a
+visible round bump and the marching-cubes surface inherits that
+bumpiness: chunky "cauliflower" texture, no continuous thin features.
+This is the dominant visual artefact at demo30's 96³ even with all
+tuning we've done. Surface roughness is independent of resolution —
+192³ produced *more* cauliflower bumps, not fewer, because each finer
+particle still paints its own sphere.
+
+Yu-Turk fixes the root cause: the kernel becomes an ellipsoid whose
+*long axis* aligns with the local fluid surface direction and whose
+*short axis* aligns with the surface normal. A thin sheet of particles
+becomes a thin sheet of overlapping ellipsoids → smooth membrane.
+A coherent column becomes a smooth tube. An isolated splash droplet
+gets a fallback isotropic kernel of small radius, so it does not bloom
+into a fake blob.
+
+#### Algorithm
+
+For each particle `p_i`:
+
+1. **Neighbour gather (M5.8.1).** Use `wp.HashGrid` with cell size
+   `h = 2·R_kernel` to enumerate `N_i = { p_j : ‖x_j - x_i‖ < R_kernel }`.
+   The same hashgrid already exists from W7.7 trapped-air; we reuse it
+   per frame rather than building a second.
+
+2. **Weighted centroid (M5.8.2).** Compute
+   `x̄_i = Σ_j w_ij · x_j  /  Σ_j w_ij`
+   with the cubic falloff kernel
+   `w_ij = (1 - (‖x_j - x_i‖/R)²)³`  if  ‖·‖ < R else 0.
+
+3. **Weighted covariance (M5.8.2).** Compute
+   `C_i = Σ_j w_ij · (x_j - x̄_i)(x_j - x̄_i)ᵀ  /  Σ_j w_ij` as a
+   symmetric 3×3 matrix. Six scalars per particle stored in shared
+   `wp.array(dtype=mat33)`.
+
+4. **SVD + eigenvalue clamping (M5.8.3).** Per-particle eigendecomp
+   `C_i = R_i Σ_i R_iᵀ`. Three eigenvalues `σ₁ ≥ σ₂ ≥ σ₃`. Clamp
+   `σ_k ← max(σ_k, σ_max/k_r)` with `k_r = 4` (Yu-Turk §3.2 default
+   anisotropy ratio cap), where `σ_max = σ₁`. Form the inverse-radius
+   matrix `G_i = (1/k_n) R_i · diag(1/σ_k) · R_iᵀ` with
+   `k_n = (Σ σ_k)/3` (normalisation).
+
+   *GPU SVD note:* a fully iterative SVD on the GPU is expensive. The
+   Jacobi-rotation method converges in 6-8 sweeps for a 3×3 and is
+   numerically robust. Alternative: closed-form 3×3 cubic-root
+   eigenvalue solver (Smith 1961) plus QR for eigenvectors — faster
+   per particle but ~30 lines of arithmetic. **Decision: Jacobi
+   rotations.** Worth the few extra ops for robustness; 50k particles
+   at 8 sweeps is still <1 ms on the 4080S.
+
+5. **Isolated-particle fallback (M5.8.4).** If `|N_i| < N_thresh` (Yu-Turk
+   uses 25; we will too for now), skip steps 2-4 and use an isotropic
+   kernel of radius `R/2`. This prevents single splash particles from
+   producing pancake ellipsoids from noisy 2-3-neighbour covariances.
+
+6. **Anisotropic density scatter (M5.8.5).** For each particle, compute
+   its AABB in the density grid using its ellipsoid extents, iterate
+   the enclosed cells, and atomic-add a contribution
+   `ρ_cell += det(G_i)^(1/2) · P((cell_center - x̄_i)ᵀ G_i (cell_center - x̄_i))`
+   where `P(r²) = max(0, (1 - r²)³)` is the same cubic kernel as step 2.
+
+   The `det(G_i)^(1/2)` normalisation keeps the *total mass* of each
+   particle equal to 1, so a thin-sheet particle paints the same total
+   "ink" as a fat-sphere particle — just spread differently.
+
+The output is the same `density: wp.array3d(dtype=float)` that M5.2
+smooths and M5.4 meshes. **Existing M5.2 / M5.4 / M5.5 / M5.6 paths
+work unchanged** — only the input to M5.2 changes when anisotropic
+is enabled.
+
+#### Block layout
+
+| Sub-ID  | Role                                                                    |
+|---------|-------------------------------------------------------------------------|
+| M5.8.1  | Per-particle neighbour gather (reuse W7.7 hashgrid)                     |
+| M5.8.2  | Weighted centroid + covariance kernel                                   |
+| M5.8.3  | Jacobi-rotation eigendecomp + clamping kernel                           |
+| M5.8.4  | Isolated-particle fallback selector (`|N_i| < 25` → isotropic flag)     |
+| M5.8.5  | Anisotropic ellipsoid density scatter kernel                            |
+| M5.8.H  | Host wrapper that wires 1→5 and replaces the M5.1 call when enabled     |
+
+#### Configuration knobs
+
+In `[output]` section of scene TOML:
+
+```toml
+mesh_method = "anisotropic"     # default: "isotropic" (M5.1)
+ak_radius_cells = 4.0           # support radius in cells (Yu-Turk R)
+ak_neighbor_min = 25            # below this -> fallback isotropic
+ak_anisotropy_max = 4.0         # k_r clamp (eigenvalue ratio cap)
+```
+
+Defaults chosen to match Yu-Turk §3 reference parameters. The
+`isotropic` mode keeps current behaviour bit-identical so existing
+scenes are unaffected.
+
+#### Cost expectations (honest, with uncertainty bands)
+
+For 50k particles at 96³, per frame. Numbers below are **first-cut
+estimates not measurements**; B13.9 perf test reconciles them with
+reality at the end.
+
+* Neighbour gather: hashgrid is built per frame. If W7 is already
+  building one with compatible cell size, share it (~0 cost); otherwise
+  build a dedicated one for M5.8 at ~1-2 ms cold. **Open: confirm
+  whether W7.7 hashgrid radius matches Yu-Turk R or whether we need
+  two hashgrids.** Treat the cost as ~1-2 ms either way.
+* Centroid + covariance: 6 reductions per particle × 50k = 300k ops,
+  **~0.3-1 ms** (rough).
+* SVD: 8 Jacobi sweeps × 6 off-diagonals × trig pair per particle =
+  ~2.4M trig pairs. **~1-3 ms** (rough — Warp's `wp.sin`/`wp.cos`
+  speed on Ada GPUs is not something I've benchmarked).
+* Anisotropic scatter: per particle iterates an AABB sized roughly
+  `(2R+1)³` cells. For R=4 cells, **AABB ≈ 9³ = 729 cells worst
+  case**. With 50k particles × ~500 atomic adds (avg, since most
+  cells in the AABB are far from the ellipsoid centre and contribute
+  near-zero — we will still pay the iteration cost) = **25M atomic
+  adds**, **likely 15-40 ms**. This is the dominant cost. Two
+  optimisations on the table if we blow the budget: (a) tight
+  per-cell early-exit when the kernel value is below ε; (b) shrink
+  AABB to the ellipsoid's actual oriented bounding box (cheaper
+  iteration, more arithmetic per cell).
+
+**Total realistic budget: 15-50 ms per frame at 96³ / 50k.** M5.1
+isotropic scatter is ~1 ms in the same regime, so Yu-Turk is **15-50×
+slower than M5.1** for the scatter step. M5.4 MC is currently
+~10-20 ms; the anisotropic scatter becomes the new bottleneck. Net
+meshing time per frame: ~30-70 ms vs current ~15-25 ms = **roughly
+2-3× slower mesh stage**. Sim time is unaffected. At our typical
+bake of 600 frames the added cost is **~20-50 s** — still fast
+relative to the sim itself.
+
+At 192³ / 500k the scatter scales linearly in particle count and
+super-linearly in AABB size (R measured in cells, not metres, so R
+stays at 4 → AABB stays ~729 cells; only particle count grows) →
+**~150-400 ms per frame** scatter alone. Bake-able but no longer
+realtime.
+
+**If actual measurement (B13.9) shows >100 ms at 96³ / 50k, escalate**:
+either implement optimisation (a) above as a follow-on block M5.8.6,
+or accept a higher per-frame cost as the price of the surface quality.
+
+#### Acceptance criteria
+
+1. **Synthetic sheet test.** A 2D plane of 200 particles (10×20 grid
+   in a single cell-thick slab). Isotropic mesh has ≥20% per-vertex
+   distance variance to nearest particle plane. Anisotropic mesh has
+   ≤5%. Test: `tests/test_m5_8_anisotropic_sheet.py`.
+
+2. **Synthetic column test.** A column of 200 particles (1×1×200 cells
+   thick). Isotropic mesh fragments into ≥20 disconnected components.
+   Anisotropic produces 1 connected component. Test:
+   `tests/test_m5_8_anisotropic_column.py`.
+
+3. **Isolated-particle equivalence.** A single particle with no
+   neighbours produces a sphere mesh identical to isotropic
+   (radius = `R/2`, fallback path). Test:
+   `tests/test_m5_8_isolated_fallback.py`.
+
+4. **Determinism.** Same input particles → same mesh output across
+   runs (atomic-add ordering varies but density-grid sum is
+   commutative; eigendecomp is deterministic). Test:
+   `tests/test_m5_8_determinism.py`.
+
+5. **Visual on demo30.** The step30 water nozzle bake (2cm nozzle,
+   rate=8000, 96³) re-baked with `mesh_method = "anisotropic"` shows
+   a continuous mid-air column in the rendered video — not the
+   fragmented cottage-cheese mid-air we currently see. Test: manual
+   inspection of `out/videos/step30_water.mp4`; commit before/after
+   anchor frames in `docs/images/m5_8_before_after/`.
+
+6. **Performance ceiling.** Per-frame meshing time at 96³ / 50k particles
+   ≤ 2× the M5.1 baseline (target ~4 ms vs ~1-2 ms). At 192³ / 500k
+   ≤ 50 ms per frame. Test: `tests/test_m5_8_perf_budget.py` (marked
+   `slow`, runs at 96³ only by default).
+
+#### What this does NOT do
+
+Yu-Turk improves the *surface reconstruction* only. It does **not**:
+* fix the *flux mismatch* in demo30 (we are still simulating a fire
+  hose into a small cube — too much water per second for the cube
+  surface to drain naturally; that's a scene-design issue);
+* add whitewater spray/foam (W7 is a separate system);
+* speed up the pressure solve.
+
+Yu-Turk gives us a clean baseline surface; demo30 scene design
+needs separate iteration to look like a tap-pour at the right flux.
+
+#### Risk
+
+* **GPU SVD bugs.** Jacobi rotations on 3×3 SPSD matrices are well-studied
+  but easy to get wrong (sign flips, off-diagonal indexing). The
+  determinism test (criterion 4) catches drift; the synthetic sheet test
+  (criterion 1) catches systematic sign errors via the surface-normal
+  axis.
+* **Hashgrid memory at 192³ / 500k.** wp.HashGrid for 500k particles
+  with cell size ~2 cm × 96³ domain = 96³ hash buckets ≈ 900k. Fits
+  easily on the 4080S; same usage pattern as W7.7.
+* **Atomic contention on dense fluids.** A 96³ scatter from 50k particles
+  with ellipsoid AABBs of ~64 cells = 3.2M atomic_add — high contention
+  but well within Warp's per-frame budget.
+
+
 
 Persistence: write meshes to disk, manage a cache directory.
 
@@ -755,6 +1563,34 @@ Persistence: write meshes to disk, manage a cache directory.
     particles/frame_NNNN.npy  # raw particles per frame (I6.3, optional)
     preview/frame_NNNN.png    # quick render (optional)
 ```
+
+---
+
+## 9. Layer I6 — I/O
+
+Persisting solver output and reading caches back. Lives between M5
+(produces vertex/face arrays) and C7 (orchestrates a bake) — the
+write/read primitives for the on-disk cache layout described above.
+
+Blocks (full descriptions in [BLOCKS.md](BLOCKS.md)):
+
+* **I6.1** — binary little-endian PLY reader (mirror of `write_ply`).
+* **I6.2** — `cache.json` manifest reader.
+* **I6.3** — particle dump (numpy `.npy` of positions per frame).
+* **I6.1.MESH** — vectorized PLY mesh+face parser (`io.ply.read_mesh_ply`).
+  Companion to I6.1's point-cloud reader. Replaces the per-face Python
+  loop with `np.frombuffer` reshape on the
+  `[uchar count][int32 v0][int32 v1][int32 v2]` row layout. For a
+  10k-face mesh: ~50ms → <1ms. Used in the Blender bridge (A8.10)
+  which loads one PLY per render frame. (Note: `I6.4` is reserved
+  by B10 — Alembic writer.)
+* **I6.5** — USD time-sampled mesh sequence writer (`cache.usdc`),
+  the polished Blender-import path.
+
+No design decisions live here that aren't already captured by the
+block table; this section exists so the layer-declared registry check
+(`tests/test_blocks_registry.py::test_check_2_layer_declared`) can find
+the layer heading.
 
 ---
 
@@ -788,6 +1624,10 @@ imports the resulting mesh cache (I6.x) onto a target object.
 | A8.6  | Cache import (PLY sequence → MeshSequenceCache modifier)     | planned |
 | A8.7  | UI panels (3D-view sidebar)                                  | planned |
 | A8.8  | Helper operators (add domain, add fluid, clear cache)        | planned |
+| A8.9  | Eevee perf preset — explicit samples/bloom/SSR/GTAO setup for headless renders. Without this Blender uses photo-quality defaults (~3× slower) | impl |
+| A8.10 | Mesh swap-in frame loader — Blender frame-change handler that reads `cache_dir/mesh/frame_NNNN.ply` via I6.4 and rebuilds the surface object's vertex/face buffers in-place via `foreach_set` | impl |
+| A8.11 | Scene builder helpers — camera/lights/material/overlay primitives for the Blender bridge. Composable with A8.5..A8.8 or callable standalone for headless renders | impl |
+| A8.12 | Headless render CLI command `gpufluid render <cache> <scene> --out <png_dir>` — wraps A8.9 + A8.10 + A8.11 inside a `blender --background --python` subprocess. Used by tests and CI | impl |
 
 ---
 

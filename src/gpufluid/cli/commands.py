@@ -818,6 +818,44 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 # [BLK C7.3]
 @block("C7.3", "bench command: solver throughput")
+@block("A8.12",
+       "Headless render CLI command — spawns Blender with the addon render bridge")
+def cmd_render(args: argparse.Namespace) -> int:
+    """Spawn a headless Blender process to render a baked cache.
+
+    The actual Eevee work happens inside Blender's Python via the
+    addon's ``render_bridge`` module (A8.9-A8.11). This command just
+    constructs the subprocess command line.
+    """
+    import subprocess, json as _json
+    cache_dir = Path(args.cache).resolve()
+    scene_toml = Path(args.scene).resolve()
+    out_dir = Path(args.out).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_json = cache_dir / "cache.json"
+    if not cache_json.exists():
+        raise BlockError("A8.12", f"cache.json not found in {cache_dir}")
+    blender = args.blender or "blender"
+    # Locate the bundled render driver script
+    driver = Path(__file__).resolve().parents[3] / "addon" / "gpufluid_blender" / "_headless_render.py"
+    if not driver.exists():
+        raise BlockError("A8.12", f"render driver missing: {driver}")
+    payload = _json.dumps({
+        "cache":  str(cache_dir),
+        "scene":  str(scene_toml),
+        "out":    str(out_dir),
+        "label":  args.label,
+        "color":  args.color,
+        "samples": args.samples,
+        "fps":    args.fps,
+        "frames": args.frames,
+    })
+    cmd = [blender, "--background", "--python", str(driver), "--", payload]
+    print(f"[render] launching: {' '.join(cmd[:3])} ... ({len(payload)} bytes config)")
+    r = subprocess.run(cmd, check=False)
+    return r.returncode
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     cfgs = [(48, 8, 50, 100), (64, 8, 50, 100), (96, 4, 40, 50)]
     print("[gpufluid] solver throughput (3D, pure GPU)")

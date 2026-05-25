@@ -44,6 +44,130 @@ def k_density_scatter(
 block("M5.1", "Particle density scatter (trilinear, atomic)")(k_density_scatter)
 
 
+# [BLK M5.9.1] Wider cubic kernel scatter.
+# Discovered in B13.8 evaluation: replacing M5.1's trilinear delta-footprint
+# with a cubic kernel of fixed radius reduces mesh fragment count 29x on
+# real demo30 data. See DESIGN.md §8.3 for the full algorithm + rationale.
+# Per-particle thread; each iterates an AABB of (2R+1)^3 cells and
+# atomic_add's the cubic-falloff weight where r^2 < 1.
+@wp.kernel
+def k_cubic_scatter(
+    pos: wp.array(dtype=wp.vec3),
+    density: wp.array3d(dtype=float),
+    dx: float,
+    inv_r_world_sq: float,   # 1/(radius_cells*dx)^2 — kernel falloff scaler
+    half_cells: int,         # ceil(radius_cells) + 1 — AABB half-extent
+    nx: int, ny: int, nz: int,
+):
+    pid = wp.tid()
+    p = pos[pid]
+    cx = int(wp.floor(p[0] / dx - 0.5))
+    cy = int(wp.floor(p[1] / dx - 0.5))
+    cz = int(wp.floor(p[2] / dx - 0.5))
+    i_lo = wp.max(0, cx - half_cells); i_hi = wp.min(nx, cx + half_cells + 1)
+    j_lo = wp.max(0, cy - half_cells); j_hi = wp.min(ny, cy + half_cells + 1)
+    k_lo = wp.max(0, cz - half_cells); k_hi = wp.min(nz, cz + half_cells + 1)
+    for i in range(i_lo, i_hi):
+        cw_x = (float(i) + 0.5) * dx
+        ddx = cw_x - p[0]
+        for j in range(j_lo, j_hi):
+            cw_y = (float(j) + 0.5) * dx
+            ddy = cw_y - p[1]
+            for k in range(k_lo, k_hi):
+                cw_z = (float(k) + 0.5) * dx
+                ddz = cw_z - p[2]
+                d_sq = ddx * ddx + ddy * ddy + ddz * ddz
+                r_sq = d_sq * inv_r_world_sq
+                if r_sq < 1.0:
+                    one_minus = 1.0 - r_sq
+                    val = one_minus * one_minus * one_minus
+                    wp.atomic_add(density, i, j, k, val)
+
+
+block("M5.9.1", "Wider cubic kernel particle scatter (per-particle AABB iter)")(k_cubic_scatter)
+
+
+# [BLK M5.11.2] Bridson SDF compute.
+# Per-cell parallel: each thread queries the HashGrid for the nearest
+# particle within `search_radius`, then writes phi = nearest_dist -
+# particle_radius. Cells with no particle in range get phi = +search_radius
+# (positive sentinel = "definitely outside"). MC at level 0 then extracts
+# the union of particle-spheres — smooth by construction. See
+# DESIGN.md §8.5 for algorithm and rationale.
+_HG = wp.uint64
+
+
+@wp.kernel
+def k_sdf_field(
+    grid: _HG,
+    pos: wp.array(dtype=wp.vec3),
+    phi: wp.array3d(dtype=float),
+    dx: float,
+    nx: int, ny: int, nz: int,
+    search_radius: float,
+    particle_radius: float,
+):
+    i, j, k = wp.tid()
+    if i >= nx or j >= ny or k >= nz:
+        return
+    cell = wp.vec3((float(i) + 0.5) * dx,
+                   (float(j) + 0.5) * dx,
+                   (float(k) + 0.5) * dx)
+    min_d_sq = search_radius * search_radius
+    for pid in wp.hash_grid_query(grid, cell, search_radius):
+        d = cell - pos[pid]
+        d_sq = wp.dot(d, d)
+        if d_sq < min_d_sq:
+            min_d_sq = d_sq
+    phi[i, j, k] = wp.sqrt(min_d_sq) - particle_radius
+
+
+block("M5.11.2", "Per-cell SDF compute kernel (HashGrid nearest-particle)")(k_sdf_field)
+
+
+# [BLK M5.11.4] Per-vertex colour KNN blend (B18.4).
+@wp.kernel
+def k_vertex_color_knn(
+    grid: _HG,
+    pos: wp.array(dtype=wp.vec3),
+    colors: wp.array(dtype=wp.vec3),
+    verts: wp.array(dtype=wp.vec3),
+    out_color: wp.array(dtype=wp.vec3),
+    search_radius: float,
+):
+    """Inverse-distance² weighted colour blend per vertex.
+
+    Each vertex queries the SDF HashGrid for particles within
+    ``search_radius`` and accumulates ``colors[pid] / (d² + eps)``.
+    The eps avoids division blow-up when a vertex lands exactly on a
+    particle (which the Bridson SDF would, at the particle-sphere
+    surface for tiny ``particle_radius``).
+
+    Linear-RGB blend. Mixbox pigment-space mixing (B18.5) is done on the
+    CPU after this kernel: the GPU pass produces a "neutral" linear
+    average that the Mixbox host-side path can then re-mix pairwise.
+    """
+    v = wp.tid()
+    p = verts[v]
+    w_sum = float(0.0)
+    c_sum = wp.vec3(0.0, 0.0, 0.0)
+    eps = float(1.0e-8)
+    for pid in wp.hash_grid_query(grid, p, search_radius):
+        d = p - pos[pid]
+        d_sq = wp.dot(d, d)
+        w = 1.0 / (d_sq + eps)
+        c_sum = c_sum + w * colors[pid]
+        w_sum = w_sum + w
+    if w_sum > 0.0:
+        out_color[v] = c_sum / w_sum
+    else:
+        out_color[v] = wp.vec3(1.0, 1.0, 1.0)
+
+
+block("M5.11.4",
+      "Per-vertex KNN inverse-distance² colour blend (B18.4)")(k_vertex_color_knn)
+
+
 @wp.kernel
 def _k_zero3(a: wp.array3d(dtype=float)):
     i, j, k = wp.tid()
@@ -92,6 +216,66 @@ class MeshExtractor:
         self._mc = None      # lazy wp.MarchingCubes
         self._mc_max_verts = 0
         self._mc_max_tris = 0
+        # M5.11.1 — lazy HashGrid for SDF mesh_method. 64³ matches W7.7's
+        # tested setup; covers the unit-cube sim space with cells ~1.6 cm
+        # at dx=5.2 mm (192³ grid), which gives 1-2 cell traversal per
+        # SDF query at typical search_radius = 4 cells = 2.1 cm.
+        self._sdf_grid = None
+        self._sdf_grid_cells = 64
+
+    @block("M5.11.4.H",
+           "Host wrapper: per-vertex linear-RGB colour from particle attrs (B18.4)")
+    def compute_vertex_colors(
+        self,
+        verts_world: np.ndarray,
+        pos: "wp.array",
+        colors: "wp.array",
+        search_radius_world: float,
+    ) -> np.ndarray:
+        """Per-vertex colour via inverse-distance² KNN blend against particles.
+
+        Requires the SDF HashGrid to already be built (call after
+        :meth:`extract` with ``mesh_method='sdf'``). For ``trilinear`` /
+        ``cubic`` meshers, this builds a HashGrid on the fly.
+
+        Parameters
+        ----------
+        verts_world : (N, 3) float32 — mesh vertices in world coordinates.
+        pos : ``wp.array(dtype=vec3)`` — particle positions (same that
+            went into :meth:`extract`).
+        colors : ``wp.array(dtype=vec3)`` — particle RGB in [0, 1].
+        search_radius_world : neighbourhood for KNN — typically the same
+            as the SDF ``search_radius`` to keep cache-coherent queries.
+
+        Returns
+        -------
+        ``(N, 3) uint8`` — RGB ready for the PLY writer.
+        """
+        if self._sdf_grid is None:
+            self._build_sdf_hashgrid(pos, search_radius_world)
+        n_v = verts_world.shape[0]
+        verts_wp = wp.array(verts_world, dtype=wp.vec3, device=self.device)
+        out = wp.zeros(n_v, dtype=wp.vec3, device=self.device)
+        wp.launch(
+            k_vertex_color_knn, dim=n_v,
+            inputs=[self._sdf_grid.id, pos, colors, verts_wp, out,
+                    float(search_radius_world)],
+            device=self.device,
+        )
+        cols = out.numpy().astype(np.float32)
+        # Clamp & convert to uint8. Slight headroom on the high end avoids
+        # banding from float→int truncation: round, then clip.
+        cols_u8 = np.clip(np.round(cols * 255.0), 0, 255).astype(np.uint8)
+        return cols_u8
+
+    @block("M5.11.1", "Lazy wp.HashGrid build for SDF nearest-particle queries")
+    def _build_sdf_hashgrid(self, pos, search_r_world: float):
+        if self._sdf_grid is None:
+            self._sdf_grid = wp.HashGrid(
+                self._sdf_grid_cells, self._sdf_grid_cells,
+                self._sdf_grid_cells, device=self.device)
+        self._sdf_grid.build(pos, search_r_world)
+        return self._sdf_grid
 
     # [BLK M5.2]
     @block("M5.2", "Density grid box-blur (N passes)")
@@ -104,12 +288,21 @@ class MeshExtractor:
         # leave the final result in self.dens
         self.dens, self.dens_tmp = a, b
 
-    def _mc_extract_cpu(self, iso_level: float):
-        """[BLK M5.3] skimage marching_cubes — D→H copy of density first."""
+    def _mc_extract_cpu(self, iso_level: float, sdf: bool = False):
+        """[BLK M5.3] skimage marching_cubes — D→H copy of density first.
+
+        ``sdf=True`` flips the early-out: SDF cells with no particle in
+        range hold +search_radius (positive sentinel); the surface exists
+        iff at least one cell has phi < 0.
+        """
         wp.synchronize()
         d = self.dens.numpy()
-        if d.max() < iso_level * 0.5:
-            return None, None
+        if sdf:
+            if d.min() >= 0.0:
+                return None, None
+        else:
+            if d.max() < iso_level * 0.5:
+                return None, None
         try:
             verts, faces, _, _ = skm.marching_cubes(
                 d, level=iso_level, spacing=(self.dx, self.dx, self.dx))
@@ -166,6 +359,10 @@ class MeshExtractor:
         mesh_smooth_method: str = "taubin",
         wall_margin_cells: int = 0,
         decimate_ratio: float = 1.0,
+        mesh_method: str = "trilinear",
+        cubic_radius_cells: float = 2.0,
+        sdf_particle_radius_cells: float = 1.0,
+        sdf_search_radius_cells: float = 4.0,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Run density scatter + box-blur + marching cubes, then (optionally)
         post-smooth the mesh.
@@ -183,19 +380,59 @@ class MeshExtractor:
         (verts, faces) or (None, None) when no surface emerges.
         """
         wp.launch(_k_zero3, dim=(self.nx, self.ny, self.nz), inputs=[self.dens], device=self.device)
-        wp.launch(k_density_scatter, dim=pos.shape[0],
-                  inputs=[pos, self.dens, self.dx, self.nx, self.ny, self.nz],
-                  device=self.device)
+        if mesh_method == "trilinear":
+            wp.launch(k_density_scatter, dim=pos.shape[0],
+                      inputs=[pos, self.dens, self.dx, self.nx, self.ny, self.nz],
+                      device=self.device)
+        elif mesh_method == "cubic":
+            # M5.9: wider cubic kernel. iso_level needs to be ~5-10x higher
+            # than M5.1 values because cubic kernel concentrates more mass
+            # at peak — see DESIGN.md §8.3 migration note.
+            r_world = float(cubic_radius_cells) * self.dx
+            inv_r_world_sq = 1.0 / (r_world * r_world)
+            half_cells = int(np.ceil(cubic_radius_cells)) + 1
+            wp.launch(k_cubic_scatter, dim=pos.shape[0],
+                      inputs=[pos, self.dens, self.dx, inv_r_world_sq,
+                              half_cells, self.nx, self.ny, self.nz],
+                      device=self.device)
+        elif mesh_method == "sdf":
+            # M5.11: Bridson SDF. phi(cell) = dist(cell, nearest_particle) -
+            # particle_radius_world. MC threshold is forced to 0 below.
+            search_r_world = float(sdf_search_radius_cells) * self.dx
+            particle_r_world = float(sdf_particle_radius_cells) * self.dx
+            # Seed self.dens (= phi storage) to +search_r_world so empty
+            # cells outside any particle's reach naturally read "outside".
+            # The kernel only writes cells whose hash-grid query finds at
+            # least one particle, so the sentinel covers the rest.
+            self.dens.fill_(search_r_world)
+            self._build_sdf_hashgrid(pos, search_r_world)
+            wp.launch(k_sdf_field,
+                      dim=(self.nx, self.ny, self.nz),
+                      inputs=[self._sdf_grid.id, pos, self.dens, self.dx,
+                              self.nx, self.ny, self.nz,
+                              search_r_world, particle_r_world],
+                      device=self.device)
+        else:
+            raise ValueError(
+                f"unknown mesh_method: {mesh_method!r}; "
+                f"expected 'trilinear', 'cubic', or 'sdf'"
+            )
         self._smooth(smooth_passes)
         # Wall mask on GPU (M5.7) — keeps the field device-resident so the
         # M5.4 GPU MC path doesn't pay an extra D→H roundtrip.
-        if wall_margin_cells > 0:
+        # Skip for SDF: zeroing phi at the wall would create a phi=0 contour
+        # there, i.e. a fake surface. Empty cells already read +search_radius
+        # (positive = outside), which is what we want.
+        if wall_margin_cells > 0 and mesh_method != "sdf":
             wp.launch(k_mc_zero_walls, dim=(self.nx, self.ny, self.nz),
                       inputs=[self.dens, int(wall_margin_cells)], device=self.device)
+        # SDF semantics force MC threshold = 0 (the zero level set). User's
+        # iso_level is ignored — DESIGN.md §8.5 migration note.
+        mc_level = 0.0 if mesh_method == "sdf" else float(iso_level)
         if self.use_gpu_mc:
-            verts, faces = self._mc_extract_gpu(iso_level)
+            verts, faces = self._mc_extract_gpu(mc_level)
         else:
-            verts, faces = self._mc_extract_cpu(iso_level)
+            verts, faces = self._mc_extract_cpu(mc_level, sdf=(mesh_method == "sdf"))
         if verts is None:
             return None, None
         if mesh_smooth_passes > 0 and len(verts) > 0:
@@ -216,3 +453,21 @@ class MeshExtractor:
 def particles_to_mesh(pos, nx, ny, nz, dx, iso_level=0.5, smooth_passes=2, **_ignored):
     ex = MeshExtractor(nx, ny, nz, dx)
     return ex.extract(pos, iso_level=iso_level, smooth_passes=smooth_passes)
+
+
+# M5.11.3 — SDF smoothing reuses M5.2 box-blur unchanged on the phi field
+# (smoothing a signed-distance field yields a smoothed SDF, Bridson §5.4).
+# Registered as a separate block ID so BLOCKS.md ↔ registry stays in sync;
+# the underlying callable is `_smooth` which is also registered as M5.2.
+block("M5.11.3", "SDF smoothing — reuses M5.2 box-blur on the phi field")(
+    MeshExtractor._smooth
+)
+# M5.9.H, M5.11.H — host wrappers are branches inside `MeshExtractor.extract()`
+# (itself decorated as M5.3). One callable, multiple block IDs so the registry
+# can locate each mesh_method opt-in.
+block("M5.9.H", "MeshExtractor mesh_method='cubic' host wrapper")(
+    MeshExtractor.extract
+)
+block("M5.11.H", "MeshExtractor mesh_method='sdf' host wrapper")(
+    MeshExtractor.extract
+)

@@ -6,15 +6,15 @@ Block index for this package:
     A8.3  GpufluidFluid property group        — properties.py
     A8.4  GpufluidObstacle property group     — properties.py
     A8.5  Bake operator                       — operators/bake.py
-    A8.6  Cache import (PLY/frame handler)    — cache_loader.py
+    A8.6  Cache import (PLY/frame handler)    — cache_loader/ (package)
     A8.7  UI panels                           — panels.py
     A8.8  Helper operators                    — operators/helpers.py
 """
 import logging
 
 # Module logger. Phase 1: minimal setup with NullHandler so library-style
-# imports stay silent unless the host configures handlers. Phase 4 will
-# migrate existing print() calls to logger.info/debug.
+# imports stay silent unless the host configures handlers. Phase 4 migrated
+# all addon-side print() calls to logger.info / logger.warning.
 logger = logging.getLogger("gpufluid.addon")
 logger.addHandler(logging.NullHandler())
 

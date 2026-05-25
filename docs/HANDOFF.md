@@ -6,6 +6,10 @@
 
 ---
 
+> **READ §0.6 FIRST — current as of 2026-05-18.** Sections §0 / §0.5
+> below are kept as historical context (pre-meshing iteration) but their
+> pickup steps are SUPERSEDED.
+
 ## 0. NEXT-SESSION QUICKSTART (2026-05-17 → next session)
 
 **One-line state:** F3.6 macro closed (architecture contract complete +
@@ -527,6 +531,87 @@ gpufluid simulate examples/scenes/step27_sub_dense.toml `
 > If user has no concrete request, default is the `--timings` fix — it's
 > the only loose thread from this session and unlocks per-section timing
 > for graph-enabled bakes (which would be EVERY future bake).
+
+## 0.6 NEXT-SESSION QUICKSTART (2026-05-18)
+
+**One-line state:** demo30 water iteration walked the full M5 meshing
+ladder (M5.1 → M5.8 Yu-Turk → M5.9 cubic → M5.10 adaptive → M5.11 SDF).
+Yu-Turk eval'd and deferred; M5.9 shipped GPU; M5.10 and M5.11 have
+CPU references + tests green; **M5.11 SDF won the CPU eval gate**
+(B16.2 PASS: 1 CC, smooth membrane surface on 192³ frame 100 — first
+mesher to break the bumpy-surface ceiling). The "thin laminar water
+stream" sub-goal is still blocked, but the blocker has moved from
+"mesher class" to "scene physics + flux mismatch". Codebase is dirty
+on `main` — uncommitted M5.* implementations, eval scripts, and TOML
+edits live in working copy (see `git status` at session start).
+
+### What was shipped this iteration
+
+| Layer | Shipped |
+|-------|---------|
+| Renderer | `_load_obstacle_from_scene(toml)` + `--scene` flag — fixes Y/Z-swapped hardcoded cube bug (water previously collided with invisible cube 10 cm off the drawn one). Pinned by `tests/test_renderer_obstacle_sync.py`. |
+| Renderer | `--test-frames N` mode — renders N frames spaced across the bake (~44× faster: 13 s vs 10 min for 24 frames). Output `test_fXXXX.png` preserves sim-frame index. |
+| M5.8 | CPU ref `anisotropic_ref.py` + `tests/test_m5_8_anisotropic_ref.py` + `tests/test_m5_8_quality_cpu.py`. Eval'd via `examples/eval_yu_turk_on_step30.py`. **Deferred** — 227 CC vs 205 isotropic on demo30 frame 200, no visible benefit. BLOCKS row `M5.8.H` = `eval, deferred`. |
+| M5.9 | CPU ref `cubic_ref.py` + GPU kernel `k_cubic_scatter` in `surface.py` + parity test `test_m5_9_gpu_cpu_parity.py`. **Shipped.** 29× fewer fragments (5942 → 205 CC) vs M5.1. Enable via `mesh_method = "cubic"` + `cubic_radius_cells = N` in TOML. BLOCKS rows `M5.9.1`/`M5.9.H` = `impl,test`/`impl`. |
+| M5.10 | CPU ref `adaptive_cubic_ref.py` + `tests/test_m5_10_adaptive_cubic_ref.py`. Full-pipeline eval `examples/eval_m5_10_full_pipeline.py` (parameterised by `--frame N`). Result: CC=1 across `R_max ∈ [1.5, 4.0]` but visually gel-cube (adaptive scaling inflates everything). GPU port deferred behind M5.11. |
+| M5.11 | CPU ref `sdf_ref.py` + `tests/test_m5_11_sdf_ref.py`. **B16.2 gate PASSED:** 192³ r=1.5 frame 100 → 1 CC, ~26k mid-air verts, qualitatively smooth membrane (union-of-spheres, not sum of bumps). First mesher to break the bumpy ceiling. GPU port (B16.3-B16.8) **unblocked, top recommended next step.** |
+
+### Failure-mode taxonomy (every demo30 variant lands in one of 3)
+
+1. **Cottage cheese / cobblestone** — low iso + M5.1, thousands of beads, 5000+ CC.
+2. **Gel-cube** — high R or rate, entire scene becomes one cohesive blob, stream and pool merge.
+3. **Water tower** — 192³ + Bridson, smooth vertical sculpture on cube crown, water accumulates rather than "falling as a stream".
+
+### Five fundamental issues (survive any single mesher fix)
+
+1. *Density-then-MC inherent bumpiness* — solved by M5.11 (SDF = union-of-spheres).
+2. *Flux mismatch* — rate=8000 ≈ 1 L/s on a 30 cm cube (fire hose, not tap, ~3 ml/s). Lowering rate → unmeshable. Unsolved.
+3. *Cube blocks falling stream → tower accumulation* — fall time ~0.4 s, cube starts pooling by 0.83 s.
+4. *Splash spreads particles laterally* — first impact scatters particles across a ~10 cm cylinder.
+5. *Particle spacing > 2·radius = разрыв* — sparse mid-air particles ~3-4 cm apart, sphere radius ~7.5 mm at 192³ r=1.5 doesn't bridge.
+
+Only (1) is mesher-class. (2)-(4) are scene/physics. (5) is a coupled flux ↔ bridging-radius trade-off.
+
+### Three next-step tropes (pick one — they trade off)
+
+* **Tier-1 A (cheap, diagnostic):** run the already-edited TOML
+  (cube removed via `half_size=[0.001, 0.001, 0.001]`, rate=30k,
+  `mesh_method = "cubic"`), bake → CPU eval → test-render 24 frames.
+  Answers "can our setup show a thin stream at all without splash
+  interference". Hours.
+* **Tier-2 D (algorithmic, recommended in parallel with scene work):**
+  GPU-port M5.11 SDF per BACKLOG B16.3-B16.8 + full demo30 mp4. Locks
+  the only mesher to pass the bumpy-surface gate into the bake
+  pipeline. Days. CPU evidence already strong (B16.2 PASS).
+* **Tier-3 (rescope demo):** accept that "water on cube" by design
+  forbids laminar (cube blocks stream → tower). Switch scene to
+  "water on slope" / "water in basin", or enable S2.14 surface
+  tension + APIC transfer. Days. Scene/physics rework, not mesher fix.
+
+### Uncommitted state at session start (see `git status`)
+
+* Modified: `docs/BACKLOG.md` (B13-B16 + flips), `docs/BLOCKS.md`
+  (M5.8.* through M5.11.* rows), `docs/DESIGN.md` (§8.2-§8.5),
+  `examples/render_fluid_on_cube_eevee.py` (sync fix +
+  `--test-frames`), `examples/scenes/step30_water_on_cube.toml`
+  (cube-removed test state), `src/gpufluid/cli/commands.py`,
+  `src/gpufluid/cli/config.py`, `src/gpufluid/meshing/surface.py`.
+* Untracked: 5 new meshing modules (`adaptive_cubic_ref.py`,
+  `anisotropic_ref.py`, `cubic_ref.py`, `sdf_ref.py` + surface.py
+  GPU kernel), 7 new tests, 3 eval scripts under `examples/`,
+  `.claude/` config dir.
+* **None of this is committed.** First housekeeping decision in
+  the next session: decide commit granularity (one big "M5.* CPU
+  ladder + renderer fixes" commit, or split per-block) before
+  any new work lands.
+
+### Visual-honesty reminder for this demo
+
+The user has corrected me twice on optimism inflation when reading
+anchor renders (see `memory/feedback_visual_honesty.md`). Describe
+pixels literally before relating them to a parameter story.
+"Smooth thin column" only if the column is visibly there, not because
+the algorithm should produce one.
 
 ## 1. Identity
 

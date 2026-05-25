@@ -147,6 +147,17 @@ class InflowCfg:
     rate_per_sec: float = 5000.0
     frame_start: int = 0
     frame_end: int = 1_000_000
+    # S2.17.7.MOVING — optional per-frame AABBs for animated MPM emitters.
+    # Each row: [frame, lo_x, lo_y, lo_z, hi_x, hi_y, hi_z]. When set, this
+    # supersedes the static lo/hi above (those become the keyframe at
+    # frame_start for backward compat). Ignored by FLIP solver.
+    keyframes: List[List[float]] = field(default_factory=list)
+    # B18 — per-source per-particle attributes. Each particle emitted by
+    # this inflow inherits the same colour / temperature. Consumed by the
+    # MPM path (FlipSolver3D inflows currently emit white; FLIP-side wire-
+    # up is tracked under B2-revival).
+    color: Optional[Tuple[float, float, float]] = None
+    temperature: Optional[float] = None
 
 
 @dataclass
@@ -163,6 +174,7 @@ ObstacleCfg = Union[ObstacleSphereCfg, ObstacleBoxCfg, ObstacleCylinderYCfg,
 
 @dataclass
 class SimulationCfg:
+    solver: str = "flip"               # "flip" (FlipSolver3D) or "mpm" (F3.7 MpmSolver) — B17.12
     dt: float = 0.005
     pressure_iters: int = 60
     pressure_solver: str = "jacobi"   # "jacobi" or "pcg" (v0.4+)
@@ -183,6 +195,14 @@ class SimulationCfg:
     reseed_max_per_cell: int = 16
     frames: int = 100
     fps: int = 24
+    # MPM-specific knobs (consumed only when solver == "mpm")
+    mpm_bulk_modulus: float = 1500.0
+    mpm_rpic_damping: float = 0.15
+    mpm_grid_v_damping: float = 0.998
+    mpm_cube_friction: float = 0.6
+    mpm_v_terminal: float = -1.0
+    mpm_vz_max_splash: float = 0.3
+    mpm_initial_velocity: float = -0.3
 
 
 @dataclass
@@ -196,6 +216,32 @@ class OutputCfg:
     decimate_ratio: float = 1.0   # M5.6 — keep this fraction of faces
     wall_margin_cells: int = 0   # M5.7 wall mask
     particles: bool = False
+    # M5.9: opt-in to wider cubic kernel particle scatter for smoother
+    # surfaces. Default "trilinear" preserves M5.1 behaviour bit-for-bit.
+    # Requires iso_level to be raised ~5-10× vs M5.1 (cubic kernel
+    # concentrates more mass at peak — see DESIGN.md §8.3).
+    mesh_method: str = "trilinear"     # "trilinear" (M5.1) | "cubic" (M5.9) | "sdf" (M5.11)
+    cubic_radius_cells: float = 2.0    # M5.9 support radius in cells
+    # M5.11 Bridson SDF (DESIGN.md §8.5). When mesh_method="sdf":
+    # iso_level is IGNORED — MC threshold is forced to 0 (zero level set).
+    # particle_radius = radius of each particle-sphere; surface = union.
+    # search_radius = max distance a cell looks for nearest particle
+    # (cells with no particle in range get phi = +search_radius_world).
+    sdf_particle_radius_cells: float = 1.0
+    sdf_search_radius_cells: float = 4.0
+    # B18.5 — per-vertex colour mixing mode. "linear" = inverse-distance²
+    # RGB blend (GPU, fast, blue+yellow=grey). "mixbox" = pigment-space
+    # blend in Mixbox latent space (CPU, slower, blue+yellow=green). "off"
+    # disables per-vertex colour writing entirely. Default is "linear" so
+    # bakes that DO carry per-particle colour render with visible
+    # variation out of the box; users opt into mixbox.
+    color_mix_mode: str = "linear"
+    # B11.3 — when set (e.g. "blackbody"), the mesher derives per-vertex
+    # RGB from the per-particle TEMPERATURE sidecar instead of the COLOUR
+    # sidecar. Range is set by ``temperature_range = [t_min, t_max]``
+    # below. Default `None` keeps the regular colour path intact.
+    temperature_colormap: Optional[str] = None
+    temperature_range: Tuple[float, float] = (20.0, 1500.0)
     preview: bool = False
     usd: bool = False            # I6.5 — write cache.usdc alongside the PLY sequence
     whitewater: bool = False     # W7.x — emit foam/spray particles
@@ -278,6 +324,12 @@ def _parse_inflow(d: dict) -> InflowCfg:
         rate_per_sec=float(d.get("rate_per_sec", 5000.0)),
         frame_start=int(d.get("frame_start", 0)),
         frame_end=int(d.get("frame_end", 1_000_000)),
+        keyframes=[
+            [float(v) for v in row]
+            for row in d.get("keyframes", [])
+        ],
+        color=_tuple(d["color"], 3, "inflow.color") if "color" in d else None,
+        temperature=float(d["temperature"]) if "temperature" in d else None,
     )
 
 
@@ -386,7 +438,9 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
     outflows = [_parse_outflow(d) for d in raw.get("outflow", [])]
 
     sim = raw.get("simulation", {})
+    mpm_sub = sim.get("mpm", {})  # nested [simulation.mpm] subsection
     simulation = SimulationCfg(
+        solver=str(sim.get("solver", "flip")),
         dt=float(sim.get("dt", 0.005)),
         pressure_iters=int(sim.get("pressure_iters", 60)),
         pressure_solver=str(sim.get("pressure_solver", "jacobi")),
@@ -407,6 +461,13 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         reseed_max_per_cell=int(sim.get("reseed_max_per_cell", 16)),
         frames=int(sim.get("frames", 100)),
         fps=int(sim.get("fps", 24)),
+        mpm_bulk_modulus=float(mpm_sub.get("bulk_modulus", 1500.0)),
+        mpm_rpic_damping=float(mpm_sub.get("rpic_damping", 0.15)),
+        mpm_grid_v_damping=float(mpm_sub.get("grid_v_damping", 0.998)),
+        mpm_cube_friction=float(mpm_sub.get("cube_friction", 0.6)),
+        mpm_v_terminal=float(mpm_sub.get("v_terminal", -1.0)),
+        mpm_vz_max_splash=float(mpm_sub.get("vz_max_splash", 0.3)),
+        mpm_initial_velocity=float(mpm_sub.get("initial_velocity", -0.3)),
     )
 
     out = raw.get("output", {})
@@ -432,6 +493,21 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         whitewater_trapped_air_weight=float(out.get("whitewater_trapped_air_weight", 1.0)),
         particles=bool(out.get("particles", False)),
         preview=bool(out.get("preview", False)),
+        mesh_method=str(out.get("mesh_method", "trilinear")),
+        cubic_radius_cells=float(out.get("cubic_radius_cells", 2.0)),
+        sdf_particle_radius_cells=float(out.get("sdf_particle_radius_cells", 1.0)),
+        sdf_search_radius_cells=float(out.get("sdf_search_radius_cells", 4.0)),
+        color_mix_mode=str(out.get("color_mix_mode", "linear")),
+        temperature_colormap=(
+            str(out["temperature_colormap"])
+            if out.get("temperature_colormap") not in (None, "", "off")
+            else None
+        ),
+        temperature_range=(
+            _tuple(out["temperature_range"], 2, "output.temperature_range")
+            if "temperature_range" in out
+            else (20.0, 1500.0)
+        ),
     )
 
     return SceneCfg(

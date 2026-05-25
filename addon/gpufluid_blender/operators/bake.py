@@ -13,7 +13,6 @@ Pipeline:
 from __future__ import annotations
 import os
 import re
-import sys
 import subprocess
 import threading
 import queue
@@ -23,32 +22,15 @@ from typing import Optional
 import bpy
 import mathutils
 
+from .. import logger
 from ..config_builder import build_toml
 from ..preferences import get_prefs
+from ._animation import _bbox_world, _bbox_world_at_frame, _is_animated
+from ._collect import _export_obj, _output_dict
+from .helpers import subprocess_drain
 
 
 _FRAME_RE = re.compile(r"frame\s+(\d+)/(\d+)")
-
-
-def _bbox_world(obj) -> tuple:
-    """Return (lo, hi) world-space AABB of an object.
-
-    For mesh-like objects uses Blender's ``bound_box``. For an Empty the
-    `bound_box` is degenerate (all zeros), so we derive the AABB from
-    ``empty_display_size`` (a half-extent) and the object's transform.
-    """
-    if obj.type == "EMPTY":
-        # Empty visualises as a unit shape of half-extent empty_display_size.
-        d = obj.empty_display_size
-        local = [mathutils.Vector(c) for c in (
-            (-d, -d, -d), ( d, -d, -d), ( d,  d, -d), (-d,  d, -d),
-            (-d, -d,  d), ( d, -d,  d), ( d,  d,  d), (-d,  d,  d),
-        )]
-        pts = [obj.matrix_world @ v for v in local]
-    else:
-        pts = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
-    xs = [p.x for p in pts]; ys = [p.y for p in pts]; zs = [p.z for p in pts]
-    return ((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
 
 
 def collect_scene(context, domain_obj):
@@ -217,112 +199,8 @@ def collect_scene(context, domain_obj):
     # F-curves), sample its world AABB at every integer frame in
     # [frame_start, frame_end] and emit as `keyframes` so the MPM solver can
     # spawn each particle at the source's position at *its* spawn time.
-    def _is_animated(obj):
-        """Honest depsgraph check: evaluate matrix_world at frame_start and
-        frame_start+1 and compare. This catches constraints, drivers, and
-        animated parents — none of which the F-curve-only
-        `_matrix_world_at_frame` below can express. Previously this
-        returned True on any constraint and then the keyframe sampler froze
-        the object at frame 0 (constraints were a silent footgun)."""
-        scene = context.scene
-        # Sample at the inflow's own start-frame when present (matches the
-        # keyframe-emission window below), else current scene frame.
-        try:
-            f0 = int(obj.gpufluid_inflow.frame_start)
-        except (AttributeError, TypeError):
-            f0 = scene.frame_current
-        saved = scene.frame_current
-        try:
-            scene.frame_set(f0)
-            dg = bpy.context.evaluated_depsgraph_get()
-            m0 = obj.evaluated_get(dg).matrix_world.copy()
-            scene.frame_set(f0 + 1)
-            dg = bpy.context.evaluated_depsgraph_get()
-            m1 = obj.evaluated_get(dg).matrix_world.copy()
-        finally:
-            scene.frame_set(saved)
-        # Frobenius norm of the difference; 1e-6 absorbs FP noise on truly
-        # static rigs and trips on sub-millimetre motion.
-        diff = sum((m0[i][j] - m1[i][j]) ** 2
-                   for i in range(4) for j in range(4)) ** 0.5
-        return diff > 1e-6
-
-    def _iter_fcurves(action):
-        """Yield F-curves from an action across Blender 4.x and 5.x layouts.
-
-        Blender 5.x slot-based actions expose curves under
-        ``action.layers[*].strips[*].channelbags[*].fcurves``; legacy actions
-        still have ``action.fcurves``. We try both so the addon works on
-        either runtime.
-        """
-        if action is None:
-            return
-        if hasattr(action, "fcurves") and len(action.fcurves):
-            for fc in action.fcurves:
-                yield fc
-            return
-        for layer in getattr(action, "layers", []):
-            for strip in getattr(layer, "strips", []):
-                for cbag in getattr(strip, "channelbags", []):
-                    for fc in cbag.fcurves:
-                        yield fc
-
-    def _matrix_world_at_frame(obj, frame):
-        """Compose obj.matrix_world at integer ``frame`` WITHOUT
-        scene.frame_set — evaluates the F-curves of obj (and its parent
-        chain) directly. Avoids the 50-100ms-per-frame depsgraph rebuild
-        that ``scene.frame_set`` triggers.
-
-        Falls back to current ``obj.matrix_world`` if the object has no
-        action (constraints aren't covered — those need depsgraph).
-        """
-        import mathutils as _mu
-        def _local_matrix(o):
-            loc = list(o.location)
-            rot = list(o.rotation_euler)
-            scl = list(o.scale)
-            act = o.animation_data.action if o.animation_data else None
-            for fc in _iter_fcurves(act):
-                dp = fc.data_path
-                i = fc.array_index
-                v = fc.evaluate(frame)
-                if dp == "location" and 0 <= i < 3:
-                    loc[i] = v
-                elif dp == "rotation_euler" and 0 <= i < 3:
-                    rot[i] = v
-                elif dp == "scale" and 0 <= i < 3:
-                    scl[i] = v
-            m_loc = _mu.Matrix.Translation(loc)
-            m_rot = _mu.Euler(rot, o.rotation_mode if o.rotation_mode in {"XYZ","XZY","YXZ","YZX","ZXY","ZYX"} else "XYZ").to_matrix().to_4x4()
-            m_scl = _mu.Matrix.Diagonal((scl[0], scl[1], scl[2], 1.0))
-            return m_loc @ m_rot @ m_scl
-        # Walk parent chain bottom-up, compose top-down.
-        chain = []
-        cur = obj
-        while cur is not None:
-            chain.append(cur)
-            cur = cur.parent
-        m = _mu.Matrix.Identity(4)
-        for o in reversed(chain):
-            m = m @ _local_matrix(o)
-        return m
-
-    def _bbox_world_at_frame(obj, frame):
-        """AABB of ``obj`` at integer ``frame`` via fcurve-evaluated matrix."""
-        import mathutils as _mu
-        mw = _matrix_world_at_frame(obj, frame)
-        if obj.type == "EMPTY":
-            d = obj.empty_display_size
-            local = [_mu.Vector(c) for c in (
-                (-d, -d, -d), ( d, -d, -d), ( d,  d, -d), (-d,  d, -d),
-                (-d, -d,  d), ( d, -d,  d), ( d,  d,  d), (-d,  d,  d),
-            )]
-            pts = [mw @ v for v in local]
-        else:
-            pts = [mw @ _mu.Vector(c) for c in obj.bound_box]
-        xs = [p.x for p in pts]; ys = [p.y for p in pts]; zs = [p.z for p in pts]
-        return ((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
-
+    # Animation/bbox helpers live in operators/_animation.py (extracted in
+    # Phase 4 to keep this file under the 500-line cap).
     inflows = []
     outflows = []
 
@@ -352,7 +230,7 @@ def collect_scene(context, domain_obj):
                 entry["color"] = tuple(float(c) for c in iprops.color)
             if getattr(iprops, "use_temperature", False):
                 entry["temperature"] = float(iprops.temperature)
-            if _is_animated(o) and fe > fs:
+            if _is_animated(o, context) and fe > fs:
                 kfs = []
                 for f in range(fs, fe + 1):
                     lf, hf = _bbox_world_at_frame(o, f)
@@ -409,56 +287,6 @@ def collect_scene(context, domain_obj):
         # Phase 1 escape-hatch: raw TOML string deep-merged in config_builder.
         "toml_overrides": str(getattr(dprops, "toml_overrides", "") or ""),
     }, dom_size, origin, warnings
-
-
-def _output_dict(dprops):
-    out = {
-        "cache_dir": bpy.path.abspath(dprops.cache_dir),
-        "iso_level": dprops.iso_level, "smooth_passes": dprops.smooth_passes,
-        "mesh_smooth_passes": dprops.mesh_smooth_passes,
-        "mesh_smooth_method": dprops.mesh_smooth_method,
-        "decimate_ratio": dprops.decimate_ratio,
-        "wall_margin_cells": dprops.wall_margin_cells,
-        "usd": dprops.write_usd,
-        "particles": dprops.write_particles, "preview": False,
-        # B18.5 — defaults to "linear" on the property; user opts into mixbox
-        # via the Domain N-panel dropdown.
-        "color_mix_mode": str(getattr(dprops, "color_mix_mode", "linear")),
-    }
-    ww = getattr(dprops, "whitewater_group", None)
-    if ww is not None and ww.enable:
-        out["whitewater"] = True
-        out["whitewater_speed_threshold"] = float(ww.speed_threshold)
-        out["whitewater_lifetime_sec"] = float(ww.lifetime_sec)
-        out["whitewater_emit_per_frame_max"] = int(ww.emit_per_frame_max)
-        out["whitewater_total_cap"] = int(ww.total_cap)
-        if getattr(ww, "use_potential", False):
-            out["whitewater_use_potential"] = True
-            out["whitewater_potential_radius"] = float(ww.potential_radius)
-            out["whitewater_potential_v_max"] = float(ww.potential_v_max)
-            wcw = float(getattr(ww, "wave_crest_weight", 0.0))
-            if wcw > 0.0:
-                out["whitewater_wave_crest_weight"] = wcw
-    return out
-
-
-def _export_obj(obj, path):
-    """Quick OBJ export of a single object's evaluated mesh."""
-    dg = bpy.context.evaluated_depsgraph_get()
-    eval_obj = obj.evaluated_get(dg)
-    mesh = eval_obj.to_mesh()
-    try:
-        with open(path, "w") as f:
-            f.write(f"# gpufluid obstacle export: {obj.name}\n")
-            mw = obj.matrix_world
-            for v in mesh.vertices:
-                wv = mw @ v.co
-                f.write(f"v {wv.x} {wv.y} {wv.z}\n")
-            for p in mesh.polygons:
-                idx = " ".join(str(i + 1) for i in p.vertices)
-                f.write(f"f {idx}\n")
-    finally:
-        eval_obj.to_mesh_clear()
 
 
 # [BLK A8.5]
@@ -573,18 +401,12 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # Drain stdout in a background thread → queue, so modal() never
         # blocks on readline() (which freezes Blender UI when the subprocess
         # spends time silently, e.g. inside a nested Blender headless run
-        # for Alembic conversion).
+        # for Alembic conversion). Helper extracted to operators/helpers.py
+        # so OT_render shares the exact same drain semantics (Phase 4).
         self._stdout_q = queue.Queue()
-        def _drain(proc, q):
-            try:
-                for line in iter(proc.stdout.readline, ""):
-                    q.put(line)
-            except Exception:
-                pass
-            finally:
-                q.put(None)  # sentinel
         self._stdout_thread = threading.Thread(
-            target=_drain, args=(self._proc, self._stdout_q), daemon=True)
+            target=subprocess_drain, args=(self._proc, self._stdout_q),
+            daemon=True)
         self._stdout_thread.start()
 
         wm = context.window_manager
@@ -615,7 +437,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 if m:
                     self._current_frame = int(m.group(1))
                     self._total_frames = int(m.group(2))
-                print("[gpufluid]", line.rstrip())
+                logger.info("bake: %s", line.rstrip())
                 context.workspace.status_text_set(
                     f"gpufluid: frame {self._current_frame}/{self._total_frames}")
         if rc is None:

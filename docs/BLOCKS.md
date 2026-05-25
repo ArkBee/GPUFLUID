@@ -62,6 +62,13 @@ additionally has at least one `test_*` matching the block ID slug;
 | S2.15.2 | Normalize grid color by deposited weight | S2 | `?` | impl |
 | S2.15.3 | G2P gather grid color back to particle | S2 | `?` | impl |
 | S2.16 | Active-block bitmask builder (8³ tiles with any fluid cell) | S2 | `?` | impl,test |
+| S2.17.1 | SDF axis-aligned-box grid collider: separate-surface boundary + deep-interior zeroing + optional top-face tangential friction | S2 | `?` | impl |
+| S2.17.2 | Particle pushback inside cube body: snap to nearest face, zero inward normal velocity, reset F/F_trial/C | S2 | `?` | impl |
+| S2.17.3 | Particle pushback at domain walls: slip-clamp to [lo, hi]³, zero normal velocity, preserve tangential, reset F/C | S2 | `?` | impl |
+| S2.17.4 | Tap-zone terminal velocity cap (downward only): mimics air drag on a laminar stream | S2 | `?` | impl |
+| S2.17.5 | Above-obstacle anti-splash \|v_z\| clamp: caps stress-launched upward outliers at a physical hydraulic-jump bound | S2 | `?` | impl |
+| S2.17.PATCH.EOS | Overlay: clamp J in kirchoff_stress_water to bound pressure spike at rigid contact | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl |
+| S2.17.PATCH.SLIP | Overlay fix: write projected v in slip-surface branch instead of zero | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl |
 | S2.18 | Per-particle scalar attribute: P2G → normalize → G2P (B11) | S2 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | S2.18.1 | P2G scatter of per-particle scalar onto grid | S2 | `?` | impl |
 | S2.18.2 | Normalize grid scalar by deposited weight | S2 | `?` | impl |
@@ -70,7 +77,7 @@ additionally has at least one `test_*` matching the block ID slug;
 | F3.4 | CFL-adaptive substepping: clamps by advection CFL and (when σ>0) by explicit-CSF capillary-wave CFL | F3 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | F3.5 | Load checkpoint into a fresh solver (state-only; topology must match) (2 kernels) | F3 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | F3.6 | Per-frame hook: rebuild marker for anim obstacles, emit inflow particles, drop outflow particles | F3 | `src/gpufluid/solvers/solver3d.py` | impl,test |
-| F3.7 | Compute the 8³-tile bbox of active fluid cells, dilated by sub_dilation and clamped to the domain. (4 kernels) | F3 | `?`, `src/gpufluid/solvers/solver3d.py` | impl |
+| F3.7 | Compute the 8³-tile bbox of active fluid cells, dilated by sub_dilation and clamped to the domain. (5 kernels) | F3 | `?`, `src/gpufluid/sim/mpm/solver.py`, `src/gpufluid/solvers/solver3d.py` | impl,test |
 | D4.3 | Mesh → SDF convenience: load + cell-centres in one call (2 kernels) | D4 | `src/gpufluid/domain/mesh_sdf.py` | impl,test |
 | D4.3.GPU | Compute solid-cell mask of a triangle mesh on GPU (auto-selects BVH for >=256 triangles) (2 kernels) | D4 | `?`, `src/gpufluid/schemes/mesh_marker.py` | impl,test |
 | D4.3.GPU.BVH | BVH-backed inside test via wp.Mesh + winding query (2 kernels) | D4 | `?`, `src/gpufluid/schemes/mesh_marker.py` | impl,test |
@@ -80,14 +87,24 @@ additionally has at least one `test_*` matching the block ID slug;
 | D4.6 | Register an analytic obstacle that moves per frame (2 kernels) | D4 | `?`, `src/gpufluid/solvers/solver3d.py` | impl,test |
 | D4.7 | Emit particles from all inflow boxes for this frame (4 kernels) | D4 | `src/gpufluid/domain/regions.py`, `src/gpufluid/solvers/solver3d.py` | impl,test |
 | D4.7.GPU | GPU outflow compaction (mark + scan + scatter) (2 kernels) | D4 | `?`, `src/gpufluid/solvers/solver3d.py` | impl |
-| M5.1 | Particle density scatter (trilinear, atomic) | M5 | `?` | impl |
+| M5.1 | Particle density scatter (trilinear, atomic) | M5 | `?` | impl,test |
 | M5.2 | Density grid box-blur (N passes) | M5 | `src/gpufluid/meshing/surface.py` | impl |
 | M5.3 | MC + smoothing + wall mask + optional decimation | M5 | `src/gpufluid/meshing/surface.py` | impl,test |
 | M5.4 | GPU marching cubes via wp.MarchingCubes (device-resident) | M5 | `src/gpufluid/meshing/surface.py` | impl,test |
 | M5.5 | Laplacian mesh smoothing (uniform 1-ring averaging, N passes) (2 kernels) | M5 | `src/gpufluid/meshing/smoothing.py` | impl,test |
 | M5.6 | Quadric-error mesh decimation via pyfqmr | M5 | `src/gpufluid/meshing/decimate.py` | impl,test |
 | M5.7 | GPU wall-mask kernel (zero density within margin cells of walls) | M5 | `?` | impl |
+| M5.9.1 | Wider cubic kernel particle scatter (per-particle AABB iter) | M5 | `?` | impl |
+| M5.9.H | MeshExtractor mesh_method='cubic' host wrapper | M5 | `src/gpufluid/meshing/surface.py` | impl |
+| M5.11.1 | Lazy wp.HashGrid build for SDF nearest-particle queries | M5 | `src/gpufluid/meshing/surface.py` | impl |
+| M5.11.2 | Per-cell SDF compute kernel (HashGrid nearest-particle) | M5 | `?` | impl |
+| M5.11.3 | SDF smoothing — reuses M5.2 box-blur on the phi field | M5 | `src/gpufluid/meshing/surface.py` | impl |
+| M5.11.H | MeshExtractor mesh_method='sdf' host wrapper | M5 | `src/gpufluid/meshing/surface.py` | impl |
+| M5.11.4 | Per-vertex KNN inverse-distance² colour blend (B18.4) | M5 | `src/gpufluid/meshing/surface.py` | impl,test |
+| M5.11.4.H | Host wrapper: per-vertex linear-RGB colour from particle attrs (B18.4) | M5 | `src/gpufluid/meshing/surface.py` | impl,test |
+| M5.11.5 | Mixbox pigment-space per-vertex colour blend (B18.5) | M5 | `src/gpufluid/meshing/mixbox.py` | impl,test |
 | I6.1 | Binary little-endian PLY reader (mirror of write_ply) (2 kernels) | I6 | `src/gpufluid/io/ply.py` | impl,test |
+| I6.1.MESH | Binary PLY reader/writer — points-only and active-filtered variants for solver caches | I6 | `src/gpufluid/io/ply.py` | impl,test |
 | I6.2 | Read cache manifest (cache.json) (2 kernels) | I6 | `src/gpufluid/io/cache.py` | impl,test |
 | I6.3 | Particle dump (numpy .npy of positions) | I6 | `src/gpufluid/io/ply.py` | impl,test |
 | I6.5 | USD time-sampled mesh sequence writer | I6 | `src/gpufluid/io/usd.py` | impl,test |
@@ -102,6 +119,7 @@ additionally has at least one `test_*` matching the block ID slug;
 | W7.7.H | Host wrapper: numpy pos/vel → numpy trapped-air potential | W7 | `src/gpufluid/sim/whitewater_potentials.py` | impl |
 | W7.8 | Wave-crest G2P: gather \|div n\| gated by \|grad chi\|, clamped to [0,1] (4 kernels) | W7 | `?` | impl,test |
 | W7.8.H | Host wrapper: numpy pos → numpy wave-crest potential I_wc | W7 | `src/gpufluid/sim/whitewater_potentials.py` | impl |
+| A8.12 | Headless render CLI command — spawns Blender with the addon render bridge | A8 | `src/gpufluid/cli/commands.py` | impl |
 | G1.4 | Trilinear weights | G1 | — | plan |
 | S2.9 | Particle advection + clamp | S2 | — | plan |
 | S2.10 | CFL substep count (host helper) | S2 | — | plan |

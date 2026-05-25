@@ -76,9 +76,14 @@ _pkg.__path__ = [str(_ADDON_DIR / "gpufluid_blender")]
 _pkg.logger = logging.getLogger("gpufluid.addon.test")
 sys.modules["gpufluid_blender"] = _pkg
 
+# Phase 4: cache_loader.py became a package (cache_loader/__init__.py).
+# Load via the package's __init__ so `from .._ply import _read_ply_minimal`
+# and the late `from ._ops import ...` re-exports resolve correctly.
+_cl_dir = _ADDON_DIR / "gpufluid_blender" / "cache_loader"
 _spec = importlib.util.spec_from_file_location(
     "gpufluid_blender.cache_loader",
-    _ADDON_DIR / "gpufluid_blender" / "cache_loader.py",
+    _cl_dir / "__init__.py",
+    submodule_search_locations=[str(_cl_dir)],
 )
 cache_loader = importlib.util.module_from_spec(_spec)
 sys.modules["gpufluid_blender.cache_loader"] = cache_loader
