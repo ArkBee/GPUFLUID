@@ -108,6 +108,15 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         default=False,
         options={'SKIP_SAVE', 'HIDDEN'},
     )
+    sync_timeout_sec: bpy.props.IntProperty(
+        name="Sync timeout (seconds)",
+        description="Round-9 hardening: hard cap on sync-mode Popen.wait(). "
+                    "Render with Eevee + headless Blender startup can be "
+                    "slow but should never be hours — default 1800s = 30min. "
+                    "0 = no limit.",
+        default=1800, min=0, soft_max=14400,
+        options={'SKIP_SAVE', 'HIDDEN'},
+    )
 
     # ─── modal state ──────────────────────────────────────────────────────
     _timer = None
@@ -192,19 +201,38 @@ class GPUFLUID_OT_render(bpy.types.Operator):
 
         GPUFLUID_OT_render._is_running = True
 
-        # ─── SYNC PATH (round-6) ──────────────────────────────────────
+        # ─── SYNC PATH (round-6, watchdog added round-9) ─────────────
         if self.sync:
+            timeout = int(self.sync_timeout_sec) if self.sync_timeout_sec > 0 else None
             try:
                 self._proc = subprocess.Popen(
                     argv,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     bufsize=1, text=True, encoding="utf-8", errors="replace",
                 )
-                for line in self._proc.stdout:
-                    # Render produces less noise than bake — log at INFO
-                    # so callers see headless Blender startup + progress.
+                drained: list[str] = []
+                def _drain_lines(p, out):
+                    try:
+                        for line in p.stdout:
+                            out.append(line)
+                    except Exception:
+                        pass
+                drain_thread = threading.Thread(
+                    target=_drain_lines, args=(self._proc, drained), daemon=True)
+                drain_thread.start()
+                try:
+                    rc = self._proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5.0)
+                    GPUFLUID_OT_render._is_running = False
+                    self.report({"ERROR"},
+                        f"gpufluid render (sync) hit timeout after "
+                        f"{timeout}s — subprocess killed.")
+                    return {"CANCELLED"}
+                drain_thread.join(timeout=1.0)
+                for line in drained:
                     print(f"[render] {line.rstrip()}")
-                rc = self._proc.wait()
             except OSError as e:
                 GPUFLUID_OT_render._is_running = False
                 self.report({"ERROR"},
@@ -310,7 +338,13 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
         context.workspace.status_text_set(None)
+        # Round-9 reviewer flag: _abort cleans all 3 instance attrs,
+        # _finish only cleaned _proc — same drift contract _abort just
+        # fixed. Mirror the cleanup so re-fired-modal-on-same-instance
+        # never sees stale Queue/Thread.
         self._proc = None
+        self._stdout_q = None
+        self._stdout_thread = None
         if not ok:
             self.report({"ERROR"},
                 "gpufluid render failed — see system console")

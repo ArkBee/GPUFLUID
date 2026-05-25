@@ -71,7 +71,10 @@ def test_emit_table_wraps_inf_with_key_context():
     try:
         cb._emit_table(out, "simulation", {"gravity": float("inf")})
     except ValueError as e:
-        assert "simulation.gravity" in str(e) or "gravity" in str(e)
+        # Round-3 reviewer caught weak `or "gravity"` disjunct that
+        # would have masked the wrap. Require the qualified path.
+        assert "simulation.gravity" in str(e), (
+            f"expected 'simulation.gravity' in error, got: {e}")
         return
     pytest.fail("expected ValueError pointing at simulation.gravity")
 
@@ -221,28 +224,42 @@ def test_render_has_same_is_running_contract():
 
 def test_bake_modal_popen_wrapped_in_try_oserror():
     """Round-8 reviewer bug #1: modal Popen MUST be in try/except OSError
-    that clears _is_running on failure. Without it, OSError between
-    `_is_running=True` and Popen success leaks the flag forever."""
+    that clears _is_running on failure. Round-9 reviewer strengthening:
+    `except OSError` must appear BEFORE `_stdout_q = queue.Queue()` so
+    the OSError branch fires before thread/queue setup leaks resources.
+    """
     src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "bake.py").read_text(encoding="utf-8")
-    # Find the MODAL PATH block and verify try/except OSError contains
-    # GPUFLUID_OT_bake._is_running = False
     modal_idx = src.find("# ─── MODAL PATH")
     assert modal_idx > -1, "MODAL PATH section disappeared"
-    block = src[modal_idx:modal_idx + 1500]
-    assert "except OSError" in block, (
+    # End at "wm = context.window_manager" (start of modal-handler-add path)
+    end_idx = src.find("wm = context.window_manager", modal_idx)
+    block = src[modal_idx:end_idx if end_idx > -1 else modal_idx + 2000]
+    except_idx = block.find("except OSError")
+    queue_idx = block.find("self._stdout_q = queue.Queue()")
+    assert except_idx > -1, (
         "modal Popen needs except OSError — round-8 bug #1")
-    assert "_is_running = False" in block, (
-        "OSError branch must clear _is_running — round-8 bug #1")
+    assert queue_idx > -1, "stdout queue setup missing"
+    assert except_idx < queue_idx, (
+        "except OSError must come BEFORE queue setup, otherwise an "
+        "OSError on Popen leaves no chance to recover before allocating "
+        "Queue/Thread resources — round-9 reviewer strengthening")
+    assert "GPUFLUID_OT_bake._is_running = False" in block, (
+        "OSError branch must clear the class-level flag — round-8 bug #1")
 
 
 def test_sync_path_uses_try_finally_for_flag():
-    """Sync path must clear _is_running even on exception (try/finally)."""
+    """Sync path must clear _is_running even on exception (try/finally).
+    Window widened to 4000 chars in round-9 — watchdog code grew the
+    sync block beyond the original 2000."""
     src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "bake.py").read_text(encoding="utf-8")
     sync_idx = src.find("# ─── SYNC PATH")
     assert sync_idx > -1
-    block = src[sync_idx:sync_idx + 2000]
-    assert "finally:" in block
-    assert "_is_running = False" in block
+    # End at MODAL PATH marker so we don't accidentally grab modal-path
+    # finally:/_is_running statements.
+    modal_idx = src.find("# ─── MODAL PATH", sync_idx)
+    block = src[sync_idx:modal_idx if modal_idx > -1 else sync_idx + 4000]
+    assert "finally:" in block, "sync path lost its try/finally"
+    assert "GPUFLUID_OT_bake._is_running = False" in block
 
 
 def test_render_abort_cleans_all_three_instance_attrs():
@@ -256,3 +273,54 @@ def test_render_abort_cleans_all_three_instance_attrs():
     assert "self._proc = None" in block
     assert "self._stdout_q = None" in block
     assert "self._stdout_thread = None" in block
+
+
+# ─── Round-9 additions ──────────────────────────────────────────────────
+
+def test_emit_scalar_inline_table_propagates_inner_key():
+    """Round-9 fix: inline-table values with bad inner key now name
+    that key in the error, not just bare repr."""
+    cb = _load_config_builder()
+    bad = {"kind": "linear", "velocity": float("inf")}
+    try:
+        cb._emit_scalar(bad)
+    except ValueError as e:
+        assert "velocity" in str(e), (
+            f"expected 'velocity' in error message, got: {e}")
+        assert "non-finite" in str(e) or "inf" in str(e)
+        return
+    pytest.fail("expected ValueError naming 'velocity'")
+
+
+# NOTE: a sibling test for nested motion inside [[obstacle]] entries
+# uncovered a deeper round-1 bug — _emit_table's array-of-tables branch
+# drops table-valued fields like `motion` (dict) entirely instead of
+# inlining them. Filed as BACKLOG entry; not in round-9 scope to fix.
+# The scalar-side inline-table propagation IS verified by
+# test_emit_scalar_inline_table_propagates_inner_key above.
+
+
+def test_sync_has_watchdog_timeout_property():
+    """Round-9 watchdog: both OT_bake and OT_render must expose
+    sync_timeout_sec so a hung CLI doesn't freeze Blender forever."""
+    for op_file in ("bake.py", "render.py"):
+        src = (_ADDON_DIR / "gpufluid_blender" / "operators" / op_file).read_text(encoding="utf-8")
+        assert "sync_timeout_sec" in src, (
+            f"{op_file} must declare sync_timeout_sec IntProperty")
+        assert "TimeoutExpired" in src, (
+            f"{op_file} sync path must catch subprocess.TimeoutExpired")
+        assert "self._proc.kill()" in src, (
+            f"{op_file} timeout branch must kill the hung subprocess")
+
+
+def test_sync_watchdog_clears_is_running_on_timeout():
+    """If the watchdog fires, the is_running flag MUST be cleared."""
+    for op_file, op_class in (("bake.py", "GPUFLUID_OT_bake"),
+                              ("render.py", "GPUFLUID_OT_render")):
+        src = (_ADDON_DIR / "gpufluid_blender" / "operators" / op_file).read_text(encoding="utf-8")
+        # Find TimeoutExpired block, verify _is_running = False appears in it
+        idx = src.find("except subprocess.TimeoutExpired")
+        assert idx > -1, f"{op_file}: TimeoutExpired branch missing"
+        block = src[idx:idx + 800]
+        assert f"{op_class}._is_running = False" in block, (
+            f"{op_file}: TimeoutExpired branch must clear _is_running")

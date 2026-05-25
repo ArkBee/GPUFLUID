@@ -447,8 +447,10 @@ def _frame_change_handler(scene, depsgraph=None):
 
 def _prune_stale(scene=None):
     """Drop _PRELOAD entries whose obj.name no longer exists in any scene.
-    Call from detach/clear ops and load_post — paths that legitimately
-    invalidate keys. NOT from frame_change (too hot)."""
+    Round-8 moved this off the hot frame_change loop. Currently called
+    only from OT_detach_cache (round-3 reviewer caught the stale doc
+    that claimed `_on_load_post` and OT_clear too — those don't need
+    it because they `_PRELOAD.clear()` outright)."""
     if not _PRELOAD:
         return
     live_names = set()

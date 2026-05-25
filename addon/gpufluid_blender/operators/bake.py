@@ -310,6 +310,15 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         default=False,
         options={'SKIP_SAVE', 'HIDDEN'},
     )
+    sync_timeout_sec: bpy.props.IntProperty(
+        name="Sync timeout (seconds)",
+        description="Round-8 hardening: hard cap on sync-mode Popen.wait(). "
+                    "Without this, a hung CLI freezes Blender forever "
+                    "(no ESC, no modal). 0 = no limit. Default 600s = 10min "
+                    "(generous for 256³ bakes; tune down for CI).",
+        default=600, min=0, soft_max=7200,
+        options={'SKIP_SAVE', 'HIDDEN'},
+    )
 
     _timer = None
     _proc: Optional[subprocess.Popen] = None
@@ -487,15 +496,47 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # loop isn't ticking between bpy.ops calls. Drain stdout into
         # the addon logger so callers see CLI progress.
         if self.sync:
+            timeout = int(self.sync_timeout_sec) if self.sync_timeout_sec > 0 else None
             try:
                 self._proc = subprocess.Popen(
                     [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     bufsize=1, text=True, encoding="utf-8", errors="replace",
                 )
-                for line in self._proc.stdout:
+                # Round-9 hardening: drain stdout on a background thread so
+                # main-thread .wait() can honour the watchdog. Without this,
+                # `for line in proc.stdout` blocks forever if CLI silently
+                # hangs and freezes Blender with no ESC, no recovery.
+                import time as _time
+                drained: list[str] = []
+                def _drain_lines(p, out):
+                    try:
+                        for line in p.stdout:
+                            out.append(line)
+                    except Exception:
+                        pass
+                drain_thread = threading.Thread(
+                    target=_drain_lines, args=(self._proc, drained), daemon=True)
+                drain_thread.start()
+                try:
+                    rc = self._proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5.0)
+                    GPUFLUID_OT_bake._is_running = False
+                    self.report({"ERROR"},
+                        f"gpufluid bake (sync) hit timeout after "
+                        f"{timeout}s — CLI killed. Increase sync_timeout_sec "
+                        f"or set to 0 to disable the watchdog.")
+                    return {"CANCELLED"}
+                drain_thread.join(timeout=1.0)
+                for line in drained:
                     logger.info("bake: %s", line.rstrip())
-                rc = self._proc.wait()
+            except OSError as e:
+                GPUFLUID_OT_bake._is_running = False
+                self.report({"ERROR"},
+                            f"could not spawn bake subprocess: {e}")
+                return {"CANCELLED"}
             finally:
                 GPUFLUID_OT_bake._is_running = False
             if rc != 0:
@@ -529,27 +570,36 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # subsequent OT_bake reported "already running" until Blender
         # restart. OT_render already had this guard at render.py:226-235;
         # bake didn't.
+        # Round-9 reviewer flag: extend the OSError guard past Popen to
+        # cover Queue() and Thread.start() too. Both can raise OSError /
+        # RuntimeError under handle exhaustion; without the wrap, the
+        # round-8 fix only covered ⅓ of the spawn-failure surface.
         try:
             self._proc = subprocess.Popen(
                 [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 bufsize=1, text=True, encoding="utf-8", errors="replace",
             )
-        except OSError as e:
+            self._stdout_q = queue.Queue()
+            self._stdout_thread = threading.Thread(
+                target=subprocess_drain, args=(self._proc, self._stdout_q),
+                daemon=True)
+            self._stdout_thread.start()
+        except (OSError, RuntimeError) as e:
             GPUFLUID_OT_bake._is_running = False
+            # If Popen succeeded but Queue/Thread setup failed, kill the
+            # subprocess so it doesn't become an orphan with no drain.
+            if self._proc is not None and self._proc.poll() is None:
+                try:
+                    self._proc.kill(); self._proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+            self._proc = None
+            self._stdout_q = None
+            self._stdout_thread = None
             self.report({"ERROR"},
                         f"could not spawn bake subprocess: {e}")
             return {"CANCELLED"}
-        # Drain stdout in a background thread → queue, so modal() never
-        # blocks on readline() (which freezes Blender UI when the subprocess
-        # spends time silently, e.g. inside a nested Blender headless run
-        # for Alembic conversion). Helper extracted to operators/helpers.py
-        # so OT_render shares the exact same drain semantics (Phase 4).
-        self._stdout_q = queue.Queue()
-        self._stdout_thread = threading.Thread(
-            target=subprocess_drain, args=(self._proc, self._stdout_q),
-            daemon=True)
-        self._stdout_thread.start()
 
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.3, window=context.window)

@@ -317,9 +317,19 @@ def _emit_scalar(v: Any) -> str:
             return f"[\n  {inner},\n]"
         return "[" + ", ".join(_emit_scalar(x) for x in v) + "]"
     if isinstance(v, dict):
-        # Inline table.
-        body = ", ".join(f"{k} = {_emit_scalar(val)}" for k, val in v.items())
-        return "{ " + body + " }"
+        # Inline table. Round-8 reviewer flag: previously bare
+        # _emit_scalar(val) lost the inner key on error — a non-finite
+        # float in `{ kind = "linear", velocity = inf }` raised
+        # "non-finite float in TOML: inf" with no breadcrumb to
+        # `velocity`. Wrap each pair so the error names the inner key.
+        parts = []
+        for k, val in v.items():
+            try:
+                inner = _emit_scalar(val)
+            except ValueError as e:
+                raise ValueError(f"inline-table key '{k}': {e}") from None
+            parts.append(f"{k} = {inner}")
+        return "{ " + ", ".join(parts) + " }"
     # Reviewer flag: None used to raise this generic ValueError without
     # pointing at the key, leaving the caller debugging a 4000-line
     # scene_dict. Caller (_emit_table) now wraps this with key context.
