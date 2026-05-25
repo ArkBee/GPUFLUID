@@ -659,16 +659,24 @@ gpufluid/
 │   ├── io/                # I6 — ply r/w, cache.json manifest, usd writer
 │   └── cli/               # C7 — config (TOML), commands (simulate/bench/info)
 ├── addon/gpufluid_blender/   # A8 — Blender addon, ships as zip
-│   ├── __init__.py        # bl_info + register/unregister
+│   ├── __init__.py        # bl_info + register/unregister + @persistent handlers
 │   ├── blender_manifest.toml
-│   ├── preferences.py     # interpreter path
-│   ├── properties.py      # Domain/Fluid/Obstacle/Inflow/Outflow property groups
+│   ├── preferences.py     # interpreter + LRU caps (preload_cap, preload_max_frames)
+│   ├── properties.py      # Domain/Fluid/Obstacle/Inflow/Outflow/Whitewater PropertyGroups
 │   ├── operators/
-│   │   ├── bake.py        # modal subprocess + scene collection
-│   │   └── helpers.py     # add domain / mark fluid / mark obstacle / etc.
-│   ├── cache_loader.py    # frame_change handler + PLY reader for non-USD imports
-│   ├── config_builder.py  # bpy-free scene dict → TOML translator
-│   └── panels.py          # N-sidebar UI
+│   │   ├── bake.py        # OT_bake — sync OR modal subprocess + watchdog + reentrance guard
+│   │   ├── render.py      # OT_render — A8.13 (sync OR modal → headless Blender via Popen)
+│   │   ├── helpers.py     # mark_* single-role + clear/detach + open_cache_dir + Eevee preset
+│   │   ├── _animation.py  # F-curve scan helpers (Phase 4 split from bake.py)
+│   │   └── _collect.py    # Scene → scene_dict (Phase 4 split)
+│   ├── cache_loader/      # Phase 4: now a package
+│   │   ├── __init__.py    # @persistent frame_change_pre + load_post + _PRELOAD LRU + _prune_stale
+│   │   ├── _ply.py        # PLY parse (extracted)
+│   │   └── _ops.py        # OT_attach_cache + OT_attach_ww_cache + OT_detach_cache
+│   ├── render_bridge.py   # A8.9-A8.11: FrameMeshLoader, rebuild_surface_mesh, apply_eevee_preset
+│   ├── _headless_render.py # Popen wrapper invoked by CLI render
+│   ├── config_builder.py  # bpy-free scene_dict → TOML + overrides deep-merge
+│   └── panels.py          # 8-section "GpuFluid" sidebar UI
 ├── tests/                 # pytest, ≈70 tests, all green
 ├── examples/
 │   ├── scenes/            # TOML demo scenes for each step
@@ -710,7 +718,7 @@ python -c "import shutil; shutil.make_archive('gpufluid_blender', 'zip', '.', 'g
 | **M5** meshing | M5.1 density scatter, M5.2 density blur, M5.3 marching cubes (skimage CPU) + wall mask, **M5.4 GPU MC via wp.MarchingCubes (auto-engages ≥64³)**, M5.5 Taubin/Laplacian smoothing, M5.6 quadric decimation, M5.7 wall margin (now GPU kernel) | |
 | **I6** io | I6.1 PLY r/w, I6.2 cache manifest (cache.json), I6.3 particle .npy, I6.5 USD writer (time-sampled mesh) | I6.4 Alembic not implemented (USD wins for Blender's MeshSequenceCache) |
 | **C7** cli | C7.1 TOML schema, C7.2 simulate (with --resume / --start-frame / --checkpoint-every), C7.3 bench, C7.4 info | console script `gpufluid` |
-| **A8** addon | A8.1–A8.8 all impl. v0.6 UI exposes reseed, decimate, fill_mesh, PLANE obstacle, motion, inflow, outflow, USD, wall_margin | |
+| **A8** addon | A8.1–A8.13 all impl (round-1..11 hardening 2026-05-26). v0.8.0+: sync mode + watchdog on bake/render, ESC abort + cancel(), reentrance guard, @persistent frame_change + load_post handlers, `_PRELOAD` LRU + pre-swap pattern, single-role mark_*, attach_cache fallback, render Col attribute wiring, post-bake truncation sanity, TOML overrides escape-hatch, 48 pytest + headless CI (`blender -b -P examples/_ci_headless_bake.py`) + stress (`examples/_ci_stress_bake.py` — 100-frame scrub @ 0.39ms/frame) | A8.13 OT_render = headless-blender subprocess. Lessons codified at `~/.claude/CLAUDE.md §9`. |
 | **W7** whitewater | W7.1 system, W7.2 emit, W7.3 ballistic step | first-cut Ihmsen-lite, no foam/spray differentiation yet |
 
 Run `gpufluid info` to see live count. **Verified 2026-05-16 (post-S2.14/15/D4.3.GPU.BVH):** `gpufluid info` now force-loads `gpufluid.sim.whitewater`, `gpufluid.sim.reseed`, and `gpufluid.domain.mesh_sdf_gpu` so they always appear (was a footgun before). Importing `gpufluid` alone in a script still misses those — call the same `import` trio in user scripts if you need the full registry programmatically.

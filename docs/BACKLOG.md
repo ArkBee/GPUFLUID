@@ -737,7 +737,28 @@ the UI to stop users from toggling a no-op flag. To unhide: wire an
 `_export_obj` call (the obstacle path already has one in `bake.py`) and
 emit `kind="mesh", path=..., scale=avg_inv` in the fluid_sources entry.
 
-### TOML overrides path drops table-valued fields in [[array-of-tables]] `risk:medium value:user` — DEFERRED
+### Core MPM truncates at high res without reporting failure `risk:medium value:user` — DEFERRED (core, not addon)
+
+Live-found 2026-05-26 during round-10 stress test: at res 96, 200-frame
+MPM bake CLI exits **rc=0** after producing only ~26 mesh frames. No
+stderr, no log line, no .npy truncation marker — the addon's sync_bake
+correctly reports FINISHED (because rc=0 is the success contract) and
+auto-attaches a 26-frame cache. Addon-side workaround already shipped
+(round-10): post-bake sanity check compares mesh count to expected and
+downgrades to WARNING `produced 26/200 frames`. But the **underlying
+solver behavior** — silent early-exit at res 96 + multi-frame — is
+unexplained and lives in `src/gpufluid/sim/mpm/`. Could be OOM (no
+WARP-level OOM guard?), CFL-divergence early-stop heuristic, or kernel
+launch failure being swallowed. Repro: run `examples/_ci_stress_bake.py`
+with res 96 + frames=200 instead of round-10's res 64 + frames=100.
+
+### TOML overrides path drops table-valued fields in [[array-of-tables]] — ✅ FIXED 2026-05-26 (round-10, cf20a63)
+
+Was DEFERRED, then fixed same session. Round-10 reviewer caught the
+dead test; the fix in `config_builder._emit_table` array-of-tables
+branch now emits dict-valued fields as inline-tables instead of
+filtering them out. Nested array-of-tables inside an entry now emit
+a visible `# WARNING` comment rather than being silently dropped.
 
 Round-9 reviewer (2026-05-25) caught a dormant data-loss bug in the
 Phase 1 atomic TOML emitter. `config_builder._emit_table` for an

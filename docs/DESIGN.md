@@ -1616,18 +1616,28 @@ imports the resulting mesh cache (I6.x) onto a target object.
 
 | ID    | Block | Status |
 |-------|-------|--------|
-| A8.1  | Addon registration (`register/unregister`)                   | planned |
-| A8.2  | `GpufluidDomain` property group on Empty                     | planned |
-| A8.3  | `GpufluidFluid` property group (source/initial volume)       | planned |
-| A8.4  | `GpufluidObstacle` property group                            | planned |
-| A8.5  | Bake operator (export config → spawn CLI → progress UI)      | planned |
-| A8.6  | Cache import (PLY sequence → MeshSequenceCache modifier)     | planned |
-| A8.7  | UI panels (3D-view sidebar)                                  | planned |
-| A8.8  | Helper operators (add domain, add fluid, clear cache)        | planned |
+| A8.1  | Addon registration (`register/unregister`) — also installs `@persistent` `frame_change_pre` + `load_post` handlers so cache survives .blend save/reload | impl |
+| A8.2  | `GpufluidDomain` property group on Empty (+ `target_object` Pointer, `toml_overrides` escape-hatch, `color_mix_mode`, MPM tuning knobs, `whitewater_group`) | impl |
+| A8.3  | `GpufluidFluid` property group (source/initial volume + `use_color`/`use_temperature`) | impl |
+| A8.4  | `GpufluidObstacle` property group (+ `GpufluidInflow`/`GpufluidOutflow` with frame ranges, color, velocity, motion keyframes auto-emitted) | impl |
+| A8.5  | Bake operator (sync OR modal subprocess, ESC abort + cancel() callback, class-level reentrance guard, watchdog `sync_timeout_sec`, auto-attach, post-bake truncation sanity, stale-subdir clean, validate inflow frame ranges) | impl |
+| A8.6  | Cache import as Python package — per-frame PLY swap via `_PRELOAD` LRU (cap from prefs) + pre-swap pattern so old current mesh's users drops to 0 before `_free_table` runs. Auto-reattach on `load_post`. Whitewater point-cloud sibling in `_ops.py`. Respects `cache.json:frame_count` to avoid stale-frame leak | impl |
+| A8.7  | UI panels (3D-view sidebar, "GpuFluid" category, 8 sections: Domain/Fluid/Obstacle/Inflow/Outflow/Whitewater/Bake/main) | impl |
+| A8.8  | Helper operators — `add_domain`, `mark_*` single-role (clears peer flags), `clear_cache`, `detach_cache` (scans scene, scrubs Domain bake-trace + cache obj props + `_PRELOAD`), `open_cache_dir`, `detect_interpreter`, `apply_eevee_preset` | impl |
 | A8.9  | Eevee perf preset — explicit samples/bloom/SSR/GTAO setup for headless renders. Without this Blender uses photo-quality defaults (~3× slower) | impl |
-| A8.10 | Mesh swap-in frame loader — Blender frame-change handler that reads `cache_dir/mesh/frame_NNNN.ply` via I6.4 and rebuilds the surface object's vertex/face buffers in-place via `foreach_set` | impl |
-| A8.11 | Scene builder helpers — camera/lights/material/overlay primitives for the Blender bridge. Composable with A8.5..A8.8 or callable standalone for headless renders | impl |
-| A8.12 | Headless render CLI command `gpufluid render <cache> <scene> --out <png_dir>` — wraps A8.9 + A8.10 + A8.11 inside a `blender --background --python` subprocess. Used by tests and CI | impl |
+| A8.10 | Mesh swap-in frame loader — Blender frame-change handler that reads `cache_dir/mesh/frame_NNNN.ply` via I6.1 + emits per-vertex `Col` attribute when PLY has RGB | impl |
+| A8.11 | Scene builder helpers — camera/lights/material/overlay primitives for the Blender bridge. Material now wires Attribute("Col") + Mix(RGBA) so per-vertex colours from inflow (mixbox etc.) reach the rendered PNG | impl |
+| A8.12 | Headless render CLI command `gpufluid render <cache> <scene> --out <png_dir>` — wraps A8.9 + A8.10 + A8.11 inside a `blender --background --python` subprocess | impl |
+| A8.13 | Render operator — sync OR modal subprocess to spawn `python -m gpufluid.cli render` → which in turn launches headless Blender. Symmetric with A8.5: ESC abort, cancel() callback, reentrance guard, watchdog `sync_timeout_sec` | impl |
+
+Round 1-10 hardening (2026-05-26): contract refactor + addon-bug audit
+with 10 self-review rounds. Real bugs found: ~25 across operators,
+config builder, cache lifecycle, sync mode, save/load survival, role
+single-marking, watchdog, OSError leaks, materials pipeline, vertex
+colour propagation. Smoke / regression coverage: 48 pytest cases +
+`examples/_ci_headless_bake.py` (bake+render headless) +
+`examples/_ci_stress_bake.py` (100-frame scrub @ 0.39ms mean).
+Lessons codified at `~/.claude/CLAUDE.md §9`.
 
 ---
 

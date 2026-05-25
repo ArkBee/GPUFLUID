@@ -554,7 +554,18 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 mesh_dir = Path(str(cache_dir)) / "mesh"
                 actual = (len(list(mesh_dir.glob("frame_*.ply")))
                           if mesh_dir.is_dir() else 0)
-                expected = int(scene_dict["simulation"]["frames"])
+                # Round-11 reviewer fix: use the MERGED frames count,
+                # not pre-overrides. If user overrode [simulation] frames
+                # via toml_overrides, CLI honored that — comparing
+                # against scene_dict (pre-merge) gave spurious truncation
+                # warnings. Source of truth is the actual emitted TOML.
+                try:
+                    import tomllib  # py 3.11+
+                except ImportError:
+                    import tomli as tomllib  # type: ignore
+                emitted = tomllib.loads(toml_str)
+                expected = int(emitted.get("simulation", {}).get(
+                    "frames", scene_dict["simulation"]["frames"]))
                 if 0 < actual < expected:
                     self.report({"WARNING"},
                         f"gpufluid bake produced {actual}/{expected} frames "
