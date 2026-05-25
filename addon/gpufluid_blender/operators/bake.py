@@ -434,7 +434,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         for cf in list(bpy.data.cache_files):
             if cf.users == 0:
                 try:
-                    bpy.data.cache_files.remove(cf)
+                    bpy.data.cache_files.remove(cf, do_unlink=True)
                 except Exception as e:
                     logger.warning(
                         "addon.bake.cache_files_remove_failed",
@@ -476,12 +476,20 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
 
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.3, window=context.window)
+        # Set the reentrance flag BEFORE spawning subprocess.Popen, not
+        # at the end of execute(). Round-5 reviewer caught this: between
+        # `subprocess.Popen()` and the final `_is_running=True` there's
+        # a ~20-line window where script-driven reentrant calls (Python
+        # console, MCP, automation) would see `_is_running=False` and
+        # spawn a SECOND subprocess racing the first into the same
+        # cache_dir. Mouse-double-click is safe (single event loop tick
+        # between dispatches), Python double-call wasn't.
+        GPUFLUID_OT_bake._is_running = True
         wm.modal_handler_add(self)
         domain["gpufluid_origin"] = list(origin)
         domain["gpufluid_dom_size"] = list(dom_size)
         domain["gpufluid_cache_dir"] = str(cache_dir)
         context.workspace.status_text_set("gpufluid baking…")
-        GPUFLUID_OT_bake._is_running = True
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):

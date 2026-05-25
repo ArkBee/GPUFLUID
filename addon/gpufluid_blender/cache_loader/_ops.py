@@ -56,7 +56,12 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
         cache_dir_raw = self.cache_dir
         if not cache_dir_raw:
             active = context.view_layer.objects.active
-            if active is not None and active.gpufluid_domain.is_domain:
+            # `gpufluid_domain` attr is missing on objects from .blends
+            # that were saved before the addon registered its property
+            # groups — getattr-guard so we degrade to the explicit-path
+            # case instead of AttributeError'ing.
+            active_dom = getattr(active, "gpufluid_domain", None)
+            if active is not None and active_dom is not None and active_dom.is_domain:
                 cache_dir_raw = active.gpufluid_domain.cache_dir
                 # Recompute world AABB from the live Domain so origin and
                 # dom_size match what Bake would have written. Duplicated

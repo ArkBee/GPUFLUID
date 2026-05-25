@@ -453,8 +453,24 @@ def _on_load_post(_dummy):
         if not cache_dir or not os.path.isdir(str(cache_dir)):
             continue
         pattern = obj.get("gpufluid_cache_pattern", "mesh/frame_{:04d}.ply")
-        origin = list(obj.get("gpufluid_cache_origin", [0.0, 0.0, 0.0]))
-        dom_size = tuple(obj.get("gpufluid_cache_dom_size", [1.0, 1.0, 1.0]))
+        origin_key = "gpufluid_cache_origin"
+        dom_size_key = "gpufluid_cache_dom_size"
+        # Round-5 reviewer caught: silently defaulting dom_size to
+        # (1, 1, 1) when the prop is missing positions every preloaded
+        # mesh in the [0,1]³ corner of world — worse UX than the
+        # pre-fix behaviour of leaving the mesh frozen at its last
+        # baked state. .blend files saved before round-3 (when
+        # gpufluid_cache_dom_size became a per-object prop) hit this.
+        # Skip reattach with a warning instead of silently miscaling.
+        if origin_key not in obj.keys() or dom_size_key not in obj.keys():
+            _addon_logger.warning(
+                "cache_loader: '%s' has gpufluid_cache_dir but no saved "
+                "origin/dom_size — skipping load_post auto-reattach. "
+                "Re-bake (or click Attach Surface) to repopulate.",
+                obj.name)
+            continue
+        origin = list(obj[origin_key])
+        dom_size = tuple(obj[dom_size_key])
         try:
             _preload_sequence(obj, str(cache_dir), str(pattern),
                               origin, dom_size=dom_size)
