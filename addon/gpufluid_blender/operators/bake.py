@@ -507,7 +507,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 # main-thread .wait() can honour the watchdog. Without this,
                 # `for line in proc.stdout` blocks forever if CLI silently
                 # hangs and freezes Blender with no ESC, no recovery.
-                import time as _time
+                # (round-10 reviewer: removed dead `import time as _time`.)
                 drained: list[str] = []
                 def _drain_lines(p, out):
                     try:
@@ -544,6 +544,24 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                             f"gpufluid bake (sync) failed with rc={rc} — "
                             f"see system console")
                 return {"CANCELLED"}
+            # Round-10 stress-test finding: CLI can exit 0 having produced
+            # fewer frames than requested (e.g. solver OOM at high res, or
+            # an early-stop heuristic). Without this check, sync-bake
+            # reported FINISHED + auto-attached cache while user lost
+            # most of the simulation. Compare actual vs requested frame
+            # count and downgrade to WARNING when truncated.
+            try:
+                mesh_dir = Path(str(cache_dir)) / "mesh"
+                actual = (len(list(mesh_dir.glob("frame_*.ply")))
+                          if mesh_dir.is_dir() else 0)
+                expected = int(scene_dict["simulation"]["frames"])
+                if 0 < actual < expected:
+                    self.report({"WARNING"},
+                        f"gpufluid bake produced {actual}/{expected} frames "
+                        f"— CLI exited cleanly but truncated (likely solver "
+                        f"OOM or early-stop). Cache attached as-is.")
+            except Exception:
+                pass
             # Auto-attach inline so sync callers can immediately query
             # the cache mesh without an extra ops call. Mirrors _finish.
             try:

@@ -381,11 +381,23 @@ def _emit_table(out_lines: List[str], path: str, table: Dict[str, Any]) -> None:
         sub_path = f"{path}.{k}" if path else k
         for i, entry in enumerate(arr):
             out_lines.append(f"[[{sub_path}]]")
-            inner_scalars = {kk: vv for kk, vv in entry.items() if not _is_table(vv) and not _is_array_of_tables(vv)}
-            for kk, vv in inner_scalars.items():
-                prefix = f"{sub_path}[{i}]."
+            prefix = f"{sub_path}[{i}]."
+            # Round-10 fix (data-loss bug from BACKLOG): include
+            # dict-valued fields as inline-tables, not just scalars.
+            # Pre-fix code filtered them out → motion = {...} on an
+            # obstacle entry was silently dropped from the overrides-
+            # merged TOML output. _emit_scalar already handles dict as
+            # inline-table; just don't exclude it here.
+            for kk, vv in entry.items():
+                if _is_array_of_tables(vv):
+                    # Nested array-of-tables inside an entry — not used
+                    # by current scene_dict. Log explicitly so a future
+                    # schema change doesn't silently lose them.
+                    out_lines.append(
+                        f"# WARNING: nested [[..]] in {prefix}{kk} dropped "
+                        f"(_emit_table doesn't handle this case)")
+                    continue
                 out_lines.append(f"{kk} = {_emit_with_key(kk, vv, prefix)}")
-            # Arrays-of-tables nested inside an entry are not used by us.
             out_lines.append("")
 
 

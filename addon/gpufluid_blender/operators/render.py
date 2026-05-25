@@ -321,9 +321,13 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         # attrs (_proc, _stdout_q, _stdout_thread) after round-7. Render
         # only cleared _proc — drift from the symmetric contract. Same
         # re-fire-modal-on-same-instance hazard, fix the same way.
+        # Round-10 reviewer: also clear _out_dir for full symmetry —
+        # otherwise re-fire of same instance carries stale out path
+        # into the report message.
         self._proc = None
         self._stdout_q = None
         self._stdout_thread = None
+        self._out_dir = ""
         self.report({"WARNING"}, f"gpufluid render aborted ({reason})")
         return {"CANCELLED"}
 
@@ -341,13 +345,17 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         # Round-9 reviewer flag: _abort cleans all 3 instance attrs,
         # _finish only cleaned _proc — same drift contract _abort just
         # fixed. Mirror the cleanup so re-fired-modal-on-same-instance
-        # never sees stale Queue/Thread.
+        # never sees stale Queue/Thread. Round-10: include _out_dir
+        # so finish-message context is fresh per run. We snapshot
+        # before clear so the INFO report below still has the path.
+        _out = self._out_dir
         self._proc = None
         self._stdout_q = None
         self._stdout_thread = None
+        self._out_dir = ""
         if not ok:
             self.report({"ERROR"},
                 "gpufluid render failed — see system console")
             return {"CANCELLED"}
-        self.report({"INFO"}, f"gpufluid render complete: {self._out_dir}")
+        self.report({"INFO"}, f"gpufluid render complete: {_out}")
         return {"FINISHED"}

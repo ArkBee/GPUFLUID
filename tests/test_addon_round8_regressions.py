@@ -262,6 +262,38 @@ def test_sync_path_uses_try_finally_for_flag():
     assert "GPUFLUID_OT_bake._is_running = False" in block
 
 
+def test_emit_scalar_nested_inline_table_recurses():
+    """Round-10 reviewer gap: round-9 test only covered flat inline-table.
+    Nested case `{a: {b: inf}}` should produce chained key context."""
+    cb = _load_config_builder()
+    nested = {"motion": {"kind": "linear", "amp": float("inf")}}
+    try:
+        cb._emit_scalar(nested)
+    except ValueError as e:
+        # Outer wraps with 'motion', inner wraps with 'amp'.
+        # Either name reaching the message proves recursion fires.
+        msg = str(e)
+        assert "motion" in msg and "amp" in msg, (
+            f"expected both 'motion' and 'amp' in chain, got: {msg}")
+        return
+    pytest.fail("expected ValueError for nested inline-table")
+
+
+def test_render_finish_cleans_all_instance_attrs():
+    """Round-10 reviewer gap: round-9 added cleanup to _abort but
+    asymmetric check for _finish. Source-assert that _finish clears
+    all four instance attrs including the round-10 _out_dir addition."""
+    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "render.py").read_text(encoding="utf-8")
+    finish_idx = src.find("def _finish(self")
+    assert finish_idx > -1
+    block = src[finish_idx:finish_idx + 1500]
+    assert "self._proc = None" in block
+    assert "self._stdout_q = None" in block
+    assert "self._stdout_thread = None" in block
+    assert "self._out_dir = " in block, (
+        "round-10 added _out_dir to cleanup contract")
+
+
 def test_render_abort_cleans_all_three_instance_attrs():
     """Round-8 reviewer bug #6: render._abort must clear _proc,
     _stdout_q, _stdout_thread — symmetry with round-7 bake fix."""
@@ -273,6 +305,9 @@ def test_render_abort_cleans_all_three_instance_attrs():
     assert "self._proc = None" in block
     assert "self._stdout_q = None" in block
     assert "self._stdout_thread = None" in block
+    # Round-10 added _out_dir to _abort cleanup too
+    assert "self._out_dir = " in block, (
+        "round-10 added _out_dir to abort cleanup contract")
 
 
 # ─── Round-9 additions ──────────────────────────────────────────────────

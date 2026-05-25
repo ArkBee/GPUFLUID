@@ -135,16 +135,21 @@ additionally has at least one `test_*` matching the block ID slug;
 | C7.1 | TOML config schema | C7 | — | plan |
 | W7.3 | Whitewater ballistic advect | W7 | — | plan |
 | W7.6 | Kind sidecar I/O for render | W7 | — | plan |
-| A8.1 | Addon register/unregister | A8 | — | plan |
-| A8.2 | Domain property group | A8 | — | plan |
-| A8.2.1 | Surface tension property group (B1.1) | A8 | — | plan |
-| A8.2.2 | Whitewater property group (B1.5) | A8 | — | plan |
-| A8.3 | Fluid source | A8 | — | plan |
-| A8.3.1 | Per-source colour fields (B1.2) | A8 | — | plan |
-| A8.4 | Obstacle source | A8 | — | plan |
-| A8.6 | Cache import (per-frame PLY swap) | A8 | — | plan |
-| A8.6.1 | Whitewater point-cloud import | A8 | — | plan |
-| A8.7 | UI panels | A8 | — | plan |
-| A8.7.1 | Whitewater sub-panel (B1.5) | A8 | — | plan |
-| A8.8 | Helper operators | A8 | — | plan |
+| A8.1 | Addon register/unregister | A8 | `addon/gpufluid_blender/__init__.py` | impl |
+| A8.2 | Domain property group | A8 | `addon/gpufluid_blender/properties.py` | impl |
+| A8.2.1 | Surface tension property group (B1.1) | A8 | `addon/gpufluid_blender/properties.py` | impl |
+| A8.2.2 | Whitewater property group (B1.5) | A8 | `addon/gpufluid_blender/properties.py` | impl |
+| A8.3 | Fluid source | A8 | `addon/gpufluid_blender/properties.py` | impl |
+| A8.3.1 | Per-source colour fields (B1.2) | A8 | `addon/gpufluid_blender/properties.py` | impl |
+| A8.4 | Obstacle source | A8 | `addon/gpufluid_blender/properties.py` | impl |
+| A8.5 | Bake operator (sync + modal subprocess, ESC abort, reentrance guard, watchdog) | A8 | `addon/gpufluid_blender/operators/bake.py` | impl |
+| A8.6 | Cache import (per-frame PLY swap, LRU preload, load_post auto-reattach) | A8 | `addon/gpufluid_blender/cache_loader/` | impl |
+| A8.6.1 | Whitewater point-cloud import | A8 | `addon/gpufluid_blender/cache_loader/_ops.py` | impl |
+| A8.7 | UI panels (8 sections under "GpuFluid" sidebar category) | A8 | `addon/gpufluid_blender/panels.py` | impl |
+| A8.7.1 | Whitewater sub-panel (B1.5) | A8 | `addon/gpufluid_blender/panels.py` | impl |
+| A8.8 | Helper operators (mark_*/clear/detach/open_cache_dir/detect_interp/single-role) | A8 | `addon/gpufluid_blender/operators/helpers.py` | impl |
+| A8.9 | Eevee render preset (taa_samples + bloom/ssr off) | A8 | `addon/gpufluid_blender/render_bridge.py` | impl |
+| A8.10 | `FrameMeshLoader` — per-frame PLY swap via foreach_set (carries `Col` attr) | A8 | `addon/gpufluid_blender/render_bridge.py` | impl |
+| A8.11 | `rebuild_surface_mesh` — bulk vert/face/colour writer | A8 | `addon/gpufluid_blender/render_bridge.py` | impl |
+| A8.13 | Render operator (sync + modal subprocess to headless Blender, ESC abort, reentrance guard, watchdog) | A8 | `addon/gpufluid_blender/operators/render.py` | impl |
 
