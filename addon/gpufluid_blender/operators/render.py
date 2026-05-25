@@ -2,7 +2,7 @@
 
 Companion to :mod:`operators.bake` (A8.5). Where Bake spawns the host
 Python with ``-m gpufluid.cli simulate <scene.toml>``, Render spawns the
-same interpreter with ``-m gpufluid render <cache> <scene>`` — which in
+same interpreter with ``-m gpufluid.cli render <cache> <scene>`` — which in
 turn launches a headless Blender via :mod:`_headless_render` (A8.12) to
 run the Eevee pipeline against the baked cache.
 
@@ -158,7 +158,7 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         self._out_dir = str(out_dir)
 
         argv = [
-            interp, "-m", "gpufluid", "render",
+            interp, "-m", "gpufluid.cli", "render",
             str(cache_dir), str(scene_toml),
             "--out", str(out_dir),
             "--label", self.label,

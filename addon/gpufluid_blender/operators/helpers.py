@@ -123,8 +123,9 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
         # until Blender releases the cache_file data-block. Sequence:
         #   1) Unlink cache_file from every MSC modifier
         #   2) Remove the MSC modifiers themselves
-        #   3) Call orphans_purge to actually free the now-unused cache_file
-        #      datablocks (this releases the underlying file handle)
+        #   3) Drop the now-unused cache_file datablocks via the data API
+        #      (releases the underlying file handle). Direct data-API removal
+        #      avoids the orphans_purge poll-failure outside an Outliner area.
         released = 0
         for obj in context.scene.objects:
             for m in list(obj.modifiers):
@@ -133,10 +134,10 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
                     obj.modifiers.remove(m)
                     released += 1
         # Also drop any pre-loaded PLY mesh tables — pointing at meshes about
-        # to be deleted by orphans_purge would raise ReferenceError next frame.
-        # Phase 4 bonus fix: route each entry through ``_free_table`` so
-        # mesh datablocks with users==0 actually get removed instead of
-        # leaking in ``bpy.data.meshes`` after a bare ``_PRELOAD.clear()``.
+        # to be deleted would raise ReferenceError next frame. Phase 4 bonus
+        # fix: route each entry through ``_free_table`` so mesh datablocks
+        # with users==0 actually get removed instead of leaking in
+        # ``bpy.data.meshes`` after a bare ``_PRELOAD.clear()``.
         try:
             from ..cache_loader import _PRELOAD, _free_table
             for _name, _table in list(_PRELOAD.items()):
@@ -144,11 +145,15 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
             _PRELOAD.clear()
         except Exception:
             pass
-        try:
-            bpy.ops.outliner.orphans_purge(
-                do_local_ids=True, do_linked_ids=False, do_recursive=True)
-        except Exception:
-            pass
+        # Drop orphan cache_files via data API (was bpy.ops.outliner.orphans_purge
+        # which failed poll outside an Outliner area; try/except masked it,
+        # leaving .abc mmap'd → next bake's overwrite silently failed).
+        for cf in list(bpy.data.cache_files):
+            if cf.users == 0:
+                try:
+                    bpy.data.cache_files.remove(cf)
+                except Exception:
+                    pass
         # Brief settle for Windows file lock release
         time.sleep(0.1)
         if os.path.isdir(cache):

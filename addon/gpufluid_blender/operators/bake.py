@@ -379,19 +379,24 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # subprocess runs. The CLI writes <cache_dir>/cache.abc as part of
         # the bake, but Windows won't let it overwrite a file Blender has
         # mmap'd via MSC — the new .abc write fails silently, the user
-        # sees the OLD simulation on next play. We strip MSCs + purge
+        # sees the OLD simulation on next play. We strip MSCs + drop
         # orphan cache_files, then re-attach in _finish() after CLI exits.
-        import bpy as _bpy
         for obj in context.scene.objects:
             for m in list(obj.modifiers):
                 if m.type == "MESH_SEQUENCE_CACHE":
                     m.cache_file = None
                     obj.modifiers.remove(m)
-        try:
-            _bpy.ops.outliner.orphans_purge(
-                do_local_ids=True, do_linked_ids=False, do_recursive=True)
-        except Exception:
-            pass
+        # Direct data-API drop (no dependency on Outliner context — the
+        # original bpy.ops.outliner.orphans_purge failed poll outside an
+        # Outliner area and the try/except masked it, leaving .abc mmap'd).
+        for cf in list(bpy.data.cache_files):
+            if cf.users == 0:
+                try:
+                    bpy.data.cache_files.remove(cf)
+                except Exception as e:
+                    logger.warning(
+                        "addon.bake.cache_files_remove_failed",
+                        extra={"name": cf.name, "err": str(e)})
 
         self._proc = subprocess.Popen(
             [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],

@@ -41,35 +41,31 @@ def _bbox_world(obj) -> tuple:
     return ((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
 
 
-def _is_animated(obj, context):
-    """Honest depsgraph check: evaluate matrix_world at frame_start and
-    frame_start+1 and compare. This catches constraints, drivers, and
-    animated parents — none of which the F-curve-only
-    ``_matrix_world_at_frame`` below can express. Previously this
-    returned True on any constraint and then the keyframe sampler froze
-    the object at frame 0 (constraints were a silent footgun)."""
-    scene = context.scene
-    # Sample at the inflow's own start-frame when present (matches the
-    # keyframe-emission window below), else current scene frame.
-    try:
-        f0 = int(obj.gpufluid_inflow.frame_start)
-    except (AttributeError, TypeError):
-        f0 = scene.frame_current
-    saved = scene.frame_current
-    try:
-        scene.frame_set(f0)
-        dg = bpy.context.evaluated_depsgraph_get()
-        m0 = obj.evaluated_get(dg).matrix_world.copy()
-        scene.frame_set(f0 + 1)
-        dg = bpy.context.evaluated_depsgraph_get()
-        m1 = obj.evaluated_get(dg).matrix_world.copy()
-    finally:
-        scene.frame_set(saved)
-    # Frobenius norm of the difference; 1e-6 absorbs FP noise on truly
-    # static rigs and trips on sub-millimetre motion.
-    diff = sum((m0[i][j] - m1[i][j]) ** 2
-               for i in range(4) for j in range(4)) ** 0.5
-    return diff > 1e-6
+def _is_animated(obj, context=None):
+    """Animated = has F-curves on self OR any ancestor in the parent chain.
+
+    Earlier Phase 2 replaced the original f-curve check with a depsgraph
+    probe (scene.frame_set ×2 + restore). It was correct but cost two
+    full depsgraph rebuilds *per inflow per bake* — measurable regression
+    on 5+ inflow scenes. We revert to F-curve scanning and additionally
+    walk the parent chain, which fixes the original bug (parent-keyframed
+    location was being missed). Constraints/drivers without backing
+    F-curves remain a known limitation — documented in BACKLOG.md.
+
+    ``context`` accepted for API parity with earlier callers; unused.
+    """
+    del context  # signature parity; F-curve scan is context-free
+    o = obj
+    seen = set()
+    while o is not None and id(o) not in seen:
+        seen.add(id(o))
+        ad = getattr(o, "animation_data", None)
+        if ad is not None:
+            act = getattr(ad, "action", None)
+            for _ in _iter_fcurves(act):
+                return True
+        o = getattr(o, "parent", None)
+    return False
 
 
 def _iter_fcurves(action):

@@ -149,11 +149,18 @@ def _domain_whitewater_visibility(scene):
 _PRELOAD: "OrderedDict[str, dict[int, bpy.types.Mesh]]" = OrderedDict()
 
 
+# Blender's addon prefs are keyed by the TOP-level package, not the
+# nested module __package__ (which here is "gpufluid_blender.cache_loader").
+# Using __package__ directly made the lookup miss every time and silently
+# fall through to the default cap. Strip to the top segment.
+_ADDON_PKG = (__package__ or "").split(".")[0]
+
+
 def _preload_cap() -> int:
     """Read the LRU cap from addon preferences. Falls back to 8 when prefs
     can't be reached (e.g. during pytest or first-tick before register)."""
     try:
-        prefs = bpy.context.preferences.addons[__package__].preferences
+        prefs = bpy.context.preferences.addons[_ADDON_PKG].preferences
         return int(getattr(prefs, "preload_cap", 8))
     except (AttributeError, KeyError, RuntimeError):
         return 8
@@ -162,7 +169,7 @@ def _preload_cap() -> int:
 def _preload_max_frames() -> int:
     """Read the per-call max_frames bound from prefs. Falls back to 10000."""
     try:
-        prefs = bpy.context.preferences.addons[__package__].preferences
+        prefs = bpy.context.preferences.addons[_ADDON_PKG].preferences
         return int(getattr(prefs, "preload_max_frames", 10000))
     except (AttributeError, KeyError, RuntimeError):
         return 10000

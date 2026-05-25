@@ -82,7 +82,7 @@ def _addon_argv(cache: str, scene: str, out: str, *,
     file changes its argv layout this test fails loud.
     """
     argv = [
-        "python", "-m", "gpufluid", "render",
+        "python", "-m", "gpufluid.cli", "render",
         cache, scene,
         "--out", out,
         "--label", label,
@@ -112,7 +112,7 @@ def _addon_argv(cache: str, scene: str, out: str, *,
 def test_cli_parser_accepts_addon_argv(kwargs, expected):
     parser = _cli_parser()
     addon_argv = _addon_argv("C:/c", "C:/c/scene.toml", "C:/c/render", **kwargs)
-    # strip the `python -m gpufluid` prelude — argparse expects subcommand argv
+    # strip the `python -m gpufluid.cli` prelude — argparse expects subcommand argv
     ns = parser.parse_args(addon_argv[3:])
     assert ns.cmd == "render"
     assert ns.cache == "C:/c"
