@@ -46,9 +46,39 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
     force_ply: bpy.props.BoolProperty(name="Force PLY preload", default=True)
 
     def execute(self, context):
-        cache_dir = bpy.path.abspath(self.cache_dir)
+        # Fallback when invoked from the Attach Surface button without
+        # the F6 popup args filled (live test 2026-05-25): if cache_dir
+        # is empty AND there's an active Domain in the scene, derive
+        # cache_dir + origin + dom_size from it. The post-bake auto-attach
+        # in operators/bake.py always passes explicit args, so this only
+        # kicks in for the standalone button flow.
+        cache_dir_raw = self.cache_dir
+        if not cache_dir_raw:
+            active = context.view_layer.objects.active
+            if active is not None and active.gpufluid_domain.is_domain:
+                cache_dir_raw = active.gpufluid_domain.cache_dir
+                # Recompute world AABB from the live Domain so origin and
+                # dom_size match what Bake would have written. Duplicated
+                # rather than imported from operators._animation to keep
+                # cache_loader package free of cross-package coupling.
+                import mathutils
+                if active.type == "EMPTY":
+                    d = active.empty_display_size
+                    local = [mathutils.Vector(c) for c in (
+                        (-d,-d,-d),(d,-d,-d),(d,d,-d),(-d,d,-d),
+                        (-d,-d,d),(d,-d,d),(d,d,d),(-d,d,d))]
+                    pts = [active.matrix_world @ v for v in local]
+                else:
+                    pts = [active.matrix_world @ mathutils.Vector(c)
+                           for c in active.bound_box]
+                xs=[p.x for p in pts]; ys=[p.y for p in pts]; zs=[p.z for p in pts]
+                lo = (min(xs), min(ys), min(zs))
+                hi = (max(xs), max(ys), max(zs))
+                self.origin = lo
+                self.dom_size = (hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2])
+        cache_dir = bpy.path.abspath(cache_dir_raw)
         if not os.path.isdir(cache_dir):
-            self.report({"ERROR"}, f"cache dir not found: {cache_dir}")
+            self.report({"ERROR"}, f"cache dir not found: {cache_dir or '(empty — no active Domain)'}")
             return {"CANCELLED"}
 
         target = (context.scene.objects.get(self.target_name)
