@@ -207,9 +207,68 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     surf.parent = pivot
     fluid_mat = bpy.data.materials.new("fluidcube_fluid")
     fluid_mat.use_nodes = True
-    fbsdf = fluid_mat.node_tree.nodes.get("Principled BSDF")
+    nt = fluid_mat.node_tree
+    fbsdf = nt.nodes.get("Principled BSDF")
     if fbsdf:
         fbsdf.inputs["Base Color"].default_value = (*fluid_color, 1.0)
+        # Wire mesh.color_attributes["Col"] into Base Color when the
+        # surface has it, so per-vertex colours from inflow (mixbox etc.)
+        # actually reach the rendered PNG. Without this the renderer
+        # ignores per-vertex data and everything looks --color uniform.
+        # Live-found 2026-05-25 (round-3 test #17: multi-source mixbox
+        # showed clear red↔blue blending at the mesh level but rendered
+        # as flat grey because no Attribute node was wired). The MixRGB
+        # node lets us fall back to --color when the mesh has no Col
+        # layer (e.g. obstacle-only or temperature-colormap previews
+        # that use a different attribute name).
+        attr = nt.nodes.new("ShaderNodeAttribute")
+        attr.attribute_type = "GEOMETRY"
+        attr.attribute_name = "Col"
+        attr.location = (fbsdf.location.x - 380, fbsdf.location.y)
+        mix = nt.nodes.new("ShaderNodeMix")
+        mix.data_type = "RGBA"
+        mix.blend_type = "MIX"
+        mix.location = (fbsdf.location.x - 180, fbsdf.location.y)
+        # factor = Attribute.Alpha — Attribute node sets Alpha=1.0 when
+        # the named layer exists, 0.0 when it doesn't. So mix picks
+        # per-vertex Col where present, --color elsewhere, no extra logic.
+        # Address Mix node sockets by name. With data_type='RGBA' the
+        # node exposes Factor + A (color) + B (color) + Result (color).
+        # Indexing by int is unstable across Blender versions because
+        # multiple typed Factor/A/B sockets coexist hidden by data_type.
+        def _named_input(node, name):
+            # On 4.x+ duplicate socket names exist (one per data_type);
+            # pick the first ENABLED one matching the name.
+            for s in node.inputs:
+                if s.name == name and s.enabled:
+                    return s
+            for s in node.inputs:
+                if s.name == name:
+                    return s
+            return None
+        def _named_output(node, name):
+            for s in node.outputs:
+                if s.name == name and s.enabled:
+                    return s
+            for s in node.outputs:
+                if s.name == name:
+                    return s
+            return None
+        sock_factor = _named_input(mix, "Factor")
+        sock_a = _named_input(mix, "A")
+        sock_b = _named_input(mix, "B")
+        sock_result = _named_output(mix, "Result")
+        if all([sock_factor, sock_a, sock_b, sock_result]):
+            nt.links.new(attr.outputs["Alpha"], sock_factor)
+            sock_a.default_value = (*fluid_color, 1.0)
+            nt.links.new(attr.outputs["Color"], sock_b)
+            nt.links.new(sock_result, fbsdf.inputs["Base Color"])
+        else:
+            # If the Mix node layout changed, fall back to the original
+            # uniform colour — better than a crashing renderer.
+            fbsdf.inputs["Base Color"].default_value = (*fluid_color, 1.0)
+            nt.nodes.remove(mix)
+            nt.nodes.remove(attr)
         # Per-fluid look: honey is glossy + transmissive, oil is half-glossy,
         # water is highly transmissive.
         if label.lower() == "water":

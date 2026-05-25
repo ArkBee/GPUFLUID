@@ -30,7 +30,8 @@ import numpy as np
 
 # ─── A8.11 mesh rebuild ────────────────────────────────────────────────
 
-def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray) -> None:
+def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
+                         colors: np.ndarray | None = None) -> None:
     """Replace ``obj.data`` geometry with the given vert/face arrays.
 
     Uses :py:func:`bpy.types.Mesh.foreach_set` for the fastest possible
@@ -41,6 +42,13 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray) -> None
     obj : ``bpy.types.Object``
     verts : (N, 3) float32-castable
     faces : (M, 3) int32-castable
+    colors : (N, 3) uint8 or None
+        Optional per-vertex RGB (from PLY ``red/green/blue uchar`` props).
+        When provided, written into a POINT-domain FLOAT_COLOR attribute
+        named ``Col`` — matches the addon's PLY-preload path so the
+        renderer's material (and the addon viewport) can wire to the
+        same attribute name. Without this, multi-source / mixbox bakes
+        rendered as a flat uniform colour (live-found 2026-05-25).
     """
     me = obj.data
     me.clear_geometry()
@@ -59,6 +67,17 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray) -> None
         "loop_total", np.full(n_f, 3, dtype=np.int32))
     me.polygons.foreach_set(
         "vertices", np.asarray(faces, dtype=np.int32).ravel())
+    if colors is not None and len(colors) == n_v:
+        # PLY ships uint8 0..255; FLOAT_COLOR wants 0..1. Build (N,4)
+        # by appending alpha=1, write via foreach_set on the attribute.
+        col_attr = me.color_attributes.get("Col")
+        if col_attr is None:
+            col_attr = me.color_attributes.new(
+                name="Col", type="FLOAT_COLOR", domain="POINT")
+        rgba = np.empty((n_v, 4), dtype=np.float32)
+        rgba[:, :3] = np.asarray(colors, dtype=np.float32) / 255.0
+        rgba[:, 3] = 1.0
+        col_attr.data.foreach_set("color", rgba.ravel())
     me.update(calc_edges=True)
 
 
@@ -104,8 +123,10 @@ class FrameMeshLoader:
         ply_path = self.cache_dir / "mesh" / f"frame_{idx:04d}.ply"
         if not ply_path.exists():
             return
-        verts, faces = read_ply(str(ply_path))
-        rebuild_surface_mesh(self.surf, verts, faces)
+        # return_colors=True so multi-source / mixbox bakes carry
+        # per-vertex colour through to the renderer's Col attribute.
+        verts, faces, colors = read_ply(str(ply_path), return_colors=True)
+        rebuild_surface_mesh(self.surf, verts, faces, colors=colors)
 
 
 # ─── A8.9 Eevee perf preset ────────────────────────────────────────────

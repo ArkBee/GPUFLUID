@@ -303,12 +303,25 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
     _current_frame = 0
     _total_frames = 0
     _domain_obj_name = ""
+    # Class-level reentrance guard. Set True by execute() when modal arms,
+    # cleared by _abort()/_finish(). Prevents a second click on Bake while
+    # the first subprocess is still running — without this, two CLI
+    # processes write to the same cache_dir, racing each other and
+    # corrupting the output (live-found 2026-05-25 during round-3 res
+    # change test). One bake at a time; second click reports WARNING.
+    _is_running: bool = False
 
     @classmethod
     def poll(cls, context):
         return any(o.gpufluid_domain.is_domain for o in context.scene.objects)
 
     def execute(self, context):
+        if GPUFLUID_OT_bake._is_running:
+            self.report({"WARNING"},
+                        "A gpufluid bake is already running — wait for it "
+                        "to finish or press Esc to cancel before starting "
+                        "a new one.")
+            return {"CANCELLED"}
         prefs = get_prefs(context)
         interp = bpy.path.abspath(prefs.interpreter_path).strip()
         if not interp or not Path(interp).exists():
@@ -439,6 +452,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         domain["gpufluid_dom_size"] = list(dom_size)
         domain["gpufluid_cache_dir"] = str(cache_dir)
         context.workspace.status_text_set("gpufluid baking…")
+        GPUFLUID_OT_bake._is_running = True
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
@@ -477,6 +491,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
     def _abort(self, context, reason: str):
         """Terminate the bake subprocess + restore UI. Idempotent — safe
         to call from modal(ESC) and from Blender's cancel() callback."""
+        GPUFLUID_OT_bake._is_running = False
         if self._proc is not None and self._proc.poll() is None:
             try:
                 self._proc.terminate()
@@ -502,6 +517,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         self._abort(context, reason="cancelled by Blender")
 
     def _finish(self, context, ok):
+        GPUFLUID_OT_bake._is_running = False
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
