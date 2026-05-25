@@ -145,6 +145,67 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     reseed_min_per_cell: bpy.props.IntProperty(name="Reseed Min/Cell", default=4, min=1, max=64)
     reseed_max_per_cell: bpy.props.IntProperty(name="Reseed Max/Cell", default=16, min=1, max=64)
 
+    # solver dispatch (B17.12)
+    solver: bpy.props.EnumProperty(
+        name="Solver",
+        items=[
+            ("flip", "FLIP (general)", "FLIP/APIC pressure-projection. Good for splashes, dam-break, low-viscosity scenes."),
+            ("mpm",  "MPM (water on solids)", "MLS-MPM shell-out (F3.7). Required for water spreading laterally on a flat rigid surface; FLIP fails this case."),
+        ],
+        default="flip",
+        description="Underlying solver algorithm. MPM is the production path for water-on-cube and viscous fluids.",
+    )
+    # MPM-specific knobs (used only when solver == 'mpm')
+    mpm_bulk_modulus: bpy.props.FloatProperty(
+        name="Bulk Modulus", default=1500.0, min=100.0, max=10000.0,
+        description="Water stiffness (high = closer to real water but less stable). 1500 is the production default; 3000+ needs finer grid.")
+    mpm_rpic_damping: bpy.props.FloatProperty(
+        name="Viscosity (RPIC)", default=0.15, min=0.0, max=1.0,
+        description="APIC rotational-mode damping. 0 = pure APIC (lively swirly water). 0.15 = subtle viscosity. 0.3+ = syrupy.")
+    mpm_grid_v_damping: bpy.props.FloatProperty(
+        name="Global Damping", default=0.998, min=0.9, max=1.0, precision=4,
+        description="Per-step grid velocity damping. 1.0 = none. 0.995 = mild. 0.99 = noticeable.")
+    mpm_cube_friction: bpy.props.FloatProperty(
+        name="Obstacle Top Friction", default=0.6, min=0.0, max=1.0,
+        description="Tangential keep-factor on top face of box obstacles. 1.0 = pure slip (water radiates out instantly). 0.3-0.6 = water accumulates then overflows. 0.0 = fully sticky.")
+    mpm_v_terminal: bpy.props.FloatProperty(
+        name="Stream Terminal Velocity (m/s)", default=-1.0, min=-5.0, max=0.0,
+        description="Cap on |v_z| inside the inflow column. -1.0 mimics air drag on a laminar stream. More negative = faster pour (more splash on impact).")
+    mpm_vz_max_splash: bpy.props.FloatProperty(
+        name="Anti-Splash Cap (m/s)", default=0.3, min=0.0, max=2.0,
+        description="Hard clamp on upward v_z above obstacle top. 0.3 = realistic; 0.0 = no splash possible.")
+    mpm_initial_velocity: bpy.props.FloatProperty(
+        name="Initial Pour Velocity (m/s)", default=-0.3, min=-3.0, max=0.0,
+        description="Starting vertical velocity for inflow column, in m/s. "
+                    "Normalised by domain size at bake time. "
+                    "-0.3 = gentle pour; 0.0 = drop from rest (more splash).")
+    # Phase 1 escape-hatch: raw TOML merged on top of the generated config in
+    # config_builder.build_toml. Parsed via stdlib tomllib; deep-merged into
+    # the final dict before serialization. Errors propagate to the bake
+    # operator which reports them to the user.
+    toml_overrides: bpy.props.StringProperty(
+        name="TOML overrides",
+        description="Advanced: raw TOML merged on top of generated config",
+        default="",
+    )
+    # B18 — per-vertex colour mixing mode (renders ride on this when any
+    # source has Tint Particles on)
+    color_mix_mode: bpy.props.EnumProperty(
+        name="Colour Mix Mode",
+        items=[
+            ("off", "Off", "No per-vertex colour written; mesh stays neutral"),
+            ("linear", "Linear RGB",
+             "Inverse-distance² RGB average from nearest particles. "
+             "Fast (GPU); blue+yellow blends to grey."),
+            ("mixbox", "Mixbox (pigment)",
+             "Šochorová & Jamriška 2021 pigment-space mixing via "
+             "pymixbox. Slower (CPU); blue+yellow blends to green. "
+             "Falls back to Linear if pymixbox isn't installed."),
+        ],
+        default="linear",
+        description="How particle colours blend at mesh vertices during bake",
+    )
+
 
 # [BLK A8.3]
 class GpufluidFluidProps(bpy.types.PropertyGroup):
@@ -218,6 +279,30 @@ class GpufluidInflowProps(bpy.types.PropertyGroup):
     rate_per_sec: bpy.props.FloatProperty(name="Particles/sec", default=10000.0, min=0.0)
     frame_start: bpy.props.IntProperty(name="Frame Start", default=0, min=0)
     frame_end: bpy.props.IntProperty(name="Frame End", default=10000, min=0)
+    # B18 — per-source attributes (mirrors GpufluidFluidProps)
+    use_color: bpy.props.BoolProperty(
+        name="Tint Particles (B18)", default=False,
+        description="Stamp this inflow's RGB on emitted particles. Combined "
+                    "with the Domain mix-mode, this drives the per-vertex "
+                    "mesh colour in the bake.",
+    )
+    color: bpy.props.FloatVectorProperty(
+        name="Particle Color",
+        default=(1.0, 1.0, 1.0), size=3, min=0.0, max=1.0, subtype="COLOR",
+        description="Linear-RGB stamped on particles from this inflow "
+                    "when Tint is on",
+    )
+    use_temperature: bpy.props.BoolProperty(
+        name="Stamp Temperature (B18)", default=False,
+        description="Stamp this inflow's temperature on emitted particles "
+                    "(carried through MPM bake as per-particle scalar)",
+    )
+    temperature: bpy.props.FloatProperty(
+        name="Temperature", default=20.0, min=0.0, max=5000.0, soft_max=2000.0,
+        description="Scalar temperature stamped on particles from this inflow "
+                    "(°C in default convention; only meaningful when 'Stamp "
+                    "Temperature' is on)",
+    )
 
 
 class GpufluidOutflowProps(bpy.types.PropertyGroup):

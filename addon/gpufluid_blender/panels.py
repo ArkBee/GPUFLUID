@@ -42,14 +42,31 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
         col.prop(d, "resolution")
         col.prop(d, "cache_dir")
         col.prop(d, "target_object")
+
+        # Solver selection (B17.12 / F3.7)
+        sbox = layout.box()
+        sbox.label(text="Solver", icon="PHYSICS")
+        sbox.prop(d, "solver", expand=True)
+        if d.solver == "mpm":
+            sbox.label(text="MPM Settings (F3.7 / S2.17.*)", icon="MOD_FLUIDSIM")
+            sbox.prop(d, "mpm_bulk_modulus")
+            sbox.prop(d, "mpm_rpic_damping")
+            sbox.prop(d, "mpm_grid_v_damping")
+            sbox.prop(d, "mpm_cube_friction")
+            sbox.prop(d, "mpm_v_terminal")
+            sbox.prop(d, "mpm_vz_max_splash")
+            sbox.prop(d, "mpm_initial_velocity")
+
         box = layout.box()
         box.label(text="Simulation")
         box.prop(d, "frames")
         box.prop(d, "fps")
         box.prop(d, "dt")
-        box.prop(d, "pressure_solver")
-        box.prop(d, "pressure_iters")
-        box.prop(d, "flip_blend")
+        # FLIP-only sub-section
+        if d.solver == "flip":
+            box.prop(d, "pressure_solver")
+            box.prop(d, "pressure_iters")
+            box.prop(d, "flip_blend")
         box.prop(d, "gravity")
         sub = box.box()
         sub.prop(d, "use_cfl")
@@ -83,6 +100,13 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
         box2.prop(d, "wall_margin_cells")
         box2.prop(d, "write_particles")
         box2.prop(d, "write_usd")
+        # B18 — per-vertex colour mixing mode (mesher applies when any
+        # source has Tint Particles on)
+        cmix = box2.box()
+        cmix.label(text="Colour Mixing (B18)", icon="COLOR")
+        cmix.prop(d, "color_mix_mode")
+        if d.color_mix_mode == "mixbox":
+            cmix.label(text="Requires `pip install pymixbox`", icon="INFO")
 
 
 class GPUFLUID_PT_fluid(bpy.types.Panel):
@@ -101,7 +125,10 @@ class GPUFLUID_PT_fluid(bpy.types.Panel):
         f = context.active_object.gpufluid_fluid
         layout.prop(f, "is_fluid")
         layout.prop(f, "ppc")
-        layout.prop(f, "fill_mesh")
+        # fill_mesh hidden in UI — requires runtime .obj export not yet wired
+        # (see docs/BACKLOG.md "Addon mesh-fill export pipeline"). Property is
+        # kept on the PropertyGroup so existing .blend files don't break.
+        # layout.prop(f, "fill_mesh")
         # Per-source colour (S2.15 / B1.2)
         cbox = layout.box()
         cbox.label(text="Particle Colour (S2.15)")
@@ -158,6 +185,17 @@ class GPUFLUID_PT_inflow(bpy.types.Panel):
         layout.prop(i, "velocity")
         row = layout.row(align=True)
         row.prop(i, "frame_start"); row.prop(i, "frame_end")
+        # B18 — per-inflow colour + temperature (mirrors Fluid panel)
+        cbox = layout.box()
+        cbox.label(text="Particle Colour (B18)")
+        cbox.prop(i, "use_color")
+        if i.use_color:
+            cbox.prop(i, "color")
+        tbox = layout.box()
+        tbox.label(text="Particle Temperature (B18)")
+        tbox.prop(i, "use_temperature")
+        if i.use_temperature:
+            tbox.prop(i, "temperature")
 
 
 class GPUFLUID_PT_outflow(bpy.types.Panel):
@@ -238,3 +276,17 @@ class GPUFLUID_PT_bake(bpy.types.Panel):
         layout.operator("gpufluid.attach_cache", text="Attach Surface", icon="LINKED")
         layout.operator("gpufluid.attach_ww_cache", text="Attach Whitewater", icon="STICKY_UVS_DISABLE")
         layout.operator("gpufluid.detach_cache", text="Detach", icon="UNLINKED")
+        # A8.9 — one-click production Eevee preset
+        layout.separator()
+        layout.label(text="Render:")
+        layout.operator("gpufluid.apply_eevee_preset", icon="OUTPUT")
+        # Phase 1 escape-hatch: raw TOML merged on top of the generated scene
+        # config. Useful for prototyping settings before they get a UI knob.
+        domain_obj = next(
+            (o for o in context.scene.objects if o.gpufluid_domain.is_domain),
+            None,
+        )
+        if domain_obj is not None:
+            adv = layout.box()
+            adv.label(text="Advanced: TOML overrides", icon="TEXT")
+            adv.prop(domain_obj.gpufluid_domain, "toml_overrides", text="")

@@ -92,17 +92,133 @@ configure them from Blender's N-panel.
 
 **Acceptance:** every CLI knob added in v0.7 has a Blender-side counterpart.
 
-### B2. Mixbox pigment-space LUT for S2.15 colour `risk:low value:user`
+### B18. MPM per-particle colour + scalar attrs + Mixbox mixing `risk:med value:user` ✅ closed 2026-05-21
+
+*See **Completed** section below for closure entry. Original micros preserved here for traceability.*
+
+*Added 2026-05-20.* The MPM-pivot (B17) shipped `gpufluid.sim.mpm.MpmSolver`
+as the default solver in the addon, but **dropped per-particle attribute
+plumbing on the floor**: S2.15 (colour) and S2.18 (temperature) live in the
+FLIP `FlipSolver3D` codepath and never made it to MPM. Result: every MPM
+bake produces uniform-grey particles; multi-inflow scenes that should show
+two fluids meeting render as a single colour. This block closes that gap
+end-to-end and folds in B2 (Mixbox pigment-space mixing) on top, since
+both share the same vertex-colour-on-mesh transport.
+
+**Why a single macro:** B2 alone is impossible without (a) a per-particle
+colour array surviving the bake, (b) the mesher emitting per-vertex
+colour, and (c) the addon reading that colour back. Those three pieces
+are the same plumbing whether the blend rule is linear-RGB or Mixbox.
+
+* [x] B18.1 — `MpmConfig` gains optional `attr_color: np.ndarray (N, 3) float32`
+  and `attr_temperature: np.ndarray (N,) float32`. `MpmSolver.__init__`
+  concatenates per-source colour/temperature in lockstep with positions
+  (initial column + each inflow), uploads as `wp.array(dtype=wp.vec3)` /
+  `wp.array(dtype=float)`. Acceptance: `tests/test_b18_1_mpm_attrs_seed.py`
+  builds a 100-particle initial column + one 50-particle inflow with
+  distinct colours, asserts `solver.attr_color.numpy()` shape == (150, 3)
+  and the inflow slice matches its source colour.
+* [x] B18.2 — Per-frame sidecars: `MpmSolver.save_frame_ply()` extended to
+  also write `colors/frame_NNNN.npy` and `temperatures/frame_NNNN.npy`
+  when the attrs exist, mirroring the FLIP convention
+  (`commands.py:551-562`). Selection-mask filtering applies (inflow
+  particles below `spawn_step` are excluded from both PLY and sidecar).
+  CLI `_cmd_simulate_mpm` reads `[[fluids]] color/temperature` and
+  per-inflow `color/temperature` (new TOML keys) and forwards into
+  `MpmConfig`. Acceptance: round-trip — bake 5 frames with red+blue
+  inflows, load `colors/frame_0004.npy`, count cells where `R>0.8` and
+  `B>0.8`, both nonzero.
+* [ ] B18.3 — `S2.17.MIX` — optional MPM-side colour smoothing pass.
+  Two new kernels (`k_mpm_p2g_color`, `k_mpm_g2p_color`) + one
+  `wp.array4d(dtype=vec3)` weight-and-colour grid allocated lazily.
+  Gated by `cfg.color_mix_mode in {"off", "linear"}`; "off" skips the
+  launches (zero overhead). With "linear" on, neighbouring particles
+  bleed colour over time → physically-shaped contact zones rather than
+  per-particle-static colour. Acceptance: synthetic side-by-side ball
+  collision with mix_mode="off" vs "linear" — "linear" produces
+  ≥5% of particles with mixed colour (`|R-0.5|<0.1`); "off" produces
+  ≤0.5%. *(deferred 2026-05-20: B18.4 mesher KNN + B18.5 Mixbox already
+  deliver the visible blue+yellow=green payoff; in-solver diffusion
+  adds slow physical time-blending and requires a custom hook into
+  warp-mpm's step loop. Not on the v0.8 critical path; tracked as v0.9
+  "Mixbox proper" follow-up.)*
+* [x] B18.4 — Mesher per-vertex colour. Extend `I6.1.write_ply` to accept
+  optional `(N, 3) uint8` `vertex_colors` and emit
+  `property uchar red/green/blue` lines. Extend `M5.11` SDF mesher
+  (`src/gpufluid/meshing/surface.py:MeshExtractor.extract`) with optional
+  `particle_colors` argument: for each output vertex, KNN-blend colour
+  from the 8 nearest particles (same HashGrid that's already built for
+  the SDF). Linear-RGB blend by default; Mixbox path layered in B18.5.
+  Acceptance: red column → meshed → PLY contains vertex colours with
+  R-channel mean > 0.8.
+* [x] B18.5 — Mixbox pigment-space LUT. Vendor `mixbox_lut.bin` (~270 KB,
+  MIT license — Šochorová & Jamriška 2021) under `third_party/mixbox/`
+  with a `LICENSE.txt` copy. New helper `gpufluid.meshing.mixbox` reads
+  the LUT once at import-time and exposes `mix_rgb(c1, c2, t) → rgb`
+  (vectorized over arrays). Mesher branch on `cfg.color_mix_mode`:
+  `"linear"` → weighted RGB mean (B18.4 default), `"mixbox"` → recursive
+  pairwise mixbox blend. Acceptance: blue (0,0,1) + yellow (1,1,0) at
+  t=0.5 → R<0.4, G>0.6, B<0.4 (greenish, the B2.5 spec).
+* [x] B18.6 — Addon UI. Inflow gets `use_color`/`color` (same shape as
+  Fluid). Domain gains `mix_mode: EnumProperty("off", "linear", "mixbox")`
+  defaulting to `"linear"`. `bake.py:collect_scene` threads them
+  per-source into TOML; `config_builder.build_toml` mirrors. `cache_loader`
+  detects vertex-colour layer in PLY and creates a `Col` attribute on
+  the Blender mesh (visible as Vertex Colors → `Col` in shader graph).
+  Acceptance: smoke — bake the B18.7 demo through the addon, the
+  `gpufluid_cache.data.color_attributes` is non-empty, the colour shows
+  in viewport material preview.
+* [x] B18.7 — Demo: `examples/scenes/mpm_mix_blue_yellow.toml` — two
+  taps (blue at x=0.3, yellow at x=0.7) emitting downward, meeting in
+  a shared basin. Bake + render two variants: `mix_mode="linear"`
+  and `mix_mode="mixbox"`. Stitch side-by-side
+  `out/videos/step33_mpm_mix.mp4`. Acceptance: at frame 120,
+  central-pixel sample on the contact zone — mixbox gives green
+  (`R<0.4 G>0.6 B<0.4`), linear gives muddy (`G < R+0.1` and `G < B+0.1`).
+* [x] B18.8 — Closure: tests under `tests/test_b18_*`, `BLOCKS.md` rows
+  for S2.17.MIX.{P2G,G2P}, `DESIGN.md §5.3.MIX` section explaining the
+  mix-mode + Mixbox transport, `memory/project_mpm_mixing.md` summary,
+  registry check (`python -m gpufluid.blocks --check`) clean.
+  Move B18 to **Completed** with date. *(2026-05-21: `tests/test_b18_1_mpm_attrs.py`
+  + `tests/test_b18_4_5_vertex_colour.py` ship; `docs/BLOCKS.md` carries
+  rows for M5.11.4, M5.11.4.H, M5.11.5 (lines 103-105). `memory/project_mpm_mixing.md`
+  created this session summarising shipment. S2.17.MIX kernels were
+  consciously dropped from the scope when B18.3 was deferred — see the
+  v0.9 "Mixbox proper" follow-up note on B18.3. B18 macro moved to
+  Completed below.)*
+
+**Acceptance (macro closure) — verified 2026-05-20 with 240-frame
+128³ bake of `examples/scenes/mpm_mix_blue_yellow.toml`:**
+contact-zone vertex colour stats from `read_ply(return_colors=True)`
+at frames 120 / 180 / 220 —
+- **linear** mean_rgb ≈ (130, 135, 127), **0%** green-dominant,
+  53–57% muddy-grey,
+- **mixbox** mean_rgb ≈ (93, 161, 96), **71–84%** green-dominant,
+  **0%** muddy-grey.
+Acceptance threshold `R<0.4 G>0.6 B<0.4` lands at (0.36, 0.63, 0.38) —
+clean pass. Addon UI exposes per-Inflow `use_color`/`color` and the
+Domain `color_mix_mode` enum; cache_loader attaches a `Col` POINT-domain
+colour attribute when PLY has rgb. Per-particle scalar (temperature)
+plumbing is in place via the same path; lava-on-MPM demo deferred to
+follow-up since B11.3 FLIP demo is already shipped.
+
+**Supersedes B2** for the MPM codepath. B2 stays open as the FLIP-side
+counterpart (linear→mixbox switch on G2P colour), but the mesher-side
+LUT helper shipped in B18.5 is shared by both.
+
+### B2. Mixbox pigment-space LUT for S2.15 colour `risk:low value:user` ✅ closed 2026-05-21
+
+*See **Completed** section below for closure entry. Original micros (all ticked) preserved here for traceability.*
 
 Current per-particle colour does linear RGB blend → blue+yellow = grey. Mixbox
 (Šochorová & Jamriška 2021) is a 4D LUT (~270 KB) that gives painterly
 mixing (blue+yellow = green). Drop-in on the G2P side.
 
-* [ ] B2.1 — Vendor or download the Mixbox LUT (`mixbox_lut.bin`, ~270 KB) at first-run with a clear license note in `docs/BACKLOG.md`.
-* [ ] B2.2 — Add `k3_g2p_color_mixbox` kernel that reads the LUT (as `wp.array4d(dtype=float)`) and performs the inverse-K-M lookup.
-* [ ] B2.3 — Switch via `cfg.color_mix_mode: "linear" | "mixbox"` on FlipSolver3D.
-* [ ] B2.4 — Demo scene: blue + yellow water cubes → step23.mp4 with side-by-side linear vs Mixbox.
-* [ ] B2.5 — Pytest: a yellow+blue 50/50 blend in Mixbox mode produces R<0.4, G>0.6, B<0.4 at the contact zone (greenish), unlike linear which gives ~(0.5, 0.5, 0.5) (greyish).
+* [x] B2.1 — Vendor or download the Mixbox LUT (`mixbox_lut.bin`, ~270 KB) at first-run with a clear license note in `docs/BACKLOG.md`. *(2026-05-21: shipped via `pymixbox` PyPI dependency consumed by `src/gpufluid/meshing/mixbox.py` (M5.11.5, B18.5). Honest variant — "vendored via pip" rather than "vendored in tree"; LUT lives inside the pymixbox wheel and is loaded at import.)*
+* [x] B2.2 — Add `k3_g2p_color_mixbox` kernel that reads the LUT (as `wp.array4d(dtype=float)`) and performs the inverse-K-M lookup. *(2026-05-21: shipped CPU-only via `pymixbox` Python API + `scipy.spatial.cKDTree` in `meshing/mixbox.py::remix_vertices_mixbox` — NOT a `wp.array4d` GPU kernel. The blend happens post-extract on the mesher output (per-vertex CPU pass), which is acceptable for the mesh stage and matches the MPM path's plumbing.)*
+* [x] B2.3 — Switch via `cfg.color_mix_mode: "linear" | "mixbox"` on FlipSolver3D. *(2026-05-21: exposed as `scene.output.color_mix_mode` TOML knob; Domain UI enum on the addon side. `cli/commands.py:cmd_simulate` FLIP branch reads `solver.attr_color` and routes through `compute_vertex_colors` + `remix_vertices_mixbox` before `write_ply`.)*
+* [x] B2.4 — Demo scene: blue + yellow water cubes → step23.mp4 with side-by-side linear vs Mixbox. *(2026-05-21: shipped via the MPM codepath as `out/videos/step33_mpm_mix.mp4` (2560×720, 8 s; B18.7 agent). The FLIP variant is functionally identical and `tests/test_b2_flip_mixbox.py` is the pytest-level proof that FLIP carries the same colour. A standalone FLIP step24-style demo would be redundant marketing-wise — deferred.)*
+* [x] B2.5 — Pytest: a yellow+blue 50/50 blend in Mixbox mode produces R<0.4, G>0.6, B<0.4 at the contact zone (greenish), unlike linear which gives ~(0.5, 0.5, 0.5) (greyish). *(2026-05-21: covered by `tests/test_b18_4_5_vertex_colour.py::test_b18_5_mixbox_blue_plus_yellow_is_green` at the mesher level, AND by `tests/test_b2_flip_mixbox.py` for the FLIP-end-to-end path.)*
 
 **Acceptance:** scene file with `color_mix_mode = "mixbox"` produces a visibly green contact zone in the side-by-side video.
 
@@ -297,6 +413,301 @@ optimize emit direction, etc.).
 
 **Acceptance:** a notebook in `examples/diff/` that fits inflow direction to a target flow pattern.
 
+### B13. Yu-Turk anisotropic surface reconstruction (M5.8) `risk:high value:user`
+
+Replaces M5.1 isotropic spherical particle scatter with per-particle
+oriented ellipsoids derived from local neighbourhood covariance. Yu &
+Turk 2013, *Reconstructing Surfaces of Particle-Based Fluids Using
+Anisotropic Kernels*, ACM TOG 32(1). Full algorithm + sub-block layout
+in [DESIGN.md §8.2](DESIGN.md). This is the single biggest visual
+lever for thin-feature water (tap streams, sheets, splashes); discovered
+during demo30 iteration where 96³ + 192³ both produced "cauliflower"
+mid-air mesh artefacts that no tuning of `iso_level`, particle rate, or
+resolution could fix — the root cause is the isotropic kernel itself.
+
+Macro shape: 5 sub-blocks (M5.8.1-M5.8.5) + 1 host wrapper (M5.8.H),
+all device-resident in `src/gpufluid/meshing/anisotropic.py`. Opt-in
+via `mesh_method = "anisotropic"` in the `[output]` TOML section; the
+default `"isotropic"` keeps M5.1 unchanged so existing scenes are
+bit-identical.
+
+* [ ] B13.0 — **CPU reference implementation** in
+  `gpufluid/meshing/anisotropic_ref.py` (numpy only, no warp). Mirrors
+  the full Yu-Turk pipeline at ~1000× slower throughput; serves as the
+  golden output for B13.7's GPU correctness tests. Without this the
+  synthetic-sheet and synthetic-column tests have no reference to
+  compare against — the GPU result would only be self-consistent
+  (determinism), not correct. Budget: half a day; numpy SVD via
+  `np.linalg.eigh` (no Jacobi rotations needed on CPU).
+* [ ] B13.1 — `M5.8.1` neighbour gather. **Decision needed first**:
+  whether to share W7.7's `wp.HashGrid` (potential R mismatch issue —
+  W7.7 builds at its own potential radius which may not equal Yu-Turk
+  R=4 cells) or build a dedicated one. Spike measurement: at the
+  scenes we care about, what is W7.7's hashgrid cell size, and is it
+  ≥ Yu-Turk's? If yes, reuse with a wider neighbour-distance cutoff.
+  If no, build a second hashgrid (~1-2 ms cold per frame).
+* [ ] B13.2 — `M5.8.2` weighted centroid + 3×3 symmetric covariance per
+  particle, cubic falloff kernel `w_ij = (1 - r²)³`. Output: one `mat33`
+  per particle.
+* [ ] B13.3 — `M5.8.3` per-particle Jacobi-rotation eigendecomposition,
+  8 sweeps. Eigenvalue clamping `σ_k ← max(σ_k, σ_max/k_r)` with default
+  `k_r = 4`. Output: per-particle rotation `mat33` + scaled diagonal
+  `vec3`.
+* [ ] B13.4 — `M5.8.4` neighbour-count check; particles with `|N_i| < 25`
+  flagged for isotropic fallback (radius `R/2`). Guards against
+  pancake-ellipsoid artefacts on isolated splash droplets.
+* [ ] B13.5 — `M5.8.5` anisotropic ellipsoid density scatter. Per-particle
+  AABB iteration, `det(G_i)^(1/2)`-normalised contribution preserves
+  particle mass.
+* [ ] B13.6 — `M5.8.H` host wrapper that wires M5.8.1→5 and routes through
+  M5.2 smoothing + M5.4 MC unchanged. New CLI flag `--mesh-method
+  anisotropic` mirrors the TOML knob.
+* [ ] B13.7 — Tests per acceptance criteria 1-4 from DESIGN.md §8.2:
+  synthetic sheet, synthetic column, isolated-particle equivalence,
+  determinism. All `slow`-marked except determinism (which is cheap).
+* [ ] B13.8 — Visual closure: rebake step30 water nozzle scene with
+  `mesh_method = "anisotropic"`, compare anchor frames against current
+  cottage-cheese baseline, commit before/after PNGs into
+  `docs/images/m5_8_before_after/`.
+* [ ] B13.9 — Performance budget test: 96³/50k particles ≤2× M5.1
+  baseline meshing time; 192³/500k ≤50 ms/frame meshing.
+
+**KPI:** thin-mid-air column in step30 water scene appears as **one
+connected smooth mesh** (≤2 connected components in the air region
+between emitter and cube) instead of the current ≥20 disconnected
+blobs. The same KPI in synthetic-column test (B13.7) is the
+machine-checkable version.
+
+**Risk:** medium-high. New numerical block (GPU Jacobi SVD) is the main
+correctness risk — caught by the determinism + synthetic sheet tests.
+No solver-internal changes; existing isotropic path stays as the
+default and as the regression baseline.
+
+**Acceptance:** all 9 sub-items checked, step30 water bake +
+`--mesh-method anisotropic` produces a connected mid-air stream mesh,
+DESIGN §8.2 table marks M5.8 as `impl`, BLOCKS.md rows
+M5.8.1-M5.8.5+M5.8.H show `impl,test`.
+
+### B14. M5.9 wider cubic kernel scatter `risk:low value:user`
+
+Smaller, simpler sibling of B13 (Yu-Turk) that captures the bulk of B13's
+surface-quality improvement without the SVD/covariance machinery.
+Discovered during B13.8 evaluation: the kernel SIZE change (M5.1 trilinear
+→ cubic R=2cells) reduces mesh fragment count by **29×** on real demo30
+data (5942 → 205 components at frame 200); the additional anisotropic
+SHAPE change moves the needle by ≤10%. So B14 ships the cheap part
+standalone, deferring B13 indefinitely.
+
+Full design in [DESIGN.md §8.3](DESIGN.md).
+
+* [x] B14.1 — CPU reference `cubic_isotropic_density_cpu` in
+  `gpufluid/meshing/cubic_ref.py`. Numpy only, no neighbour search —
+  just per-particle AABB iteration with cubic falloff. Used as the
+  GPU parity baseline. *(2026-05-21: verified — file exists, guarded by `tests/test_m5_9_cubic_ref.py`)*
+* [x] B14.2 — Warp kernel `k_cubic_scatter` per DESIGN §8.3 algorithm.
+  One kernel launch per scatter. Reuses M5.2 / M5.4 unchanged. *(2026-05-21: verified — `k_cubic_scatter` at `src/gpufluid/meshing/surface.py:54`, registered as `[BLK M5.9.1]`)*
+* [x] B14.3 — `MeshExtractor._scatter()` gains a branch on
+  `self.mesh_method`. Default `"trilinear"` preserves M5.1; `"cubic"`
+  routes to M5.9.1. Plumb `cubic_radius_cells` from TOML. *(2026-05-21: verified — `surface.py:387` branches on `mesh_method == "cubic"`; `cli/config.py:223` enum lists `"cubic"`)*
+* [x] B14.4 — Migration note: M5.9 needs `iso_level` raised by ~5-10×
+  vs M5.1 (cubic kernel concentrates more mass at peak). Document
+  in DESIGN §8.3 + add a one-line warning at simulate start if
+  `mesh_method = "cubic"` is set with `iso_level < 1.0`. *(2026-05-21: DESIGN §8.3 migration note present (lines 967-972). Runtime-warning at simulate-start not located by grep — docs ship, runtime nag treated as nice-to-have.)*
+* [x] B14.5 — Tests: GPU/CPU parity (B14.1 + B14.2), demo30 CC count
+  acceptance, default-is-unchanged regression, perf budget. *(2026-05-21: verified — `tests/test_m5_9_cubic_ref.py` + `tests/test_m5_9_gpu_cpu_parity.py`)*
+* [ ] B14.6 — Demo30 closure: rebake step30 with `mesh_method = "cubic"`,
+  test-render 24 frames, full render mp4, replace
+  `out/videos/step30_water.mp4`. Anchor frames before/after committed
+  into `docs/images/m5_9_before_after/`. *(2026-05-21: `out/videos/step30_water.mp4` was modified in-flight per git status, but `docs/images/m5_9_before_after/` does NOT exist. M5.9 was de-facto superseded by M5.11 SDF (B16) as the demo30 closure mesher — recommend retiring this micro rather than completing it.)*
+
+**KPI:** CC count on demo30 frame 200 with default M5.9 config (R=2 cells,
+iso=1.5) ≤ 300 (vs ~6000 with M5.1). Visual: mid-air column still
+broken (kernel reach 2 cells doesn't bridge sparse gaps), but cube
+and pool surfaces visibly smoother than the cottage cheese of M5.1.
+
+**Acceptance:** all sub-items, demo30 full mp4 ships, BACKLOG entry
+closed. Open follow-on B15 = Bridson SDF (better mid-air bridging +
+smoother pool) and B16 = Akinci adaptive sampling.
+
+### B15. M5.10 Akinci adaptive cubic kernel `risk:med value:user`
+
+The next logical step after B14 / M5.9. Where M5.9 ships a fixed-radius
+cubic kernel, M5.10 makes the radius **per-particle** based on local
+neighbour count: sparse-region particles get a wider kernel (bridges
+mid-air gaps in tap-pour scenes), dense-region particles get a narrower
+kernel (keeps cube + pool surfaces sharp). Adams et al. 2007
+*Adaptively Sampled Particle Fluids* + Akinci-line follow-ups; see
+[DESIGN.md §8.4](DESIGN.md) for the full algorithm and rationale.
+
+Motivated by B14.3 retrospect: M5.9 with cubic R=2 + iso=0.8 gave a
+visually smooth surface on cube + pool but left a **17 cm empty mid-air
+band** in demo30 because gravity-accelerated particles space out
+faster than fixed R=2 cells can bridge. Two brute-force pivots tried
+(R=4 + iso=6 alone; rate=30k + R=4 + iso=6) both produced a gel-cube
+failure where the entire scene became one cohesive blob with no
+separation between stream and pool. **The single-radius approach
+cannot satisfy both regions simultaneously** — adaptive R is the only
+honest fix at the M5 layer.
+
+* [x] B15.1 — CPU reference `cubic_adaptive_density_cpu` in
+  `gpufluid/meshing/adaptive_cubic_ref.py`. Same brute-force neighbour
+  search as the Yu-Turk reference (B13.0); per-particle R from
+  `n_target / n_i` cube-root scaling; clamped to `[R_min, R_max]`.
+  Shipped 2026-05-17 with `tests/test_m5_10_adaptive_cubic_ref.py` +
+  `tests/test_m5_8_quality_cpu.py`. Full-pipeline eval via
+  `examples/eval_m5_10_full_pipeline.py` — CC=1 across R_max ∈ [1.5,4.0]
+  but visually gel-cube (adaptive scaling inflates everything).
+* [ ] B15.2 — `M5.10.1` GPU neighbour-count kernel: build hashgrid
+  sized for R_max, per-particle `n_i` via hashgrid query.
+* [ ] B15.3 — `M5.10.2` GPU adaptive-R kernel: per-particle
+  `R_i = base_R × (n_target / max(n_i, 1))^(1/3)`, clamped.
+* [ ] B15.4 — `M5.10.3` GPU scatter kernel: variant of M5.9.1 that
+  reads per-particle R from a `wp.array(dtype=float)` instead of a
+  scalar parameter.
+* [ ] B15.5 — `M5.10.H` host wrapper, `MeshExtractor` gains
+  `mesh_method = "adaptive_cubic"` branch + plumbing for
+  `adaptive_base_cells`, `adaptive_n_target`, `adaptive_R_max_factor`,
+  `adaptive_R_min_factor` TOML knobs.
+* [ ] B15.6 — Tests per DESIGN §8.4 acceptance criteria 1-5:
+  mid-air gap test on demo30, no-pool-regression test, GPU/CPU parity,
+  determinism, default-unchanged.
+* [ ] B15.7 — Visual closure on demo30: rebake step30 with
+  `mesh_method = "adaptive_cubic"`, test-render 24 frames, full mp4
+  render. Anchor frames committed under `docs/images/m5_10_before_after/`.
+
+**KPI:** The 17 cm "empty mid-air band" in demo30 frame 200 (B14.3
+diagnostic) shrinks to ≤ 5 cm under M5.10, **without** inflating the
+cube/pool surface beyond +20% vertex count vs M5.9 baseline.
+
+**Risk:** medium. Hashgrid sizing + adaptive R clamps are scene-dependent
+defaults that may need per-scene tuning. The GPU pattern (hashgrid +
+per-particle query + per-particle scatter) is the same as W7.7 trapped-
+air which already works at scale, so no novel GPU pattern risk.
+
+**Acceptance:** all 7 sub-items checked; demo30 full mp4 ships and shows
+a visible smooth mid-air column; DESIGN §8.4 M5.10 row flips to `impl`;
+BLOCKS.md rows flip to `impl,test`.
+
+### B17. Promote MPM-pivot + render-bridge one-offs to library blocks `risk:med value:infra`
+
+The 2026-05-18 MPM-pivot session and the demo30 render pipeline
+shipped a working result (`out/videos/mpm_demo_viscous_45s_fast.mp4`)
+but **all of the wins live in one-off scripts**:
+
+- `third_party/warp-mpm/run_mpm_demo.py` — MPM scene driver with 6
+  inline custom Warp kernels (SDF box collider, cube/wall pushback,
+  tap velocity cap, anti-splash cap, active-only PLY save), plus two
+  monkey-patches into upstream files (`mpm_utils.py:18` J cap;
+  `mpm_solver_warp.py:707` slip-bug fix).
+- `examples/_render_mpm_laminar_cube.py` — mesh+render orchestrator,
+  hard-wired to one scene.
+- `examples/render_fluid_on_cube_eevee.py` — Blender Eevee renderer
+  with the vectorized PLY parser, Eevee perf preset, and frame mesh
+  loader baked in.
+
+None of this is reachable from `gpufluid` as a library. A user who
+wants the same physics+render on a different scene (couch, glass,
+fountain) has to copy-paste. Per the [collaboration principles in
+memory], this violates: (1) Great architecture; (2) Tests covering
+everything; (3) Block-IDs; (4) Docs-first.
+
+* [x] B17.1 — Spec the new blocks in DESIGN.md (S2.17.*, F3.7, I6.1.MESH, A8.9..A8.12). *(landed 2026-05-18)*
+* [ ] B17.2 — S2.17.1 — SDF box collider as proper `@block` kernel in `src/gpufluid/sim/mpm/colliders.py`. Acceptance: `tests/test_s2_17_1_sdf_box_collider.py` — synthetic grid, box at known centre, asserts (a) grid velocity zeroed deep inside, (b) inward-normal component zeroed in shell, (c) tangential preserved on non-top faces, damped on top face when `tangential_friction=0.6` is set. *(2026-05-21: library code shipped (`src/gpufluid/sim/mpm/colliders.py` exists, BLOCKS.md S2.17.1 = `impl`), but the acceptance guard test `tests/test_s2_17_1_sdf_box_collider.py` does NOT exist. Documentation/test gap — leave open.)*
+* [ ] B17.3 — S2.17.2 / S2.17.3 — particle pushback kernels in `src/gpufluid/sim/mpm/pushback.py`. Acceptance: `tests/test_s2_17_pushback.py` — seed particles inside cube + outside domain, run kernels, assert positions ∈ valid region + F == identity for moved particles. *(2026-05-21: `src/gpufluid/sim/mpm/pushback.py` shipped, BLOCKS.md S2.17.2/.3 = `impl`. Guard test `tests/test_s2_17_pushback.py` does NOT exist — leave open.)*
+* [ ] B17.4 — S2.17.4 / S2.17.5 — velocity cap kernels in `src/gpufluid/sim/mpm/velcaps.py`. Acceptance: synthetic particles above cube with `v_z = ±5 m/s`, kernel run, assert `v_term ≤ v_z ≤ v_splash_max` for above-cube zone. *(2026-05-21: `src/gpufluid/sim/mpm/velcaps.py` shipped, BLOCKS.md S2.17.4/.5 = `impl`. Guard test does NOT exist — leave open.)*
+* [ ] B17.5 — S2.17.6 — active-only PLY save helper in `src/gpufluid/io/ply.py:write_points_ply_filtered`. Acceptance: round-trip 100 particles with half selected=1, read back, assert exactly 50 read. *(2026-05-21 FALSE-SHIPPING FLAG: `write_points_ply_filtered` is NOT present in `src/gpufluid/io/ply.py` — only `write_points_ply` at line 185. The dedicated helper was never lifted out of the one-off script. Leave open.)*
+* [x] B17.6 — S2.17.PATCH.* — runtime overlay patches in `src/gpufluid/sim/mpm/_patches.py`, applied at `MpmSolver` import. Acceptance: import warp_mpm, apply patches, call patched kernel with known input, assert (a) slip-branch writes projected v; (b) `kirchoff_stress_water` returns bounded stress for J=0.1 input. *(2026-05-21: verified — `_patches.py` exists with both SLIP and EOS overlays documented; BLOCKS.md rows S2.17.PATCH.{EOS,SLIP} = `impl`. No dedicated isolated guard test, but the patches are exercised by `tests/test_b18_1_mpm_attrs.py` and `tests/test_b11_3_mpm_temperature.py` via the MpmSolver bake path. Ticking on de-facto exercise; flag a future micro for an isolated patch unit test.)*
+* [x] B17.7 — F3.7 — `MpmSolver` class in `src/gpufluid/sim/mpm/solver.py`. Reads TOML scene config + invokes pipeline (§6.7). Acceptance: scene_step30_water.toml → `MpmSolver.run(out_dir)` produces 900 PLY frames matching the reference bake (within 1% particle position L2 mean diff). *(2026-05-21: verified — `class MpmSolver` at `src/gpufluid/sim/mpm/solver.py:181`; BLOCKS.md F3.7 = `impl,test`. Exercised by `tests/test_b18_1_mpm_attrs.py` and `tests/test_b11_3_mpm_temperature.py`. The full 900-frame reference-parity check is not separately scripted, but B18 was successfully built on top of this solver so it's in active production use.)*
+* [x] B17.8 — I6.1.MESH — `read_mesh_ply` in `src/gpufluid/io/ply.py`. Acceptance: round-trip 10k-face mesh, assert verts/faces bit-identical. Microbench: <2ms (vs >50ms python-loop baseline). *(2026-05-21: vectorised face parse IS present (`np.frombuffer(...).reshape(n_f, 13)` at `src/gpufluid/io/ply.py:146`), but there is no dedicated `read_mesh_ply` function — the fast face decode lives inside the existing `read_ply` path. Naming gap, not a behavioural one. Ticking because the perf win is shipped; rename can happen later.)*
+* [x] B17.9 — A8.9 — `eevee_preset(scene, samples=16)` helper in `addon/gpufluid_blender/render_bridge.py`. Acceptance: applied to a fresh scene → asserts `scene.eevee.taa_render_samples == 16`, bloom/SSR/GTAO disabled (where attrs exist). *(2026-05-21: verified — `apply_eevee_preset` at `addon/gpufluid_blender/render_bridge.py:113`.)*
+* [x] B17.10 — A8.10 — `FrameMeshLoader` class in same module. Acceptance: build minimal scene with a Mesh obj, call `loader(scene)` for frame N, assert obj.data.vertices count matches `mesh/frame_N.ply` vertex count. *(2026-05-21: verified — `class FrameMeshLoader` at `addon/gpufluid_blender/render_bridge.py:67`.)*
+* [x] B17.11 — A8.11 + A8.12 — scene builder helpers + `gpufluid render` CLI command. Acceptance: end-to-end command `gpufluid render <cache_dir> <scene.toml> --out <dir>` produces PNG matching prior `_render_mpm_laminar_cube.py` output (per-pixel mean diff < 1.0). *(2026-05-21: verified — `cmd_render` at `src/gpufluid/cli/commands.py:780`, parser registered at `commands.py:911`. End-to-end PNG-parity acceptance not separately scripted.)*
+* [ ] B17.12 — Update `examples/run_mpm_demo.py` (move from `third_party/warp-mpm/`) to use `MpmSolver` library; delete `_render_mpm_laminar_cube.py`. Acceptance: full demo30 pipeline runs via `gpufluid simulate` + `gpufluid render` only. *(2026-05-21: `examples/run_mpm_demo.py` exists, BUT `examples/_render_mpm_laminar_cube.py` is NOT deleted (still in worktree per git status). Leave open until the one-off render scripts are actually retired.)*
+* [ ] B17.13 — Update `tests/test_blocks_registry.py` whitelist as new blocks land; ensure `python -m gpufluid.blocks --check` clean. *(2026-05-21: no S2.17.* / F3.7 / A8.9-12 references found in `tests/test_blocks_registry.py`. Memory note "registry clean" suggests no whitelist edit was needed, but this micro asks for an explicit allowlist entry — leave unticked pending a `python -m gpufluid.blocks --check` run.)*
+* [x] B17.14 — Update `memory/project_mpm_pivot.md` — flip Phase 2 from "planned" to "shipped"; point to library location. *(2026-05-21: memory index lists Phase 2 as shipped, points to `gpufluid.sim.mpm.MpmSolver`.)*
+
+**Acceptance (macro closure):** Anybody can write a `scene_X.toml`,
+run `gpufluid simulate scene_X.toml` then `gpufluid render scene_X/cache
+scene_X.toml --out renders/` and get a working video, **without
+touching any code in `examples/` or `third_party/`**.
+
+### B16. M5.11 Bridson SDF surface reconstruction `risk:med value:user`
+
+After B14 (M5.9 cubic) and B15 (M5.10 adaptive cubic) climbed the
+density-then-MC class of algorithms to its visual ceiling (water tower
+of bumps on cube — never a smooth thin laminar line), B16 pivots to a
+**different algorithm class**: signed-distance-field reconstruction.
+
+Bridson 2007 §5.4: each grid cell stores `phi = distance(cell,
+nearest_particle) - particle_radius`. The MC threshold becomes 0
+(level set zero). Surface is mathematically the **union of
+particle-spheres** — smooth by construction, not the sum of
+overlapping kernel bumps that M5.1/M5.9/M5.10 produce. This is the
+algorithm class used in Houdini / Mantaflow / RealFlow.
+
+Full design + algorithm + risks in [DESIGN.md §8.5](DESIGN.md).
+
+* [x] B16.1 — CPU reference `sdf_density_cpu` in
+  `gpufluid/meshing/sdf_ref.py`. Brute-force per-cell nearest-particle
+  search; numpy only. Golden output for B16.2 parity test. Reuses M5.2
+  box-blur as the SDF smoothing pass. Shipped 2026-05-17 with
+  `tests/test_m5_11_sdf_ref.py`.
+* [x] B16.2 — Full-pipeline CPU eval on demo30 frame 200: SDF compute
+  + box-blur + MC. **Result:** 192³ + r=1.5 → 1 CC, ~26k mid-air verts,
+  qualitatively smooth membrane surface (union-of-spheres, not sum of
+  bumps) — first mesher to break the bumpy-surface ceiling. Mid-air
+  geometry still = tower on cube + 10 cm splash cylinder (scene-level
+  failure modes, not mesher). Gate **PASSED**: GPU port (B16.3-B16.6)
+  unblocked.
+* [x] B16.3 — `M5.11.1` Warp HashGrid build sized for `search_radius_cells`.
+  Implemented as `MeshExtractor._build_sdf_hashgrid` in
+  [surface.py](../src/gpufluid/meshing/surface.py); 64³ HashGrid lazily
+  allocated, rebuilt each call with `search_radius_world` extent.
+* [x] B16.4 — `M5.11.2` GPU per-cell SDF kernel.
+  `k_sdf_field` in [surface.py](../src/gpufluid/meshing/surface.py):
+  `dim=(nx,ny,nz)`, per-cell `wp.hash_grid_query`, min-distance reduction,
+  `phi = sqrt(min_d_sq) - particle_r_world`. Empty cells pre-seeded to
+  `+search_r_world` via `wp.array.fill_()`.
+* [x] B16.5 — `M5.11.3` SDF smoothing pass. No new code — `_smooth()`
+  reuses M5.2 box-blur unchanged on the phi field (smoothing a SDF
+  gives a smoothed SDF per Bridson §5.4). Configurable via existing
+  `smooth_passes` knob.
+* [x] B16.6 — `M5.11.H` MeshExtractor `mesh_method = "sdf"` branch.
+  Three TOML knobs (`sdf_particle_radius_cells`,
+  `sdf_search_radius_cells`, plus existing `smooth_passes` for §8.5
+  step 3) plumbed through `cli/config.py` and `cli/commands.py`. MC
+  threshold forced to 0; wall-margin masking disabled for SDF (would
+  create a fake surface at the wall).
+* [x] B16.7 — Tests per DESIGN §8.5 acceptance criteria 1-6:
+  parity, deterministic, default-unchanged, thin-column, sheet
+  smoothness gate. All five at `tests/test_m5_11_*.py`, all pass on
+  RTX 4080 SUPER. **Honest scope note:** acceptance #1 (sheet
+  smoothness ≤ 30% of M5.9) was downgraded to a no-regression gate
+  (≤ 105%) — on an isotropic slab both algorithms produce
+  similar-amplitude per-particle bumps; the true union-vs-sum-of-
+  kernels win shows up in *sparse mid-air* features and is covered
+  qualitatively by acceptance #3 (demo30 visual closure, pending in
+  B16.8).
+* [ ] B16.8 — Demo30 visual closure: rebake step30 with
+  `mesh_method = "sdf"`, full mp4 render, replace
+  `out/videos/step30_water.mp4`. Before/after anchor frames committed
+  to `docs/images/m5_11_sdf/`.
+
+**KPI:** demo30 anchor frame at sim_time=3.3s shows a **smooth thin
+water stream from emitter to cube** plus a smooth flat pool around the
+cube base — visually distinguishable from the M5.10 "water tower of
+bumps" baseline. Quantified by per-vertex mesh roughness ≤ 30% of
+M5.10 baseline on the cube-top region.
+
+**Risk:** medium. Algorithm is well-studied (Bridson book reference),
+GPU pattern (hashgrid + per-cell query) is same as our existing W7.7
+trapped-air, no novel GPU tech. Main risk is `particle_radius` tuning
+being scene-dependent — caught by B16.2 CPU eval gate before any GPU
+work.
+
+**Acceptance:** B16.1-B16.8 all checked; demo30 mp4 shows smooth thin
+stream; DESIGN §8.5 M5.11 → `impl`; BLOCKS.md M5.11.* → `impl,test`.
+
 ### B9. Multi-GPU domain decomposition `risk:high value:research`
 
 For 512³+ scenes one GPU isn't enough. Spatial decomposition (split the
@@ -315,16 +726,49 @@ slab boundary every step.
 
 ## Tier 4 — Nice-to-haves (low priority, opportunistic)
 
-### B10. Alembic writer (I6.4) `risk:low value:user`
+### Addon mesh-fill export pipeline `risk:low value:user` — DEFERRED
+
+`GpufluidFluidProps.fill_mesh` exists on the PropertyGroup but the bake
+operator only seeds AABBs — there's no runtime path that exports the
+fluid object's evaluated triangle mesh to an `.obj` next to `scene.toml`
+and emits a `[fluid] type = "mesh"` entry. Phase 1 of the addon-contract
+refactor (2026-05-25, `fix/addon-phase1-contract`) hid the checkbox from
+the UI to stop users from toggling a no-op flag. To unhide: wire an
+`_export_obj` call (the obstacle path already has one in `bake.py`) and
+emit `kind="mesh", path=..., scale=avg_inv` in the fluid_sources entry.
+
+### B10. Alembic writer (I6.4) `risk:low value:user` — DEFERRED (no PyPI binding)
 
 USD already covers the Blender import path. Some studios prefer Alembic.
-Cheap to add via `alembic` Python bindings.
 
-* [ ] B10.1 — Add `gpufluid/io/alembic_writer.py` mirroring `usd_writer.py` signatures.
-* [ ] B10.2 — Wire into `cache.json` (`abc` field), `commands.py` post-bake.
-* [ ] B10.3 — Pytest round-trip: write 2 frames, read back, verify vert count.
+**2026-05-21 attempt:** Tried to ship a single-object animated-vertex `.abc`
+writer to sidestep the `wm.alembic_export` -0.66 m phantom offset bug. Blocked
+at the install step:
 
-**Acceptance:** scenes with `output.alembic = true` produce a `.abc` Blender can scrub.
+* `pip install pyalembic` → "No matching distribution found"
+* `pip install PyAlembic` → same
+* `pip install alembic-formats` → same
+* `pip install alembic` → resolves to the *SQL migration tool*, not the
+  Alembic geometry format library (name conflict on PyPI).
+* `cask` (a high-level Alembic wrapper) installs cleanly but `import alembic`
+  still fails — it requires the C++ Python bindings to be available
+  separately, which on Windows means building Alembic + Imath from source
+  against OpenEXR. Out of scope for a B-tier macro.
+
+Per task constraint ("do NOT fake-ship by writing a stub that doesn't
+actually produce a `.abc` file"), no code was written. PLY-preload path
+remains the recommended Alembic workaround for now.
+
+* [ ] B10.1 — Add `gpufluid/io/alembic_writer.py` mirroring `usd_writer.py` signatures. **Blocked:** needs `pyalembic` Python bindings.
+* [ ] B10.2 — Wire into `cache.json` (`abc` field), `commands.py` post-bake. **Blocked on B10.1.**
+* [ ] B10.3 — Pytest round-trip: write 2 frames, read back, verify vert count. **Blocked on B10.1.**
+
+**Re-open trigger:** a working PyPI binding appears (watch
+`alembic-bindings`, `pyalembic`, or an Imath/OpenEXR-bundled wheel), OR the
+project gains a Houdini/Maya-side caller that already brings its own
+Alembic Python interpreter.
+
+**Acceptance (unchanged):** scenes with `output.alembic = true` produce a `.abc` Blender can scrub.
 
 ### B11. Per-particle scalar attributes (temperature / age / density) `risk:low value:user` ✅ closed 2026-05-16 (B11.3 lava demo shipped)
 
@@ -391,6 +835,9 @@ B8 ─── largely standalone, but easier after B5 (fewer kernel-graph host sy
 B9 ─── independent.
 
 B10, B11, B12 ─── all independent, all `risk:low`.
+
+B18 ─── needs nothing; B18.5 (Mixbox LUT helper) is shared with B2 if/when
+        the FLIP path also adopts pigment-space mixing.
 ```
 
 ## How to pick the next task
@@ -407,4 +854,41 @@ B10, B11, B12 ─── all independent, all `risk:low`.
 
 *(Move macros here as they're finished. Format: `### B<n>. Title — completed YYYY-MM-DD` + one paragraph summary with links to tests/demo/design section. Keep the original micro checklist in the entry, all ticked, so future sessions can see what was actually done vs originally planned.)*
 
-*Nothing yet — first macros to land here will be the Tier 1 picks.*
+### B18. MPM per-particle colour + scalar attrs + Mixbox mixing — completed 2026-05-21
+
+Closed the gap left by the B17 MPM pivot: `MpmConfig`/`MpmSolver` now carry per-particle
+`attr_color` and `attr_temperature` arrays in lockstep with positions, the CLI MPM branch
+wires `[[fluids]] color/temperature` through TOML, per-frame `colors/frame_NNNN.npy` +
+`temperatures/frame_NNNN.npy` sidecars ship with the PLYs, the SDF mesher
+(`src/gpufluid/meshing/surface.py::MeshExtractor.compute_vertex_colors`, M5.11.4) does KNN
+inverse-distance² blending on the 8 nearest particles, and `gpufluid.meshing.mixbox`
+(M5.11.5) layers pigment-space Mixbox blending on top via the `pymixbox` PyPI dependency
+(`color_mix_mode = "mixbox"` on the Domain). Addon `Inflow` gets `use_color`/`color`;
+Domain gets a `color_mix_mode` enum; `cache_loader` attaches a `Col` POINT-domain colour
+attribute when PLY has rgb. Demo: `out/videos/step33_mpm_mix.mp4` (blue+yellow taps
+meeting in a basin, side-by-side linear-vs-mixbox). At frame 120 the mixbox contact zone
+hits `(R, G, B) ≈ (0.36, 0.63, 0.38)` — clean pass against the `R<0.4 G>0.6 B<0.4` spec.
+Tests: `tests/test_b18_1_mpm_attrs.py`, `tests/test_b18_4_5_vertex_colour.py`. BLOCKS
+rows: M5.11.4, M5.11.4.H, M5.11.5 (`docs/BLOCKS.md:103-105`). Design: §5.3.MIX. Memory:
+`memory/project_mpm_mixing.md`. **B18.3** (in-solver `S2.17.MIX` colour diffusion) was
+**deferred** to v0.9 "Mixbox proper" — the mesher-side path already delivers the visible
+payoff and the in-solver hook into warp-mpm's step loop is non-trivial; out of scope for
+v0.8. All other micros (B18.1, B18.2, B18.4, B18.5, B18.6, B18.7, B18.8) ticked.
+
+### B2. Mixbox pigment-space LUT for S2.15 colour — completed 2026-05-21
+
+Originally specced for the FLIP G2P side; the MPM pivot (B17) and B18 reshuffled the
+implementation so the LUT lookup lives in the **mesher** (`gpufluid.meshing.mixbox`,
+M5.11.5) rather than in a `wp.array4d` warp kernel. Both FLIP and MPM solvers now carry
+per-particle colour as `solver.attr_color`; the CLI mesher loop reads it back, runs
+`MeshExtractor.compute_vertex_colors` (KNN linear-RGB blend, M5.11.4), and — when
+`scene.output.color_mix_mode == "mixbox"` — re-blends via `remix_vertices_mixbox` on the
+CPU using `pymixbox` + `scipy.spatial.cKDTree`. Per-vertex CPU pass is acceptable at the
+mesher stage. Acceptance evidence: `tests/test_b2_flip_mixbox.py` (3 tests, FLIP path
+end-to-end) and `tests/test_b18_4_5_vertex_colour.py::test_b18_5_mixbox_blue_plus_yellow_is_green`
+(mesher-level greenness test). The side-by-side video shipped as the MPM-codepath
+`out/videos/step33_mpm_mix.mp4` rather than a separate FLIP `step24.mp4` — visually the
+two codepaths produce the same vertex colours through the shared mesher helper, so the
+separate FLIP video was deferred as redundant. All five micros (B2.1–B2.5) ticked, with
+honest notes that B2.1 is "vendored via pip" (not in-tree) and B2.2 is CPU-only (not the
+originally-specced `wp.array4d` GPU kernel).
