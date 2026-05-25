@@ -442,6 +442,13 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
+        # ESC: user-requested abort. Without this branch Blender's modal loop
+        # never delivers cancel to us — only TIMER events get acted on — so
+        # the gpufluid.cli subprocess kept running through Esc, right-click,
+        # and even Blender window close (orphan process). Live-found
+        # 2026-05-25 during round-3 cancellation test.
+        if event.type == "ESC":
+            return self._abort(context, reason="user pressed Esc")
         if event.type != "TIMER":
             return {"PASS_THROUGH"}
         if self._proc is None:
@@ -466,6 +473,33 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         if rc is None:
             return {"PASS_THROUGH"}
         return self._finish(context, ok=(rc == 0))
+
+    def _abort(self, context, reason: str):
+        """Terminate the bake subprocess + restore UI. Idempotent — safe
+        to call from modal(ESC) and from Blender's cancel() callback."""
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2.0)
+            except Exception as e:
+                logger.warning("addon.bake.terminate_failed",
+                               extra={"err": str(e)})
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        context.workspace.status_text_set(None)
+        self.report({"WARNING"}, f"gpufluid bake aborted ({reason})")
+        return {"CANCELLED"}
+
+    def cancel(self, context):
+        # Blender calls this on right-click / window close / Esc when no
+        # custom modal handler caught the event. We route both paths
+        # through the same _abort to guarantee subprocess teardown.
+        self._abort(context, reason="cancelled by Blender")
 
     def _finish(self, context, ok):
         if self._timer is not None:
