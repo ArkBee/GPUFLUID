@@ -737,6 +737,29 @@ the UI to stop users from toggling a no-op flag. To unhide: wire an
 `_export_obj` call (the obstacle path already has one in `bake.py`) and
 emit `kind="mesh", path=..., scale=avg_inv` in the fluid_sources entry.
 
+### TOML overrides path drops table-valued fields in [[array-of-tables]] `risk:medium value:user` — DEFERRED
+
+Round-9 reviewer (2026-05-25) caught a dormant data-loss bug in the
+Phase 1 atomic TOML emitter. `config_builder._emit_table` for an
+array-of-tables entry filters `inner_scalars = {kk: vv for kk, vv in
+entry.items() if not _is_table(vv) and not _is_array_of_tables(vv)}`
+— so a dict-valued field like `motion = {kind="linear", velocity=[...]}`
+gets dropped entirely from the emitted TOML. Only manifests in the
+overrides-merged path (`_emit_toml`), because the non-overrides path
+hand-emits `motion` at config_builder.py:139. So `[[obstacle]]`
+entries baked with TOML overrides + obstacle.motion silently lose
+their motion data.
+
+Fix: in the array-of-tables branch, also emit inline-table for any
+dict-valued field (`f"{kk} = {_emit_scalar(vv)}"` — _emit_scalar
+already handles dicts as inline tables). Trivial 2-line fix; deferred
+because no live user has hit it yet and round-9 was already over scope.
+
+Add the deferred sibling test from tests/test_addon_round8_regressions.py
+when fixing — the test exists in placeholder form (commented-out NOTE
+block) and asserts that obstacle[0].motion + velocity both appear in
+the ValueError when motion has a non-finite inner value.
+
 ### Renderer respects mesh Col attribute — ✅ SHIPPED 2026-05-25
 
 Was DEFERRED, then fixed same session (commit `9951f1a`). Three layers:
