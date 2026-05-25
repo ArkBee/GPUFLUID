@@ -296,6 +296,21 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
     bl_description = "Spawns the gpufluid CLI subprocess and bakes the cache"
     bl_options = {"REGISTER"}
 
+    # Synchronous mode (round-6): skip the modal/timer dance and block
+    # in Popen.wait() until the CLI finishes. Required for scripted /
+    # CI / MCP-driven workflows where the Blender event loop never
+    # ticks between successive bpy.ops calls — without this, callers
+    # had to sleep+poll the filesystem and still races on cache.json
+    # writeback timing. UI button defaults to sync=False (preserves
+    # the cancellable, status-bar-progress modal UX).
+    sync: bpy.props.BoolProperty(
+        name="Wait for completion",
+        description="Block until the CLI subprocess finishes (no modal). "
+                    "Useful for batch scripts. UI defaults to False.",
+        default=False,
+        options={'SKIP_SAVE', 'HIDDEN'},
+    )
+
     _timer = None
     _proc: Optional[subprocess.Popen] = None
     _stdout_q: Optional[queue.Queue] = None
@@ -458,6 +473,53 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                         "addon.bake.stale_subdir_clean_failed",
                         extra={"dir": str(d), "err": str(e)})
 
+        # Reentrance flag goes up BEFORE subprocess spawn for both code
+        # paths. Sync mode also wants the guard so two parallel scripted
+        # bakes don't both Popen into the same cache_dir.
+        GPUFLUID_OT_bake._is_running = True
+        domain["gpufluid_origin"] = list(origin)
+        domain["gpufluid_dom_size"] = list(dom_size)
+        domain["gpufluid_cache_dir"] = str(cache_dir)
+
+        # ─── SYNC PATH ────────────────────────────────────────────────
+        # Block in Popen.wait() with no modal / timer / status text.
+        # Used by scripts, CI, MCP-driven flows where the Blender event
+        # loop isn't ticking between bpy.ops calls. Drain stdout into
+        # the addon logger so callers see CLI progress.
+        if self.sync:
+            try:
+                self._proc = subprocess.Popen(
+                    [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    bufsize=1, text=True, encoding="utf-8", errors="replace",
+                )
+                for line in self._proc.stdout:
+                    logger.info("bake: %s", line.rstrip())
+                rc = self._proc.wait()
+            finally:
+                GPUFLUID_OT_bake._is_running = False
+            if rc != 0:
+                self.report({"ERROR"},
+                            f"gpufluid bake (sync) failed with rc={rc} — "
+                            f"see system console")
+                return {"CANCELLED"}
+            # Auto-attach inline so sync callers can immediately query
+            # the cache mesh without an extra ops call. Mirrors _finish.
+            try:
+                bpy.ops.gpufluid.attach_cache(
+                    cache_dir=str(cache_dir),
+                    target_name=(domain.gpufluid_domain.target_object.name
+                                 if domain.gpufluid_domain.target_object else ""),
+                    origin=tuple(float(c) for c in origin),
+                    dom_size=tuple(float(c) for c in dom_size),
+                )
+            except Exception as e:
+                self.report({"WARNING"},
+                            f"sync bake ok, but auto-attach failed: {e}")
+            self.report({"INFO"}, "gpufluid bake (sync) finished")
+            return {"FINISHED"}
+
+        # ─── MODAL PATH ───────────────────────────────────────────────
         self._proc = subprocess.Popen(
             [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -476,19 +538,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
 
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.3, window=context.window)
-        # Set the reentrance flag BEFORE spawning subprocess.Popen, not
-        # at the end of execute(). Round-5 reviewer caught this: between
-        # `subprocess.Popen()` and the final `_is_running=True` there's
-        # a ~20-line window where script-driven reentrant calls (Python
-        # console, MCP, automation) would see `_is_running=False` and
-        # spawn a SECOND subprocess racing the first into the same
-        # cache_dir. Mouse-double-click is safe (single event loop tick
-        # between dispatches), Python double-call wasn't.
-        GPUFLUID_OT_bake._is_running = True
         wm.modal_handler_add(self)
-        domain["gpufluid_origin"] = list(origin)
-        domain["gpufluid_dom_size"] = list(dom_size)
-        domain["gpufluid_cache_dir"] = str(cache_dir)
         context.workspace.status_text_set("gpufluid baking…")
         return {"RUNNING_MODAL"}
 

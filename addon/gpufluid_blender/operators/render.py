@@ -97,6 +97,17 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         description="PNG output dir, relative to cache_dir if not absolute",
         default="render",
     )
+    # Same sync-mode contract as OT_bake (round-6): when True, block in
+    # Popen.wait() with no modal. Required for scripted/CI/MCP-driven
+    # workflows. UI defaults to False so the user keeps the cancellable
+    # modal flow with status-bar progress.
+    sync: bpy.props.BoolProperty(
+        name="Wait for completion",
+        description="Block until the render subprocess finishes (no modal). "
+                    "Useful for batch scripts. UI defaults to False.",
+        default=False,
+        options={'SKIP_SAVE', 'HIDDEN'},
+    )
 
     # ─── modal state ──────────────────────────────────────────────────────
     _timer = None
@@ -104,6 +115,11 @@ class GPUFLUID_OT_render(bpy.types.Operator):
     _stdout_q: Optional[queue.Queue] = None
     _stdout_thread: Optional[threading.Thread] = None
     _out_dir = ""
+    # Reentrance guard — symmetric with OT_bake. Without this, a second
+    # OT_render click while the first headless Blender is still running
+    # spawns a second Blender writing to the same out_dir, with the
+    # later instance's frame_N.png clobbering the first's mid-write.
+    _is_running: bool = False
 
     @classmethod
     def poll(cls, context):
@@ -116,6 +132,11 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=360)
 
     def execute(self, context):
+        if GPUFLUID_OT_render._is_running:
+            self.report({"WARNING"},
+                        "A gpufluid render is already running — wait for "
+                        "it to finish before starting a new one.")
+            return {"CANCELLED"}
         prefs = get_prefs(context)
         interp = bpy.path.abspath(prefs.interpreter_path).strip()
         if not interp or not Path(interp).exists():
@@ -169,6 +190,39 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         if blender:
             argv += ["--blender", bpy.path.abspath(blender)]
 
+        GPUFLUID_OT_render._is_running = True
+
+        # ─── SYNC PATH (round-6) ──────────────────────────────────────
+        if self.sync:
+            try:
+                self._proc = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    bufsize=1, text=True, encoding="utf-8", errors="replace",
+                )
+                for line in self._proc.stdout:
+                    # Render produces less noise than bake — log at INFO
+                    # so callers see headless Blender startup + progress.
+                    print(f"[render] {line.rstrip()}")
+                rc = self._proc.wait()
+            except OSError as e:
+                GPUFLUID_OT_render._is_running = False
+                self.report({"ERROR"},
+                            f"could not spawn render subprocess: {e}")
+                return {"CANCELLED"}
+            finally:
+                GPUFLUID_OT_render._is_running = False
+            if rc != 0:
+                self.report({"ERROR"},
+                            f"gpufluid render (sync) failed rc={rc}")
+                return {"CANCELLED"}
+            n_png = len(list(Path(self._out_dir).glob("*.png")))
+            self.report({"INFO"},
+                        f"gpufluid render (sync) finished — {n_png} PNG(s) "
+                        f"in {self._out_dir}")
+            return {"FINISHED"}
+
+        # ─── MODAL PATH ───────────────────────────────────────────────
         try:
             self._proc = subprocess.Popen(
                 argv,
@@ -176,6 +230,7 @@ class GPUFLUID_OT_render(bpy.types.Operator):
                 bufsize=1, text=True, encoding="utf-8", errors="replace",
             )
         except OSError as e:
+            GPUFLUID_OT_render._is_running = False
             self.report({"ERROR"}, f"could not spawn render subprocess: {e}")
             return {"CANCELLED"}
 
@@ -193,6 +248,11 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
+        # ESC abort — same pattern as OT_bake. Without it, user can't
+        # cancel a long Eevee render and the subprocess outlives
+        # Blender's window-close.
+        if event.type == "ESC":
+            return self._abort(context, reason="user pressed Esc")
         if event.type != "TIMER":
             return {"PASS_THROUGH"}
         if self._proc is None:
@@ -211,7 +271,35 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             return {"PASS_THROUGH"}
         return self._finish(context, ok=(rc == 0))
 
+    def _abort(self, context, reason: str):
+        """Terminate render subprocess + restore UI. Idempotent."""
+        GPUFLUID_OT_render._is_running = False
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2.0)
+            except Exception as e:
+                logger.warning("addon.render.terminate_failed",
+                               extra={"err": str(e)})
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        context.workspace.status_text_set(None)
+        self._proc = None
+        self.report({"WARNING"}, f"gpufluid render aborted ({reason})")
+        return {"CANCELLED"}
+
+    def cancel(self, context):
+        # Blender invokes this on window-close / right-click etc. Route
+        # through _abort so subprocess teardown always happens.
+        self._abort(context, reason="cancelled by Blender")
+
     def _finish(self, context, ok):
+        GPUFLUID_OT_render._is_running = False
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
