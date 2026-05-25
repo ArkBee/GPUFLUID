@@ -14,6 +14,7 @@ import bpy
 
 from . import (
     _PRELOAD,
+    _free_table,
     _frame_change_handler,
     _preload_sequence,
 )
@@ -207,18 +208,61 @@ class GPUFLUID_OT_detach_cache(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        o = context.active_object
-        return o is not None and (
-            o.get("gpufluid_cache_dir") is not None
-            or o.get("gpufluid_ww_cache_dir") is not None
-        )
+        # Pass if EITHER the active object has cache props OR a
+        # gpufluid_cache / gpufluid_whitewater object exists in scene.
+        # (Bake leaves trace props on the Domain too; execute() targets
+        # the real cache objects below.)
+        if context.scene is None:
+            return False
+        for o in context.scene.objects:
+            if (o.get("gpufluid_cache_dir") is not None
+                    or o.get("gpufluid_ww_cache_dir") is not None):
+                return True
+        for n in ("gpufluid_cache", "gpufluid_whitewater"):
+            if n in context.scene.objects:
+                return True
+        return False
 
     def execute(self, context):
-        obj = context.active_object
-        for k in ("gpufluid_cache_dir", "gpufluid_cache_pattern",
-                  "gpufluid_cache_frame_offset", "gpufluid_cache_origin",
-                  "gpufluid_ww_cache_dir", "gpufluid_ww_cache_frame_offset",
-                  "gpufluid_ww_cache_origin"):
-            if k in obj.keys():
-                del obj[k]
+        # Live-found 2026-05-25: original execute operated on
+        # context.active_object, which is typically Domain after a bake.
+        # Domain carries bake-trace props (gpufluid_cache_dir,
+        # gpufluid_origin, gpufluid_dom_size — note: different names from
+        # the per-object cache props), so the for-loop silently no-op'd
+        # on the real cache object and the op reported FINISHED while
+        # achieving nothing. Also _PRELOAD wasn't touched, so a re-attach
+        # of the same name skipped the eviction path.
+        #
+        # Now: scan the scene for cache-bearing objects (gpufluid_cache,
+        # gpufluid_whitewater, or anything with the per-object cache
+        # props), strip per-object props, AND scrub the Domain's
+        # bake-trace props, AND drop the _PRELOAD entry.
+        all_cache_keys = (
+            "gpufluid_cache_dir", "gpufluid_cache_pattern",
+            "gpufluid_cache_frame_offset", "gpufluid_cache_origin",
+            "gpufluid_cache_dom_size",
+            "gpufluid_ww_cache_dir", "gpufluid_ww_cache_frame_offset",
+            "gpufluid_ww_cache_origin",
+        )
+        # Domain's bake-trace prop names differ — strip these from any
+        # object that has them (almost always the Domain).
+        domain_trace_keys = (
+            "gpufluid_cache_dir", "gpufluid_origin", "gpufluid_dom_size",
+        )
+        n_cleaned = 0
+        for o in list(context.scene.objects):
+            had = False
+            for k in all_cache_keys:
+                if k in o.keys():
+                    del o[k]; had = True
+            for k in domain_trace_keys:
+                if k in o.keys():
+                    del o[k]; had = True
+            if had:
+                n_cleaned += 1
+            # Drop preload table — match cache_loader behaviour
+            if o.name in _PRELOAD:
+                _free_table(_PRELOAD[o.name])
+                del _PRELOAD[o.name]
+        self.report({"INFO"}, f"detached cache from {n_cleaned} object(s)")
         return {"FINISHED"}

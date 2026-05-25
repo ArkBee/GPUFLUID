@@ -232,7 +232,11 @@ class GpufluidFluidProps(bpy.types.PropertyGroup):
         name="Stamp Temperature (S2.18 / B11)", default=False,
         description="Stamp this source's temperature on emitted particles. "
                     "Enables the per-particle scalar attribute pipeline "
-                    "(used for lava drop, hot/cold mixing demos)",
+                    "(used for lava drop, hot/cold mixing demos). "
+                    "Note: only visible at vertex level when [output] "
+                    "temperature_colormap is set via Domain TOML overrides "
+                    "(e.g. \"blackbody\"); otherwise the data sits in "
+                    "<cache>/temperatures/ sidecar .npy and is invisible.",
     )
     temperature: bpy.props.FloatProperty(
         name="Temperature",
@@ -295,7 +299,11 @@ class GpufluidInflowProps(bpy.types.PropertyGroup):
     use_temperature: bpy.props.BoolProperty(
         name="Stamp Temperature (B18)", default=False,
         description="Stamp this inflow's temperature on emitted particles "
-                    "(carried through MPM bake as per-particle scalar)",
+                    "(carried through MPM bake as per-particle scalar). "
+                    "Note: only visible at vertex level when [output] "
+                    "temperature_colormap is set via Domain TOML overrides "
+                    "(e.g. \"blackbody\"); otherwise the data sits in "
+                    "<cache>/temperatures/ sidecar .npy and is invisible.",
     )
     temperature: bpy.props.FloatProperty(
         name="Temperature", default=20.0, min=0.0, max=5000.0, soft_max=2000.0,
