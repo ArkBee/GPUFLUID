@@ -94,13 +94,87 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
         return d is not None
 
     def execute(self, context):
+        import time
         d = next((o for o in context.scene.objects if o.gpufluid_domain.is_domain), None)
         cache = bpy.path.abspath(d.gpufluid_domain.cache_dir)
+        # MSC modifiers mmap the .abc file — Windows refuses to delete it
+        # until Blender releases the cache_file data-block. Sequence:
+        #   1) Unlink cache_file from every MSC modifier
+        #   2) Remove the MSC modifiers themselves
+        #   3) Call orphans_purge to actually free the now-unused cache_file
+        #      datablocks (this releases the underlying file handle)
+        released = 0
+        for obj in context.scene.objects:
+            for m in list(obj.modifiers):
+                if m.type == "MESH_SEQUENCE_CACHE":
+                    m.cache_file = None
+                    obj.modifiers.remove(m)
+                    released += 1
+        # Also drop any pre-loaded PLY mesh tables — pointing at meshes about
+        # to be deleted by orphans_purge would raise ReferenceError next frame.
+        try:
+            from ..cache_loader import _PRELOAD
+            _PRELOAD.clear()
+        except Exception:
+            pass
+        try:
+            bpy.ops.outliner.orphans_purge(
+                do_local_ids=True, do_linked_ids=False, do_recursive=True)
+        except Exception:
+            pass
+        # Brief settle for Windows file lock release
+        time.sleep(0.1)
         if os.path.isdir(cache):
-            shutil.rmtree(cache, ignore_errors=True)
-            self.report({"INFO"}, f"cleared {cache}")
+            try:
+                shutil.rmtree(cache)
+                self.report({"INFO"},
+                            f"cleared {cache} (released {released} MSC)")
+            except PermissionError as exc:
+                # Retry once after a longer wait — sometimes mmap takes longer
+                time.sleep(0.5)
+                try:
+                    shutil.rmtree(cache)
+                    self.report({"INFO"}, f"cleared after retry")
+                except Exception as exc2:
+                    self.report({"ERROR"},
+                                f"could not clear cache (file locked): {exc2}")
+                    return {"CANCELLED"}
         else:
             self.report({"INFO"}, "no cache to clear")
+        return {"FINISHED"}
+
+
+class GPUFLUID_OT_apply_eevee_preset(bpy.types.Operator):
+    """[BLK A8.9] One-click Eevee perf preset for the active scene.
+
+    Configures TAA samples + disables expensive post-FX (bloom/SSR/GTAO/
+    volumetrics). Production default: 16 samples → roughly 3× faster than
+    Blender's photo-quality defaults at no visible cost for an opaque
+    fluid mesh + cube + ground scene. Idempotent — run as many times as
+    you like; the only mutated bits are scene.eevee.* attributes.
+    """
+    bl_idname = "gpufluid.apply_eevee_preset"
+    bl_label = "Apply Eevee Production Preset"
+    bl_description = ("Set TAA samples to 16 and disable bloom/SSR/GTAO/"
+                      "volumetric lights — production-friendly Eevee config "
+                      "for fluid renders. Run once per scene.")
+    bl_options = {"REGISTER", "UNDO"}
+
+    samples: bpy.props.IntProperty(
+        name="TAA Samples", default=16, min=1, max=256,
+        description="Eevee render samples per frame; 16 is the recommended default")
+
+    def execute(self, context):
+        # Defer the library import to keep the addon's bpy-dependent code
+        # decoupled from the import-time path that pytest exercises.
+        from ..render_bridge import apply_eevee_preset
+        log = apply_eevee_preset(context.scene, samples=self.samples)
+        if not log:
+            self.report({"WARNING"}, "scene has no .eevee attribute — set engine to EEVEE first")
+            return {"CANCELLED"}
+        self.report({"INFO"},
+                    f"Eevee preset applied: samples={self.samples}, "
+                    f"disabled={sum(1 for v in log.values() if v is False)}")
         return {"FINISHED"}
 
 

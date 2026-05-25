@@ -218,17 +218,34 @@ def collect_scene(context, domain_obj):
     # [frame_start, frame_end] and emit as `keyframes` so the MPM solver can
     # spawn each particle at the source's position at *its* spawn time.
     def _is_animated(obj):
-        if obj.animation_data and obj.animation_data.action:
-            return True
-        if obj.constraints:
-            return True
-        # parent moving counts too
-        p = obj.parent
-        while p is not None:
-            if p.animation_data and p.animation_data.action:
-                return True
-            p = p.parent
-        return False
+        """Honest depsgraph check: evaluate matrix_world at frame_start and
+        frame_start+1 and compare. This catches constraints, drivers, and
+        animated parents — none of which the F-curve-only
+        `_matrix_world_at_frame` below can express. Previously this
+        returned True on any constraint and then the keyframe sampler froze
+        the object at frame 0 (constraints were a silent footgun)."""
+        scene = context.scene
+        # Sample at the inflow's own start-frame when present (matches the
+        # keyframe-emission window below), else current scene frame.
+        try:
+            f0 = int(obj.gpufluid_inflow.frame_start)
+        except (AttributeError, TypeError):
+            f0 = scene.frame_current
+        saved = scene.frame_current
+        try:
+            scene.frame_set(f0)
+            dg = bpy.context.evaluated_depsgraph_get()
+            m0 = obj.evaluated_get(dg).matrix_world.copy()
+            scene.frame_set(f0 + 1)
+            dg = bpy.context.evaluated_depsgraph_get()
+            m1 = obj.evaluated_get(dg).matrix_world.copy()
+        finally:
+            scene.frame_set(saved)
+        # Frobenius norm of the difference; 1e-6 absorbs FP noise on truly
+        # static rigs and trips on sub-millimetre motion.
+        diff = sum((m0[i][j] - m1[i][j]) ** 2
+                   for i in range(4) for j in range(4)) ** 0.5
+        return diff > 1e-6
 
     def _iter_fcurves(action):
         """Yield F-curves from an action across Blender 4.x and 5.x layouts.

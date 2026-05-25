@@ -16,20 +16,34 @@ import shutil
 import sys
 
 
+def _has_gpufluid(python_exe: str) -> bool:
+    """Return True if the given Python can import gpufluid (quick subprocess)."""
+    import subprocess
+    try:
+        rc = subprocess.run(
+            [python_exe, "-c", "import gpufluid"],
+            capture_output=True, timeout=5,
+        )
+        return rc.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 def _detect_interpreter() -> str:
     """Best-effort guess at a Python with `gpufluid` installed.
 
-    Search order:
-      1. `$VIRTUAL_ENV/Scripts/python.exe` (or `bin/python` on POSIX) —
-         the venv Blender was launched from, if any.
-      2. `$GPUFLUID_PYTHON` env var — explicit override for advanced
-         setups / CI.
-      3. `shutil.which("python")` — picks up whatever is first on PATH.
-         Last resort; the user almost certainly wants a venv instead, but
-         a path that exists beats an empty string.
+    Validates each candidate by spawning ``python -c 'import gpufluid'``;
+    only paths that succeed are returned. Without this guard, the system
+    Python on PATH gets picked but doesn't have the library installed,
+    and every bake fails with ModuleNotFoundError.
 
-    Returns "" if nothing plausible is found — UI shows the empty field
-    so the user knows to fill it in.
+    Search order:
+      1. ``$GPUFLUID_PYTHON`` env override (always honored if exists,
+         no validation — power-user escape hatch)
+      2. ``$VIRTUAL_ENV/{Scripts/python.exe,bin/python}`` — current venv
+      3. Common project venv layouts near the bake/cwd (`.venv/Scripts/...`,
+         `venv/Scripts/...`) walking up from cwd
+      4. ``shutil.which("python")`` — only if it can import gpufluid
     """
     env_override = os.environ.get("GPUFLUID_PYTHON", "").strip()
     if env_override and os.path.exists(env_override):
@@ -39,11 +53,26 @@ def _detect_interpreter() -> str:
     if venv:
         cand = (os.path.join(venv, "Scripts", "python.exe") if os.name == "nt"
                 else os.path.join(venv, "bin", "python"))
-        if os.path.exists(cand):
+        if os.path.exists(cand) and _has_gpufluid(cand):
             return cand
 
+    # Walk up from cwd looking for `.venv/Scripts/python.exe` or `venv/...`
+    cwd = os.getcwd()
+    for _ in range(6):
+        for venv_dir in (".venv", "venv"):
+            cand = (os.path.join(cwd, venv_dir, "Scripts", "python.exe")
+                    if os.name == "nt"
+                    else os.path.join(cwd, venv_dir, "bin", "python"))
+            if os.path.exists(cand) and _has_gpufluid(cand):
+                return cand
+        parent = os.path.dirname(cwd)
+        if parent == cwd:
+            break
+        cwd = parent
+
+    # Last resort — system Python on PATH, ONLY if it has gpufluid
     found = shutil.which("python")
-    if found:
+    if found and _has_gpufluid(found):
         return found
     return ""
 
@@ -80,6 +109,22 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         subtype="FILE_PATH",
         default="",
     )
+    # Phase 2 — cache loader bounds. Each preload entry is one full PLY
+    # sequence (potentially thousands of mesh datablocks). 8 sequences
+    # covers most "compare-a-few-bakes" workflows without unbounded RAM.
+    preload_cap: bpy.props.IntProperty(
+        name="Preload cache cap",
+        description="Maximum number of preloaded mesh sequences kept in "
+                    "memory; oldest are evicted (LRU). Each entry can hold "
+                    "thousands of mesh datablocks.",
+        default=8, min=1, max=64,
+    )
+    preload_max_frames: bpy.props.IntProperty(
+        name="Preload max frames",
+        description="Hard cap on frames scanned per preload call. Used to "
+                    "stop runaway loops on misconfigured caches.",
+        default=10000, min=100, max=1000000,
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -93,6 +138,10 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         col.separator()
         col.label(text=f"Blender's own Python: {sys.executable}  (NOT this — see README)",
                   icon="ERROR")
+        col.separator()
+        col.label(text="Cache loader:")
+        col.prop(self, "preload_cap")
+        col.prop(self, "preload_max_frames")
 
 
 def get_prefs(context) -> "GpufluidPreferences":
