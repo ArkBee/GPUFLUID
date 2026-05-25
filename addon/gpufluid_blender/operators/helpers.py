@@ -1,7 +1,29 @@
-"""[BLK A8.8] Helper operators: add domain/fluid/obstacle, clear cache, open dir."""
+"""[BLK A8.8] Helper operators: add domain/fluid/obstacle, clear cache, open dir.
+
+Phase 4 also hosts ``subprocess_drain`` — the background-thread stdout
+reader shared by ``operators.bake`` and ``operators.render`` modal ops.
+"""
 import os
 import shutil
 import bpy
+
+
+def subprocess_drain(proc, q):
+    """Read ``proc.stdout`` line-by-line into queue ``q``; push ``None``
+    sentinel on EOF/error.
+
+    Designed to run in a daemon ``threading.Thread`` so the operator's
+    modal timer never blocks on ``readline()``. Previously duplicated in
+    ``operators/bake.py`` and ``operators/render.py``; consolidated here
+    in Phase 4.
+    """
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            q.put(line)
+    except Exception:  # noqa: BLE001 — daemon thread, must not propagate
+        pass
+    finally:
+        q.put(None)  # sentinel
 
 
 class GPUFLUID_OT_add_domain(bpy.types.Operator):
@@ -112,8 +134,13 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
                     released += 1
         # Also drop any pre-loaded PLY mesh tables — pointing at meshes about
         # to be deleted by orphans_purge would raise ReferenceError next frame.
+        # Phase 4 bonus fix: route each entry through ``_free_table`` so
+        # mesh datablocks with users==0 actually get removed instead of
+        # leaking in ``bpy.data.meshes`` after a bare ``_PRELOAD.clear()``.
         try:
-            from ..cache_loader import _PRELOAD
+            from ..cache_loader import _PRELOAD, _free_table
+            for _name, _table in list(_PRELOAD.items()):
+                _free_table(_table)
             _PRELOAD.clear()
         except Exception:
             pass

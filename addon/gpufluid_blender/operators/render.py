@@ -13,23 +13,23 @@ and the right GPU drivers), instead of trying to drive both stacks from
 the addon's bpy interpreter.
 
 Concurrency model mirrors A8.5: blocking ``Popen`` + background drain
-thread + modal timer ticking a ``queue.Queue``. The drain helper is
-duplicated rather than imported from bake.py — a future Phase 4 sweep
-will lift it into ``operators/helpers.py``.
+thread + modal timer ticking a ``queue.Queue``. Phase 4 lifted the drain
+helper into ``operators/helpers.subprocess_drain`` so both bake and
+render share identical semantics.
 """
 from __future__ import annotations
 
-import os
 import queue
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import Optional
 
 import bpy
 
+from .. import logger
 from ..preferences import get_prefs
+from .helpers import subprocess_drain
 
 
 def _find_domain(context):
@@ -179,19 +179,11 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             self.report({"ERROR"}, f"could not spawn render subprocess: {e}")
             return {"CANCELLED"}
 
-        # Background stdout drain — same pattern as OT_bake._drain. See
-        # docstring above re: Phase 4 refactor into a shared helper.
+        # Background stdout drain — shared helper with OT_bake (Phase 4).
         self._stdout_q = queue.Queue()
-        def _drain(proc, q):
-            try:
-                for line in iter(proc.stdout.readline, ""):
-                    q.put(line)
-            except Exception:
-                pass
-            finally:
-                q.put(None)  # sentinel
         self._stdout_thread = threading.Thread(
-            target=_drain, args=(self._proc, self._stdout_q), daemon=True)
+            target=subprocess_drain, args=(self._proc, self._stdout_q),
+            daemon=True)
         self._stdout_thread.start()
 
         wm = context.window_manager
@@ -214,7 +206,7 @@ class GPUFLUID_OT_render(bpy.types.Operator):
                     break
                 if line is None:   # sentinel: stdout EOF
                     break
-                print("[gpufluid.render]", line.rstrip())
+                logger.info("render: %s", line.rstrip())
         if rc is None:
             return {"PASS_THROUGH"}
         return self._finish(context, ok=(rc == 0))
