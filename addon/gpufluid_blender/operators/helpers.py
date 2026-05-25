@@ -162,15 +162,21 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
             for _name, _table in list(_PRELOAD.items()):
                 _free_table(_table)
             _PRELOAD.clear()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Round-7 reviewer flag: was bare `pass`. If cache_loader gets
+            # renamed/refactored, OT_clear_cache silently becomes no-op
+            # on the _PRELOAD side. Log so it shows up in the system
+            # console instead of leaking _seq_* meshes invisibly.
+            from .. import logger as _addon_logger
+            _addon_logger.warning(
+                "addon.clear_cache.preload_drop_failed: %s", exc)
         # Drop orphan cache_files via data API (was bpy.ops.outliner.orphans_purge
         # which failed poll outside an Outliner area; try/except masked it,
         # leaving .abc mmap'd → next bake's overwrite silently failed).
         for cf in list(bpy.data.cache_files):
             if cf.users == 0:
                 try:
-                    bpy.data.cache_files.remove(cf)
+                    bpy.data.cache_files.remove(cf, do_unlink=True)
                 except Exception:
                     pass
         # Brief settle for Windows file lock release

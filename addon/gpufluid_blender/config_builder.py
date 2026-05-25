@@ -290,12 +290,21 @@ def _deep_merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
 # the gpufluid scene schema.
 # ---------------------------------------------------------------------------
 
+import math as _math
+
+
 def _emit_scalar(v: Any) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, int):
         return str(v)
     if isinstance(v, float):
+        # Round-7 reviewer flag: raw f"{v:g}" emits "inf" / "nan" which
+        # tomllib parses as a literal token and chokes. Reject early
+        # with a clear message — caller (probably a PropertyGroup default
+        # that wasn't initialised) needs to know which value is bad.
+        if _math.isnan(v) or _math.isinf(v):
+            raise ValueError(f"non-finite float in TOML: {v!r}")
         return f"{v:g}"
     if isinstance(v, str):
         esc = v.replace("\\", "\\\\").replace('"', '\\"')
@@ -311,6 +320,9 @@ def _emit_scalar(v: Any) -> str:
         # Inline table.
         body = ", ".join(f"{k} = {_emit_scalar(val)}" for k, val in v.items())
         return "{ " + body + " }"
+    # Reviewer flag: None used to raise this generic ValueError without
+    # pointing at the key, leaving the caller debugging a 4000-line
+    # scene_dict. Caller (_emit_table) now wraps this with key context.
     raise ValueError(f"unsupported TOML value: {v!r} ({type(v).__name__})")
 
 
@@ -337,8 +349,19 @@ def _emit_table(out_lines: List[str], path: str, table: Dict[str, Any]) -> None:
             sub_tables[k] = v
         else:
             scalars[k] = v
+    # Wrap each _emit_scalar with key context so non-finite floats /
+    # unsupported types point at the actual scene_dict key the user (or
+    # an override) screwed up, instead of a bare ValueError(repr(v)).
+    def _emit_with_key(k, v, prefix=""):
+        try:
+            return _emit_scalar(v)
+        except ValueError as e:
+            full = f"{prefix}{k}" if prefix else (
+                f"{path}.{k}" if path else k)
+            raise ValueError(f"TOML emit failed at '{full}': {e}") from None
+
     for k, v in scalars.items():
-        out_lines.append(f"{k} = {_emit_scalar(v)}")
+        out_lines.append(f"{k} = {_emit_with_key(k, v)}")
     if path:
         out_lines.append("")
     for k, sub in sub_tables.items():
@@ -346,11 +369,12 @@ def _emit_table(out_lines: List[str], path: str, table: Dict[str, Any]) -> None:
         _emit_table(out_lines, sub_path, sub)
     for k, arr in sub_arrays.items():
         sub_path = f"{path}.{k}" if path else k
-        for entry in arr:
+        for i, entry in enumerate(arr):
             out_lines.append(f"[[{sub_path}]]")
             inner_scalars = {kk: vv for kk, vv in entry.items() if not _is_table(vv) and not _is_array_of_tables(vv)}
             for kk, vv in inner_scalars.items():
-                out_lines.append(f"{kk} = {_emit_scalar(vv)}")
+                prefix = f"{sub_path}[{i}]."
+                out_lines.append(f"{kk} = {_emit_with_key(kk, vv, prefix)}")
             # Arrays-of-tables nested inside an entry are not used by us.
             out_lines.append("")
 

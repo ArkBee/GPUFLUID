@@ -374,6 +374,17 @@ def _frame_change_handler(scene, depsgraph=None):
     # (round-4 test #23 save/load).
     f = scene.frame_current
     visible_kinds = _domain_whitewater_visibility(scene)
+    # Round-7: prune stale _PRELOAD keys whose objects are gone from
+    # the scene (Ctrl+Z deleted them, user moved to another scene, etc.).
+    # Without this each delete-rebake cycle would orphan a ~200 KB dict
+    # entry + N mesh datablocks with users==0. Cheap O(K) check where
+    # K=preload_cap=8 by default.
+    if _PRELOAD:
+        live_names = {o.name for o in scene.objects}
+        stale = [k for k in _PRELOAD.keys() if k not in live_names]
+        for k in stale:
+            _free_table(_PRELOAD[k])
+            del _PRELOAD[k]
     for obj in scene.objects:
         # Cache loading only applies to mesh objects. The Domain Empty also
         # carries a `gpufluid_cache_dir` custom prop (for the bake operator's

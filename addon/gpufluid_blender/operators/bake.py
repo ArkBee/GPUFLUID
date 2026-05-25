@@ -594,6 +594,13 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
         context.workspace.status_text_set(None)
+        # Round-7 reviewer flag: clear instance attrs so a re-fired modal
+        # on the same instance after cancel doesn't poll a stale _proc
+        # (whose poll() returns rc != None) and go straight to
+        # _finish(ok=False) without actually re-baking.
+        self._proc = None
+        self._stdout_q = None
+        self._stdout_thread = None
         self.report({"WARNING"}, f"gpufluid bake aborted ({reason})")
         return {"CANCELLED"}
 
