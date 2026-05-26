@@ -69,6 +69,7 @@ def step_unit_tests() -> StepResult:
         "tests/test_no_layer_exceptions.py",
         "tests/test_addon_role_single.py",
         "tests/test_addon_round8_regressions.py",
+        "tests/test_preload_cache_invariants.py",
     ]
     cmd = [str(VENV_PY), "-m", "pytest", "-x", "--tb=short", *files]
     p = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)

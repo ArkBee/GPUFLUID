@@ -138,15 +138,177 @@ def _domain_whitewater_visibility(scene):
     return (True, True, True)
 
 
-# Per-object pre-loaded mesh datablocks: {obj_name: {frame_idx: mesh_datablock}}.
-# Populated by `_preload_sequence`. Frame_change_handler then does a pointer-
-# swap `obj.data = _PRELOAD[obj.name][idx]` (~microseconds vs ~5s rebuild).
+# ─── PreloadCache — round-13 senior day-1 rewrite #1 ──────────────────
 #
-# Phase 2: OrderedDict with LRU eviction. Each entry can hold thousands of
-# mesh datablocks; an unbounded dict on a long Blender session leaks RAM
-# until the process is killed. Cap is read from preferences.preload_cap;
-# `_lru_touch` and `_lru_evict_one` move/drop entries.
-_PRELOAD: "OrderedDict[str, dict[int, bpy.types.Mesh]]" = OrderedDict()
+# Per-object pre-loaded mesh datablocks: {obj_name: {frame_idx: mesh_db}}.
+# Populated by `_preload_sequence`; frame_change_handler does a pointer-
+# swap `obj.data = cache.get_frame(name, idx)` (microseconds vs ~5s rebuild).
+#
+# History: rounds 1-12 used a module-global `OrderedDict` mutated from
+# 8 sites with side-effecting helper functions. That singleton was the
+# single biggest source of regressions (rounds 3/5/7/8 each found a
+# new way to leak a mesh datablock or hold a dead pointer). Senior
+# architect (round-12) flagged it as the #1 day-1 rewrite ROI.
+#
+# This class encapsulates ALL preload mutations. Old module-level names
+# (`_PRELOAD`, `_free_table`, `_lru_touch`, `_lru_install`, `_prune_stale`)
+# remain as thin shims for back-compat with `_ops.py`, `helpers.py`,
+# `bake.py` auto-attach, and the unit tests — DO NOT add new call sites
+# to those names; use the cache instance methods.
+
+
+class PreloadCache:
+    """Per-addon LRU cache of pre-loaded PLY mesh sequences.
+
+    Invariants (enforced by tests):
+    1. Calling `attach(name, new_table)` when `name` already exists
+       NEVER leaves the previous table's meshes orphaned in
+       `bpy.data.meshes` — the pre-swap pattern redirects the live
+       object's `.data` to a fresh mesh from `new_table` so the old
+       current-frame mesh's `users` drops to 0 and `_free_table` can
+       actually remove it.
+    2. `_free_table` is defensive against `ReferenceError` from external
+       orphan-purge / addon-disable cycles and resolves `mesh.name`
+       BEFORE entering the except branch (the except's logger.warning
+       can't ReferenceError on a dead struct).
+    3. After `invalidate(name)`, `name not in cache` AND its meshes
+       have been removed (or were already user-pinned and stayed).
+    4. After `prune_stale(scene)`, every key in cache exists in
+       `scene.objects` (or any scene when `scene=None`).
+    """
+
+    def __init__(self) -> None:
+        self._tables: "OrderedDict[str, dict[int, bpy.types.Mesh]]" = OrderedDict()
+
+    # ── Dict-like protocol (for back-compat with code that did
+    #    `cache_loader._PRELOAD[name]`, `for k in _PRELOAD`, etc.) ──
+    def __len__(self) -> int: return len(self._tables)
+    def __contains__(self, k: str) -> bool: return k in self._tables
+    def __iter__(self): return iter(self._tables)
+    def __getitem__(self, k: str): return self._tables[k]
+    def __setitem__(self, k: str, v: dict) -> None: self._tables[k] = v
+    def __delitem__(self, k: str) -> None: del self._tables[k]
+    def keys(self): return self._tables.keys()
+    def items(self): return self._tables.items()
+    def values(self): return self._tables.values()
+    def get(self, k: str, default=None): return self._tables.get(k, default)
+    def pop(self, k: str, default=None):
+        if default is None and k not in self._tables:
+            return None
+        return self._tables.pop(k, default)
+    def clear(self) -> None: self._tables.clear()
+
+    # ── Public API (the only surface NEW code should use) ──────────
+    def attach(self, obj_name: str, table: dict, cap: int) -> None:
+        """Install or replace `obj_name`'s preload table. LRU-evict
+        oldest if `len(self) > cap` afterwards.
+
+        Pre-swap pattern (live-found round-3): when REPLACING, redirect
+        the live object's `.data` to a mesh from the NEW table BEFORE
+        freeing the old one, so the old current-frame mesh's `users`
+        drops to 0 and `_free_table` can actually remove it. Without
+        this every re-attach leaked ~N _seq_*** datablocks.
+        """
+        if obj_name in self._tables and table:
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None:
+                try:
+                    obj.data = next(iter(table.values()))
+                except (ReferenceError, RuntimeError, TypeError) as exc:
+                    _addon_logger.warning(
+                        "cache_loader: pre-swap obj.data failed for %s (%s)",
+                        obj_name, exc)
+            self._free_table_static(self._tables[obj_name])
+            del self._tables[obj_name]
+        self._tables[obj_name] = table
+        while len(self._tables) > cap:
+            old_name, old_table = self._tables.popitem(last=False)
+            self._free_table_static(old_table)
+            _addon_logger.info(
+                "cache_loader: LRU evicted preload entry '%s' (cap=%d)",
+                old_name, cap)
+
+    def touch(self, obj_name: str) -> bool:
+        """Mark as most-recently-used. Returns True if existed."""
+        if obj_name in self._tables:
+            self._tables.move_to_end(obj_name)
+            return True
+        return False
+
+    def get_frame(self, obj_name: str, idx: int):
+        """Return Mesh datablock for (obj_name, idx) or None."""
+        table = self._tables.get(obj_name)
+        return table.get(idx) if table is not None else None
+
+    def invalidate(self, obj_name: str) -> bool:
+        """Drop entry + free its meshes. Returns True if existed."""
+        if obj_name not in self._tables:
+            return False
+        self._free_table_static(self._tables[obj_name])
+        del self._tables[obj_name]
+        return True
+
+    def prune_stale(self, scene=None) -> int:
+        """Remove entries whose obj.name no longer exists in `scene`
+        (or any scene when `scene=None`). Returns # pruned.
+        Round-8 perf flag: do NOT call from hot frame loop —
+        invocation paths are OT_detach_cache (currently the only
+        caller) and theoretically any code that knows scene.objects
+        just changed."""
+        if not self._tables:
+            return 0
+        live: set[str] = set()
+        if scene is not None:
+            live = {o.name for o in scene.objects}
+        else:
+            for s in bpy.data.scenes:
+                live.update(o.name for o in s.objects)
+        stale = [k for k in self._tables if k not in live]
+        for k in stale:
+            self._free_table_static(self._tables[k])
+            del self._tables[k]
+        return len(stale)
+
+    def free_all(self) -> None:
+        """Free every table's meshes then clear. Used by file-load
+        recovery (`_on_load_post`) — at that point existing pointers
+        reference freed Mesh StructRNAs from the previous file."""
+        for table in list(self._tables.values()):
+            self._free_table_static(table)
+        self._tables.clear()
+
+    @staticmethod
+    def _free_table_static(table: dict) -> None:
+        """Release every mesh datablock where `mesh.users == 0`.
+
+        External code (user manual orphan-purge, addon disable/enable,
+        file load) can invalidate the Mesh StructRNA out from under us;
+        `getattr(mesh, "users", ...)` then raises ReferenceError not
+        AttributeError, so the default doesn't kick in. Catch it,
+        and resolve `mesh.name` BEFORE entering the except branch so
+        the handler itself can't ReferenceError on the dead struct.
+        """
+        for mesh in list(table.values()):
+            if mesh is None:
+                continue
+            try:
+                mesh_name = mesh.name
+            except ReferenceError:
+                continue
+            try:
+                if getattr(mesh, "users", 0) == 0:
+                    bpy.data.meshes.remove(mesh, do_unlink=True)
+            except (ReferenceError, RuntimeError) as exc:
+                _addon_logger.warning(
+                    "cache_loader: could not free preload mesh '%s' (%s)",
+                    mesh_name, exc)
+
+
+# Singleton instance + module-level back-compat shims for code that
+# imports `_PRELOAD`, `_free_table`, `_lru_touch`, `_lru_install`,
+# `_prune_stale` from this module (existing call sites: `_ops.py`,
+# `helpers.py`, `bake.py::_finish` auto-attach, tests).
+_PRELOAD: PreloadCache = PreloadCache()
 
 
 # Blender's addon prefs are keyed by the addon-root package, which is the
@@ -180,76 +342,19 @@ def _preload_max_frames() -> int:
 
 
 def _free_table(table: dict) -> None:
-    """Release every mesh datablock in a preload table, but only when no
-    live object still uses it (mesh.users == 0). Datablocks the user has
-    pinned to a fluid object stay; we just drop our handle.
-
-    External code (user manual orphan-purge, addon disable/enable cycle,
-    file load) can invalidate the Mesh StructRNA out from under us — in
-    that case ``getattr(mesh, "users", ...)`` raises ReferenceError, not
-    AttributeError, so the default doesn't kick in. Catch defensively
-    and resolve the mesh name BEFORE entering the except handler so the
-    handler itself can't ReferenceError on ``mesh.name``.
-    """
-    for mesh in list(table.values()):
-        if mesh is None:
-            continue
-        # Resolve name eagerly; if the struct is already dead the table
-        # entry is just a stale pointer we should drop silently.
-        try:
-            mesh_name = mesh.name
-        except ReferenceError:
-            continue
-        try:
-            if getattr(mesh, "users", 0) == 0:
-                bpy.data.meshes.remove(mesh, do_unlink=True)
-        except (ReferenceError, RuntimeError) as exc:
-            _addon_logger.warning(
-                "cache_loader: could not free preload mesh '%s' (%s)",
-                mesh_name, exc,
-            )
+    """[BACK-COMPAT shim, round-13] Delegate to PreloadCache static."""
+    PreloadCache._free_table_static(table)
 
 
 def _lru_touch(obj_name: str) -> None:
-    """Mark this entry as most-recently-used (move to end)."""
-    if obj_name in _PRELOAD:
-        _PRELOAD.move_to_end(obj_name)
+    """[BACK-COMPAT shim, round-13] Delegate to PreloadCache.touch."""
+    _PRELOAD.touch(obj_name)
 
 
 def _lru_install(obj_name: str, table: dict) -> None:
-    """Insert (or replace) a preload table for ``obj_name`` and evict the
-    oldest entries until len(_PRELOAD) <= preload_cap.
-
-    Live-found 2026-05-25: when REPLACING an entry, the previously-installed
-    table's current-frame mesh has ``users==1`` (the live object holds it),
-    so ``_free_table`` skips it and the mesh leaks into ``bpy.data.meshes``
-    forever — visible after a few attach cycles as a pile of stale
-    ``*_seq_NNNN`` datablocks ``OT_clear_cache`` can no longer reach.
-    Redirect the live object onto a mesh from the NEW table first so the
-    old current-frame mesh's users drop to 0 and ``_free_table`` can
-    actually remove it.
-    """
-    if obj_name in _PRELOAD:
-        if table:
-            obj = bpy.data.objects.get(obj_name)
-            if obj is not None:
-                try:
-                    obj.data = next(iter(table.values()))
-                except (ReferenceError, RuntimeError, TypeError) as exc:
-                    _addon_logger.warning(
-                        "cache_loader: pre-swap obj.data failed for %s (%s)",
-                        obj_name, exc)
-        _free_table(_PRELOAD[obj_name])
-        del _PRELOAD[obj_name]
-    _PRELOAD[obj_name] = table
-    cap = _preload_cap()
-    while len(_PRELOAD) > cap:
-        old_name, old_table = _PRELOAD.popitem(last=False)
-        _free_table(old_table)
-        _addon_logger.info(
-            "cache_loader: LRU evicted preload entry '%s' (cap=%d)",
-            old_name, cap,
-        )
+    """[BACK-COMPAT shim, round-13] Delegate to PreloadCache.attach
+    with the live cap from prefs (matches pre-refactor behaviour)."""
+    _PRELOAD.attach(obj_name, table, cap=_preload_cap())
 
 
 def _preload_sequence(obj, cache_dir, pattern, origin, max_frames=None,
@@ -400,14 +505,14 @@ def _frame_change_handler(scene, depsgraph=None):
                 # by orphans_purge after Alembic switchover) — guard the
                 # swap with try/except and drop the stale table on first
                 # ReferenceError so the handler doesn't spam its full log.
-                table = _PRELOAD.get(obj.name)
-                if table is not None and idx in table:
+                mesh = _PRELOAD.get_frame(obj.name, idx)
+                if mesh is not None:
                     try:
-                        obj.data = table[idx]
-                        _lru_touch(obj.name)
+                        obj.data = mesh
+                        _PRELOAD.touch(obj.name)
                         continue
                     except (ReferenceError, RuntimeError):
-                        _PRELOAD.pop(obj.name, None)
+                        _PRELOAD.invalidate(obj.name)
                         # fall through to slow path / no-op
                 # SLOW PATH — legacy per-frame rebuild (preload not active yet)
                 path = os.path.join(cache_dir, pattern.format(idx))
@@ -446,23 +551,8 @@ def _frame_change_handler(scene, depsgraph=None):
 
 
 def _prune_stale(scene=None):
-    """Drop _PRELOAD entries whose obj.name no longer exists in any scene.
-    Round-8 moved this off the hot frame_change loop. Currently called
-    only from OT_detach_cache (round-3 reviewer caught the stale doc
-    that claimed `_on_load_post` and OT_clear too — those don't need
-    it because they `_PRELOAD.clear()` outright)."""
-    if not _PRELOAD:
-        return
-    live_names = set()
-    if scene is not None:
-        live_names = {o.name for o in scene.objects}
-    else:
-        for s in bpy.data.scenes:
-            live_names.update(o.name for o in s.objects)
-    stale = [k for k in _PRELOAD.keys() if k not in live_names]
-    for k in stale:
-        _free_table(_PRELOAD[k])
-        del _PRELOAD[k]
+    """[BACK-COMPAT shim, round-13] Delegate to PreloadCache.prune_stale."""
+    _PRELOAD.prune_stale(scene)
 
 
 @bpy.app.handlers.persistent
@@ -474,9 +564,13 @@ def _on_load_post(_dummy):
     (the frame the file was saved on) and scrubbing does nothing —
     live-found 2026-05-25 (round-4 test #23).
     """
-    _PRELOAD.clear()
-    # _prune_stale not needed after clear, but pattern: any path that
-    # invalidates obj→table mapping should ensure the dict is sane.
+    # Round-13: was bare `_PRELOAD.clear()` — but on file load the
+    # mesh pointers in `_PRELOAD` reference freed StructRNAs from the
+    # PREVIOUS file's bpy.data.meshes; just dropping the dict orphans
+    # any that happened to survive deserialisation. `free_all` invokes
+    # `_free_table_static` per entry (defensive against ReferenceError)
+    # before clearing.
+    _PRELOAD.free_all()
     for obj in bpy.data.objects:
         cache_dir = obj.get("gpufluid_cache_dir")
         if not cache_dir or not os.path.isdir(str(cache_dir)):
