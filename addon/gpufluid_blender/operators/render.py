@@ -19,9 +19,6 @@ render share identical semantics.
 """
 from __future__ import annotations
 
-import queue
-import subprocess
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +26,7 @@ import bpy
 
 from .. import logger
 from ..preferences import get_prefs
-from .helpers import subprocess_drain
+from ._runner import ModalSubprocessRunner
 
 
 def _find_domain(context):
@@ -118,16 +115,13 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         options={'SKIP_SAVE', 'HIDDEN'},
     )
 
-    # ─── modal state ──────────────────────────────────────────────────────
-    _timer = None
-    _proc: Optional[subprocess.Popen] = None
-    _stdout_q: Optional[queue.Queue] = None
-    _stdout_thread: Optional[threading.Thread] = None
+    # Round-14: subprocess lifecycle extracted into ModalSubprocessRunner.
+    # Mirror of OT_bake — kills duplicate Popen/Queue/Thread/timer/cancel
+    # plumbing that 11 rounds kept asymmetrically drifting (lesson 9.6).
+    _runner: Optional[ModalSubprocessRunner] = None
     _out_dir = ""
-    # Reentrance guard — symmetric with OT_bake. Without this, a second
-    # OT_render click while the first headless Blender is still running
-    # spawns a second Blender writing to the same out_dir, with the
-    # later instance's frame_N.png clobbering the first's mid-write.
+    # Reentrance guard — class-level for cross-instance mutex; runner
+    # reads/writes via op.__class__._is_running.
     _is_running: bool = False
 
     @classmethod
@@ -200,162 +194,42 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             argv += ["--blender", bpy.path.abspath(blender)]
 
         GPUFLUID_OT_render._is_running = True
+        self._runner = ModalSubprocessRunner("render")
 
-        # ─── SYNC PATH (round-6, watchdog added round-9) ─────────────
+        # ─── SYNC PATH ────────────────────────────────────────────────
         if self.sync:
-            timeout = int(self.sync_timeout_sec) if self.sync_timeout_sec > 0 else None
-            try:
-                self._proc = subprocess.Popen(
-                    argv,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    bufsize=1, text=True, encoding="utf-8", errors="replace",
-                )
-                drained: list[str] = []
-                def _drain_lines(p, out):
-                    try:
-                        for line in p.stdout:
-                            out.append(line)
-                    except Exception:
-                        pass
-                drain_thread = threading.Thread(
-                    target=_drain_lines, args=(self._proc, drained), daemon=True)
-                drain_thread.start()
-                try:
-                    rc = self._proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=5.0)
-                    GPUFLUID_OT_render._is_running = False
-                    self.report({"ERROR"},
-                        f"gpufluid render (sync) hit timeout after "
-                        f"{timeout}s — subprocess killed.")
-                    return {"CANCELLED"}
-                drain_thread.join(timeout=1.0)
-                for line in drained:
-                    print(f"[render] {line.rstrip()}")
-            except OSError as e:
-                GPUFLUID_OT_render._is_running = False
-                self.report({"ERROR"},
-                            f"could not spawn render subprocess: {e}")
-                return {"CANCELLED"}
-            finally:
-                GPUFLUID_OT_render._is_running = False
-            if rc != 0:
-                self.report({"ERROR"},
-                            f"gpufluid render (sync) failed rc={rc}")
-                return {"CANCELLED"}
-            n_png = len(list(Path(self._out_dir).glob("*.png")))
-            self.report({"INFO"},
-                        f"gpufluid render (sync) finished — {n_png} PNG(s) "
-                        f"in {self._out_dir}")
-            return {"FINISHED"}
+            return self._runner.start_sync(
+                self, argv, int(self.sync_timeout_sec),
+                log_prefix="render", logger=logger,
+                on_complete=self._sync_post_render_report,
+            )
 
         # ─── MODAL PATH ───────────────────────────────────────────────
-        try:
-            self._proc = subprocess.Popen(
-                argv,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=1, text=True, encoding="utf-8", errors="replace",
-            )
-        except OSError as e:
-            GPUFLUID_OT_render._is_running = False
-            self.report({"ERROR"}, f"could not spawn render subprocess: {e}")
-            return {"CANCELLED"}
-
-        # Background stdout drain — shared helper with OT_bake (Phase 4).
-        self._stdout_q = queue.Queue()
-        self._stdout_thread = threading.Thread(
-            target=subprocess_drain, args=(self._proc, self._stdout_q),
-            daemon=True)
-        self._stdout_thread.start()
-
-        wm = context.window_manager
-        self._timer = wm.event_timer_add(0.3, window=context.window)
-        wm.modal_handler_add(self)
-        context.workspace.status_text_set("gpufluid rendering…")
-        return {"RUNNING_MODAL"}
+        return self._runner.start_modal(
+            self, context, argv, status_msg="gpufluid rendering…")
 
     def modal(self, context, event):
-        # ESC abort — same pattern as OT_bake. Without it, user can't
-        # cancel a long Eevee render and the subprocess outlives
-        # Blender's window-close.
-        if event.type == "ESC":
-            return self._abort(context, reason="user pressed Esc")
-        if event.type != "TIMER":
+        result = self._runner.tick_modal(
+            self, context, event,
+            logger=logger, log_prefix="render",
+        )
+        if result is None:
             return {"PASS_THROUGH"}
-        if self._proc is None:
-            return self._finish(context, ok=False)
-        rc = self._proc.poll()
-        if self._stdout_q is not None:
-            for _ in range(50):
-                try:
-                    line = self._stdout_q.get_nowait()
-                except queue.Empty:
-                    break
-                if line is None:   # sentinel: stdout EOF
-                    break
-                logger.info("render: %s", line.rstrip())
-        if rc is None:
-            return {"PASS_THROUGH"}
-        return self._finish(context, ok=(rc == 0))
-
-    def _abort(self, context, reason: str):
-        """Terminate render subprocess + restore UI. Idempotent."""
-        GPUFLUID_OT_render._is_running = False
-        if self._proc is not None and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-                try:
-                    self._proc.wait(timeout=3.0)
-                except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2.0)
-            except Exception as e:
-                logger.warning("addon.render.terminate_failed",
-                               extra={"err": str(e)})
-        if self._timer is not None:
-            context.window_manager.event_timer_remove(self._timer)
-            self._timer = None
-        context.workspace.status_text_set(None)
-        # Round-8 reviewer flag #6: bake._abort cleans all three instance
-        # attrs (_proc, _stdout_q, _stdout_thread) after round-7. Render
-        # only cleared _proc — drift from the symmetric contract. Same
-        # re-fire-modal-on-same-instance hazard, fix the same way.
-        # Round-10 reviewer: also clear _out_dir for full symmetry —
-        # otherwise re-fire of same instance carries stale out path
-        # into the report message.
-        self._proc = None
-        self._stdout_q = None
-        self._stdout_thread = None
-        self._out_dir = ""
-        self.report({"WARNING"}, f"gpufluid render aborted ({reason})")
-        return {"CANCELLED"}
+        if "FINISHED" in result:
+            # Modal-success: snapshot out_dir before runner clears it.
+            out = self._out_dir
+            self.report({"INFO"}, f"gpufluid render complete: {out}")
+        return result
 
     def cancel(self, context):
-        # Blender invokes this on window-close / right-click etc. Route
-        # through _abort so subprocess teardown always happens.
-        self._abort(context, reason="cancelled by Blender")
+        if self._runner is not None:
+            self._runner.cancel(self, context)
 
-    def _finish(self, context, ok):
-        GPUFLUID_OT_render._is_running = False
-        if self._timer is not None:
-            context.window_manager.event_timer_remove(self._timer)
-            self._timer = None
-        context.workspace.status_text_set(None)
-        # Round-9 reviewer flag: _abort cleans all 3 instance attrs,
-        # _finish only cleaned _proc — same drift contract _abort just
-        # fixed. Mirror the cleanup so re-fired-modal-on-same-instance
-        # never sees stale Queue/Thread. Round-10: include _out_dir
-        # so finish-message context is fresh per run. We snapshot
-        # before clear so the INFO report below still has the path.
-        _out = self._out_dir
-        self._proc = None
-        self._stdout_q = None
-        self._stdout_thread = None
-        self._out_dir = ""
-        if not ok:
-            self.report({"ERROR"},
-                "gpufluid render failed — see system console")
-            return {"CANCELLED"}
-        self.report({"INFO"}, f"gpufluid render complete: {_out}")
-        return {"FINISHED"}
+    def _sync_post_render_report(self) -> None:
+        """Sync on_complete: count PNGs + INFO report."""
+        n_png = len(list(Path(self._out_dir).glob("*.png")))
+        self.report(
+            {"INFO"},
+            f"gpufluid render (sync) finished — {n_png} PNG(s) "
+            f"in {self._out_dir}")
+

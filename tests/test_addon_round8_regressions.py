@@ -222,44 +222,69 @@ def test_render_has_same_is_running_contract():
     assert "self._is_running = False" not in src
 
 
-def test_bake_modal_popen_wrapped_in_try_oserror():
-    """Round-8 reviewer bug #1: modal Popen MUST be in try/except OSError
-    that clears _is_running on failure. Round-9 reviewer strengthening:
-    `except OSError` must appear BEFORE `_stdout_q = queue.Queue()` so
-    the OSError branch fires before thread/queue setup leaks resources.
+def test_runner_modal_popen_wrapped_in_try_oserror():
+    """Round-8 bug #1 + round-9 strengthening: subprocess spawn MUST
+    be wrapped to clear the reentrance flag on failure. After round-14
+    the bake/render-shared lifecycle moved to ModalSubprocessRunner;
+    the contract now lives in `_spawn_and_drain` + `start_modal`
+    error path.
     """
-    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "bake.py").read_text(encoding="utf-8")
-    modal_idx = src.find("# ─── MODAL PATH")
-    assert modal_idx > -1, "MODAL PATH section disappeared"
-    # End at "wm = context.window_manager" (start of modal-handler-add path)
-    end_idx = src.find("wm = context.window_manager", modal_idx)
-    block = src[modal_idx:end_idx if end_idx > -1 else modal_idx + 2000]
-    except_idx = block.find("except OSError")
-    queue_idx = block.find("self._stdout_q = queue.Queue()")
-    assert except_idx > -1, (
-        "modal Popen needs except OSError — round-8 bug #1")
-    assert queue_idx > -1, "stdout queue setup missing"
-    assert except_idx < queue_idx, (
-        "except OSError must come BEFORE queue setup, otherwise an "
-        "OSError on Popen leaves no chance to recover before allocating "
-        "Queue/Thread resources — round-9 reviewer strengthening")
-    assert "GPUFLUID_OT_bake._is_running = False" in block, (
-        "OSError branch must clear the class-level flag — round-8 bug #1")
+    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "_runner.py").read_text(encoding="utf-8")
+    # start_modal must catch the spawn exception and clear class flag
+    start_idx = src.find("def start_modal")
+    assert start_idx > -1, "start_modal missing"
+    block = src[start_idx:start_idx + 2000]
+    assert "_spawn_and_drain" in block
+    assert "(OSError, RuntimeError)" in block, (
+        "start_modal needs to catch OSError AND RuntimeError "
+        "(round-9 extension: Thread.start raises RuntimeError)")
+    assert "_is_running = False" in block, (
+        "start_modal error branch must clear class flag — round-8 bug #1")
+    # _spawn_and_drain itself orphan-kills Popen if Queue/Thread setup fails
+    spawn_idx = src.find("def _spawn_and_drain")
+    assert spawn_idx > -1
+    spawn_block = src[spawn_idx:spawn_idx + 1500]
+    assert "self._proc.kill()" in spawn_block, (
+        "_spawn_and_drain must kill orphan Popen on Queue/Thread failure "
+        "— round-9 reviewer")
 
 
-def test_sync_path_uses_try_finally_for_flag():
-    """Sync path must clear _is_running even on exception (try/finally).
-    Window widened to 4000 chars in round-9 — watchdog code grew the
-    sync block beyond the original 2000."""
-    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "bake.py").read_text(encoding="utf-8")
-    sync_idx = src.find("# ─── SYNC PATH")
+def test_runner_sync_path_uses_try_finally_for_flag():
+    """Sync path must clear _is_running even on exception. Round-14
+    moved the contract into ModalSubprocessRunner.start_sync."""
+    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "_runner.py").read_text(encoding="utf-8")
+    sync_idx = src.find("def start_sync")
     assert sync_idx > -1
-    # End at MODAL PATH marker so we don't accidentally grab modal-path
-    # finally:/_is_running statements.
-    modal_idx = src.find("# ─── MODAL PATH", sync_idx)
-    block = src[sync_idx:modal_idx if modal_idx > -1 else sync_idx + 4000]
-    assert "finally:" in block, "sync path lost its try/finally"
-    assert "GPUFLUID_OT_bake._is_running = False" in block
+    # start_sync body — until the next def or class boundary
+    # Skip the nested `def _drain_lines` (12-space indent) — use 4-space.
+    next_def_idx = src.find("\n    def ", sync_idx + 100)
+    block = src[sync_idx:next_def_idx if next_def_idx > -1 else sync_idx + 4000]
+    assert "finally:" in block, "start_sync lost its try/finally"
+    assert "op_class._is_running = False" in block
+
+
+def test_runner_finish_and_abort_clean_instance_state():
+    """Round-14 refactor: _abort + _finish lifecycle for both bake and
+    render now lives in ModalSubprocessRunner. The class's
+    _clear_instance_state must be called by both paths so re-fired
+    modal-on-same-instance never sees stale Queue/Thread/timer/proc.
+    """
+    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "_runner.py").read_text(encoding="utf-8")
+    # _clear_instance_state must drop all four
+    clear_idx = src.find("def _clear_instance_state")
+    assert clear_idx > -1
+    block = src[clear_idx:clear_idx + 600]
+    for attr in ("self._proc = None", "self._stdout_q = None",
+                 "self._stdout_thread = None", "self._timer = None"):
+        assert attr in block, f"_clear_instance_state must reset {attr}"
+    # abort + _finish call _clear_instance_state
+    for method in ("def abort(", "def _finish("):
+        idx = src.find(method)
+        assert idx > -1, f"{method} missing"
+        m_block = src[idx:idx + 1500]
+        assert "_clear_instance_state" in m_block, (
+            f"{method} must call _clear_instance_state to honour the "
+            f"round-7+round-10 contract")
 
 
 def test_emit_scalar_nested_inline_table_recurses():
@@ -280,34 +305,33 @@ def test_emit_scalar_nested_inline_table_recurses():
 
 
 def test_render_finish_cleans_all_instance_attrs():
-    """Round-10 reviewer gap: round-9 added cleanup to _abort but
-    asymmetric check for _finish. Source-assert that _finish clears
-    all four instance attrs including the round-10 _out_dir addition."""
+    """Round-14: render._finish moved to ModalSubprocessRunner._finish.
+    The 3-attr cleanup is asserted by
+    test_runner_finish_and_abort_clean_instance_state. This test
+    asserts the render-specific contract: render.py no longer has
+    a local _finish (runner owns it)."""
     src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "render.py").read_text(encoding="utf-8")
-    finish_idx = src.find("def _finish(self")
-    assert finish_idx > -1
-    block = src[finish_idx:finish_idx + 1500]
-    assert "self._proc = None" in block
-    assert "self._stdout_q = None" in block
-    assert "self._stdout_thread = None" in block
-    assert "self._out_dir = " in block, (
-        "round-10 added _out_dir to cleanup contract")
+    assert "def _finish(self" not in src, (
+        "render._finish should be removed in round-14 — runner._finish "
+        "owns the modal-end lifecycle")
 
 
 def test_render_abort_cleans_all_three_instance_attrs():
-    """Round-8 reviewer bug #6: render._abort must clear _proc,
-    _stdout_q, _stdout_thread — symmetry with round-7 bake fix."""
+    """Round-14: render._abort moved to ModalSubprocessRunner.abort.
+    The 3-attr cleanup contract now lives in _clear_instance_state
+    (asserted by test_runner_finish_and_abort_clean_instance_state).
+    This test now verifies render.py STILL delegates to runner.cancel
+    instead of doing its own teardown."""
     src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "render.py").read_text(encoding="utf-8")
-    abort_idx = src.find("def _abort")
-    assert abort_idx > -1
-    # Look in the _abort body (first 1500 chars after def)
-    block = src[abort_idx:abort_idx + 1500]
-    assert "self._proc = None" in block
-    assert "self._stdout_q = None" in block
-    assert "self._stdout_thread = None" in block
-    # Round-10 added _out_dir to _abort cleanup too
-    assert "self._out_dir = " in block, (
-        "round-10 added _out_dir to abort cleanup contract")
+    cancel_idx = src.find("def cancel(")
+    assert cancel_idx > -1, "render must keep cancel() callback"
+    block = src[cancel_idx:cancel_idx + 400]
+    assert "self._runner.cancel" in block, (
+        "render.cancel must route through runner.cancel — not "
+        "re-implement teardown (round-14 day-1 #2 contract)")
+    # And no leftover local _abort that would bypass the runner
+    assert "def _abort" not in src, (
+        "render._abort should be removed in round-14; runner.abort owns it")
 
 
 # ─── Round-9 additions ──────────────────────────────────────────────────
@@ -337,25 +361,38 @@ def test_emit_scalar_inline_table_propagates_inner_key():
 
 def test_sync_has_watchdog_timeout_property():
     """Round-9 watchdog: both OT_bake and OT_render must expose
-    sync_timeout_sec so a hung CLI doesn't freeze Blender forever."""
+    sync_timeout_sec on the operator class itself (UI prop). The
+    actual TimeoutExpired/kill logic lives in ModalSubprocessRunner
+    after round-14."""
     for op_file in ("bake.py", "render.py"):
         src = (_ADDON_DIR / "gpufluid_blender" / "operators" / op_file).read_text(encoding="utf-8")
         assert "sync_timeout_sec" in src, (
             f"{op_file} must declare sync_timeout_sec IntProperty")
-        assert "TimeoutExpired" in src, (
-            f"{op_file} sync path must catch subprocess.TimeoutExpired")
-        assert "self._proc.kill()" in src, (
-            f"{op_file} timeout branch must kill the hung subprocess")
+    runner_src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "_runner.py").read_text(encoding="utf-8")
+    assert "TimeoutExpired" in runner_src, (
+        "runner sync path must catch subprocess.TimeoutExpired")
+    assert "self._proc.kill()" in runner_src, (
+        "runner timeout branch must kill the hung subprocess")
 
 
 def test_sync_watchdog_clears_is_running_on_timeout():
-    """If the watchdog fires, the is_running flag MUST be cleared."""
-    for op_file, op_class in (("bake.py", "GPUFLUID_OT_bake"),
-                              ("render.py", "GPUFLUID_OT_render")):
-        src = (_ADDON_DIR / "gpufluid_blender" / "operators" / op_file).read_text(encoding="utf-8")
-        # Find TimeoutExpired block, verify _is_running = False appears in it
-        idx = src.find("except subprocess.TimeoutExpired")
-        assert idx > -1, f"{op_file}: TimeoutExpired branch missing"
-        block = src[idx:idx + 800]
-        assert f"{op_class}._is_running = False" in block, (
-            f"{op_file}: TimeoutExpired branch must clear _is_running")
+    """If the watchdog fires, the class-level _is_running MUST be cleared.
+    After round-14, the contract lives in ModalSubprocessRunner.start_sync
+    — the try/finally clears `op_class._is_running` regardless of which
+    branch (success / TimeoutExpired / OSError / rc!=0) returns first."""
+    src = (_ADDON_DIR / "gpufluid_blender" / "operators" / "_runner.py").read_text(encoding="utf-8")
+    sync_idx = src.find("def start_sync")
+    assert sync_idx > -1
+    # Take everything until the next def at module-or-class level
+    # Use \n + 4-space indent to skip nested def_drain_lines (12-space).
+    end_idx = src.find("\n    def ", sync_idx + 100)
+    block = src[sync_idx:end_idx if end_idx > -1 else sync_idx + 4000]
+    timeout_idx = block.find("except subprocess.TimeoutExpired")
+    assert timeout_idx > -1, "start_sync missing TimeoutExpired branch"
+    # The try/finally at the outer level clears _is_running; check it's
+    # in the same block as TimeoutExpired (so timeout return triggers it).
+    finally_idx = block.find("finally:", timeout_idx)
+    assert finally_idx > -1, "no finally: after TimeoutExpired branch"
+    finally_block = block[finally_idx:finally_idx + 400]
+    assert "op_class._is_running = False" in finally_block, (
+        "start_sync finally: must clear op_class._is_running")

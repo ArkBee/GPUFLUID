@@ -28,6 +28,7 @@ from ..preferences import get_prefs
 from ._animation import _bbox_world, _bbox_world_at_frame, _is_animated
 from ._collect import _export_obj, _output_dict
 from .helpers import subprocess_drain
+from ._runner import ModalSubprocessRunner
 
 
 _FRAME_RE = re.compile(r"frame\s+(\d+)/(\d+)")
@@ -320,19 +321,20 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         options={'SKIP_SAVE', 'HIDDEN'},
     )
 
-    _timer = None
-    _proc: Optional[subprocess.Popen] = None
-    _stdout_q: Optional[queue.Queue] = None
-    _stdout_thread: Optional[threading.Thread] = None
-    _current_frame = 0
-    _total_frames = 0
+    # Round-14: subprocess lifecycle (Popen/Queue/Thread/timer/cancel)
+    # extracted into ModalSubprocessRunner. Operator owns scene-collection
+    # + UI; runner owns process plumbing. `self._runner` is lazy-inited
+    # in execute() (Blender creates a fresh op instance per click).
+    _runner: Optional[ModalSubprocessRunner] = None
     _domain_obj_name = ""
-    # Class-level reentrance guard. Set True by execute() when modal arms,
-    # cleared by _abort()/_finish(). Prevents a second click on Bake while
-    # the first subprocess is still running — without this, two CLI
-    # processes write to the same cache_dir, racing each other and
-    # corrupting the output (live-found 2026-05-25 during round-3 res
-    # change test). One bake at a time; second click reports WARNING.
+    _cache_dir_str = ""    # for sync post-bake auto-attach
+    _origin_tuple = (0.0, 0.0, 0.0)
+    _dom_size_tuple = (1.0, 1.0, 1.0)
+
+    # Class-level reentrance guard. Set True by execute() before subprocess
+    # spawn, cleared by ModalSubprocessRunner abort/finish paths. Prevents
+    # a second click on Bake while the first subprocess is still running.
+    # Live-found round-3 (res-change test → 2 CLIs racing same cache_dir).
     _is_running: bool = False
 
     @classmethod
@@ -482,266 +484,127 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                         "addon.bake.stale_subdir_clean_failed",
                         extra={"dir": str(d), "err": str(e)})
 
-        # Reentrance flag goes up BEFORE subprocess spawn for both code
-        # paths. Sync mode also wants the guard so two parallel scripted
-        # bakes don't both Popen into the same cache_dir.
+        # Set reentrance flag BEFORE spawn (round-6 race fix). Sync mode
+        # also wants the guard so two parallel scripted bakes don't both
+        # Popen into the same cache_dir.
         GPUFLUID_OT_bake._is_running = True
         domain["gpufluid_origin"] = list(origin)
         domain["gpufluid_dom_size"] = list(dom_size)
         domain["gpufluid_cache_dir"] = str(cache_dir)
 
+        # Remember for auto-attach (sync path uses inline; modal calls
+        # _finish_auto_attach via tick_modal → _finish_complete below).
+        self._cache_dir_str = str(cache_dir)
+        self._origin_tuple = tuple(float(c) for c in origin)
+        self._dom_size_tuple = tuple(float(c) for c in dom_size)
+        self._toml_str_snapshot = toml_str   # for sync truncation sanity
+
+        argv = [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)]
+        self._runner = ModalSubprocessRunner("bake")
+
         # ─── SYNC PATH ────────────────────────────────────────────────
-        # Block in Popen.wait() with no modal / timer / status text.
-        # Used by scripts, CI, MCP-driven flows where the Blender event
-        # loop isn't ticking between bpy.ops calls. Drain stdout into
-        # the addon logger so callers see CLI progress.
         if self.sync:
-            timeout = int(self.sync_timeout_sec) if self.sync_timeout_sec > 0 else None
+            res = self._runner.start_sync(
+                self, argv, int(self.sync_timeout_sec),
+                log_prefix="bake", logger=logger,
+                on_complete=self._sync_post_bake_then_attach,
+            )
+            return res
+
+        # ─── MODAL PATH ───────────────────────────────────────────────
+        return self._runner.start_modal(
+            self, context, argv, status_msg="gpufluid baking…")
+
+    def modal(self, context, event):
+        # Delegate to runner. tick_modal handles ESC + TIMER + drain +
+        # progress regex. Returns None to PASS_THROUGH or a final set.
+        result = self._runner.tick_modal(
+            self, context, event,
+            frame_regex=_FRAME_RE,
+            on_progress=self._update_status,
+            logger=logger, log_prefix="bake",
+        )
+        if result is None:
+            return {"PASS_THROUGH"}
+        if "FINISHED" in result:
+            # Modal-success: do auto-attach, then INFO report.
+            self._auto_attach_post_bake()
+            self.report({"INFO"}, "gpufluid bake complete")
+        return result
+
+    def cancel(self, context):
+        # Blender callback (right-click / window-close). Route through
+        # runner.abort to guarantee subprocess teardown.
+        if self._runner is not None:
+            self._runner.cancel(self, context)
+
+    # ── Operator-specific callbacks for the runner ──────────────────
+
+    def _update_status(self, current: int, total: int) -> None:
+        """Called by runner.tick_modal on each parsed `frame N/M` line."""
+        bpy.context.workspace.status_text_set(
+            f"gpufluid: frame {current}/{total}")
+
+    def _sync_post_bake_then_attach(self) -> None:
+        """Sync on_complete: run truncation sanity, then auto-attach.
+        Errors here downgrade to WARNING (don't fail the whole bake)."""
+        self._sync_truncation_sanity()
+        self._auto_attach_post_bake()
+
+    def _sync_truncation_sanity(self) -> None:
+        """Round-10 stress-test finding: CLI can exit 0 with fewer
+        frames than requested. Compare mesh count vs MERGED [simulation]
+        frames (round-11 reviewer fix — overrides path).
+
+        Round-12 reviewer #6: tomllib only, no tomli fallback (Blender
+        4.5+ ships Python 3.11+ which guarantees tomllib).
+        """
+        try:
+            mesh_dir = Path(self._cache_dir_str) / "mesh"
+            actual = (len(list(mesh_dir.glob("frame_*.ply")))
+                      if mesh_dir.is_dir() else 0)
+            import tomllib
+            emitted = tomllib.loads(self._toml_str_snapshot)
+            expected = int(emitted.get("simulation", {}).get("frames", 0))
+            if expected > 0 and 0 < actual < expected:
+                self.report({"WARNING"},
+                    f"gpufluid bake produced {actual}/{expected} frames "
+                    f"— CLI exited cleanly but truncated (likely solver "
+                    f"OOM or early-stop). Cache attached as-is.")
+        except Exception:
+            pass
+
+    def _auto_attach_post_bake(self) -> None:
+        """Shared auto-attach for sync + modal success paths.
+        Mirrors what _finish used to do inline."""
+        domain = bpy.data.objects.get(self._domain_obj_name)
+        if domain is None:
+            return
+        target = domain.gpufluid_domain.target_object
+        cache_dir = domain.get("gpufluid_cache_dir", "")
+        origin = domain.get("gpufluid_origin", [0, 0, 0])
+        if not cache_dir:
+            return
+        dom_size = list(domain.get("gpufluid_dom_size", [1.0, 1.0, 1.0]))
+        try:
+            bpy.ops.gpufluid.attach_cache(
+                cache_dir=str(cache_dir),
+                target_name=target.name if target else "",
+                origin=tuple(float(c) for c in origin),
+                dom_size=tuple(float(c) for c in dom_size),
+            )
+        except Exception as e:
+            self.report({"WARNING"}, f"bake ok, but auto-attach failed: {e}")
+        ww_dir = os.path.join(str(cache_dir), "whitewater")
+        if os.path.isdir(ww_dir):
             try:
-                self._proc = subprocess.Popen(
-                    [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    bufsize=1, text=True, encoding="utf-8", errors="replace",
-                )
-                # Round-9 hardening: drain stdout on a background thread so
-                # main-thread .wait() can honour the watchdog. Without this,
-                # `for line in proc.stdout` blocks forever if CLI silently
-                # hangs and freezes Blender with no ESC, no recovery.
-                # (round-10 reviewer: removed dead `import time as _time`.)
-                drained: list[str] = []
-                def _drain_lines(p, out):
-                    try:
-                        for line in p.stdout:
-                            out.append(line)
-                    except Exception:
-                        pass
-                drain_thread = threading.Thread(
-                    target=_drain_lines, args=(self._proc, drained), daemon=True)
-                drain_thread.start()
-                try:
-                    rc = self._proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=5.0)
-                    GPUFLUID_OT_bake._is_running = False
-                    self.report({"ERROR"},
-                        f"gpufluid bake (sync) hit timeout after "
-                        f"{timeout}s — CLI killed. Increase sync_timeout_sec "
-                        f"or set to 0 to disable the watchdog.")
-                    return {"CANCELLED"}
-                drain_thread.join(timeout=1.0)
-                for line in drained:
-                    logger.info("bake: %s", line.rstrip())
-            except OSError as e:
-                GPUFLUID_OT_bake._is_running = False
-                self.report({"ERROR"},
-                            f"could not spawn bake subprocess: {e}")
-                return {"CANCELLED"}
-            finally:
-                GPUFLUID_OT_bake._is_running = False
-            if rc != 0:
-                self.report({"ERROR"},
-                            f"gpufluid bake (sync) failed with rc={rc} — "
-                            f"see system console")
-                return {"CANCELLED"}
-            # Round-10 stress-test finding: CLI can exit 0 having produced
-            # fewer frames than requested (e.g. solver OOM at high res, or
-            # an early-stop heuristic). Without this check, sync-bake
-            # reported FINISHED + auto-attached cache while user lost
-            # most of the simulation. Compare actual vs requested frame
-            # count and downgrade to WARNING when truncated.
-            try:
-                mesh_dir = Path(str(cache_dir)) / "mesh"
-                actual = (len(list(mesh_dir.glob("frame_*.ply")))
-                          if mesh_dir.is_dir() else 0)
-                # Round-11 reviewer fix: use the MERGED frames count,
-                # not pre-overrides. If user overrode [simulation] frames
-                # via toml_overrides, CLI honored that — comparing
-                # against scene_dict (pre-merge) gave spurious truncation
-                # warnings. Source of truth is the actual emitted TOML.
-                # Round-12 reviewer #6 dropped tomli fallback — Blender 4.5+
-                # ships Python 3.11+ which guarantees tomllib; the fallback
-                # was dead code that hid import failure.
-                import tomllib
-                emitted = tomllib.loads(toml_str)
-                expected = int(emitted.get("simulation", {}).get(
-                    "frames", scene_dict["simulation"]["frames"]))
-                if 0 < actual < expected:
-                    self.report({"WARNING"},
-                        f"gpufluid bake produced {actual}/{expected} frames "
-                        f"— CLI exited cleanly but truncated (likely solver "
-                        f"OOM or early-stop). Cache attached as-is.")
-            except Exception:
-                pass
-            # Auto-attach inline so sync callers can immediately query
-            # the cache mesh without an extra ops call. Mirrors _finish.
-            try:
-                bpy.ops.gpufluid.attach_cache(
+                bpy.ops.gpufluid.attach_ww_cache(
                     cache_dir=str(cache_dir),
-                    target_name=(domain.gpufluid_domain.target_object.name
-                                 if domain.gpufluid_domain.target_object else ""),
-                    origin=tuple(float(c) for c in origin),
-                    dom_size=tuple(float(c) for c in dom_size),
+                    target_name="",
+                    origin_x=float(origin[0]),
+                    origin_y=float(origin[1]),
+                    origin_z=float(origin[2]),
                 )
             except Exception as e:
                 self.report({"WARNING"},
-                            f"sync bake ok, but auto-attach failed: {e}")
-            self.report({"INFO"}, "gpufluid bake (sync) finished")
-            return {"FINISHED"}
-
-        # ─── MODAL PATH ───────────────────────────────────────────────
-        # Round-8 reviewer flag: bug #1. _is_running was set True above
-        # for both sync + modal paths. Sync's try/finally cleared it.
-        # The modal Popen below had NO try/except OSError, so if interp
-        # vanished between Path(interp).exists() check (line ~342) and
-        # this spawn (race with antivirus/network drive/venv cleanup),
-        # OSError propagated and _is_running stayed True forever — every
-        # subsequent OT_bake reported "already running" until Blender
-        # restart. OT_render already had this guard at render.py:226-235;
-        # bake didn't.
-        # Round-9 reviewer flag: extend the OSError guard past Popen to
-        # cover Queue() and Thread.start() too. Both can raise OSError /
-        # RuntimeError under handle exhaustion; without the wrap, the
-        # round-8 fix only covered ⅓ of the spawn-failure surface.
-        try:
-            self._proc = subprocess.Popen(
-                [interp, "-m", "gpufluid.cli", "simulate", str(toml_path)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=1, text=True, encoding="utf-8", errors="replace",
-            )
-            self._stdout_q = queue.Queue()
-            self._stdout_thread = threading.Thread(
-                target=subprocess_drain, args=(self._proc, self._stdout_q),
-                daemon=True)
-            self._stdout_thread.start()
-        except (OSError, RuntimeError) as e:
-            GPUFLUID_OT_bake._is_running = False
-            # If Popen succeeded but Queue/Thread setup failed, kill the
-            # subprocess so it doesn't become an orphan with no drain.
-            if self._proc is not None and self._proc.poll() is None:
-                try:
-                    self._proc.kill(); self._proc.wait(timeout=2.0)
-                except Exception:
-                    pass
-            self._proc = None
-            self._stdout_q = None
-            self._stdout_thread = None
-            self.report({"ERROR"},
-                        f"could not spawn bake subprocess: {e}")
-            return {"CANCELLED"}
-
-        wm = context.window_manager
-        self._timer = wm.event_timer_add(0.3, window=context.window)
-        wm.modal_handler_add(self)
-        context.workspace.status_text_set("gpufluid baking…")
-        return {"RUNNING_MODAL"}
-
-    def modal(self, context, event):
-        # ESC: user-requested abort. Without this branch Blender's modal loop
-        # never delivers cancel to us — only TIMER events get acted on — so
-        # the gpufluid.cli subprocess kept running through Esc, right-click,
-        # and even Blender window close (orphan process). Live-found
-        # 2026-05-25 during round-3 cancellation test.
-        if event.type == "ESC":
-            return self._abort(context, reason="user pressed Esc")
-        if event.type != "TIMER":
-            return {"PASS_THROUGH"}
-        if self._proc is None:
-            return self._finish(context, ok=False)
-        rc = self._proc.poll()
-        # Drain queue (non-blocking — thread already collected lines)
-        if self._stdout_q is not None:
-            for _ in range(50):
-                try:
-                    line = self._stdout_q.get_nowait()
-                except queue.Empty:
-                    break
-                if line is None:   # sentinel: stdout EOF
-                    break
-                m = _FRAME_RE.search(line)
-                if m:
-                    self._current_frame = int(m.group(1))
-                    self._total_frames = int(m.group(2))
-                logger.info("bake: %s", line.rstrip())
-                context.workspace.status_text_set(
-                    f"gpufluid: frame {self._current_frame}/{self._total_frames}")
-        if rc is None:
-            return {"PASS_THROUGH"}
-        return self._finish(context, ok=(rc == 0))
-
-    def _abort(self, context, reason: str):
-        """Terminate the bake subprocess + restore UI. Idempotent — safe
-        to call from modal(ESC) and from Blender's cancel() callback."""
-        GPUFLUID_OT_bake._is_running = False
-        if self._proc is not None and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-                try:
-                    self._proc.wait(timeout=3.0)
-                except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2.0)
-            except Exception as e:
-                logger.warning("addon.bake.terminate_failed",
-                               extra={"err": str(e)})
-        if self._timer is not None:
-            context.window_manager.event_timer_remove(self._timer)
-            self._timer = None
-        context.workspace.status_text_set(None)
-        # Round-7 reviewer flag: clear instance attrs so a re-fired modal
-        # on the same instance after cancel doesn't poll a stale _proc
-        # (whose poll() returns rc != None) and go straight to
-        # _finish(ok=False) without actually re-baking.
-        self._proc = None
-        self._stdout_q = None
-        self._stdout_thread = None
-        self.report({"WARNING"}, f"gpufluid bake aborted ({reason})")
-        return {"CANCELLED"}
-
-    def cancel(self, context):
-        # Blender calls this on right-click / window close / Esc when no
-        # custom modal handler caught the event. We route both paths
-        # through the same _abort to guarantee subprocess teardown.
-        self._abort(context, reason="cancelled by Blender")
-
-    def _finish(self, context, ok):
-        GPUFLUID_OT_bake._is_running = False
-        if self._timer is not None:
-            context.window_manager.event_timer_remove(self._timer)
-            self._timer = None
-        context.workspace.status_text_set(None)
-        if not ok:
-            self.report({"ERROR"}, "gpufluid bake failed — see system console")
-            return {"CANCELLED"}
-        # auto-attach cache to target object
-        domain = bpy.data.objects.get(self._domain_obj_name)
-        if domain is not None:
-            target = domain.gpufluid_domain.target_object
-            cache_dir = domain.get("gpufluid_cache_dir", "")
-            origin = domain.get("gpufluid_origin", [0, 0, 0])
-            if cache_dir:
-                dom_size = list(domain.get("gpufluid_dom_size", [1.0, 1.0, 1.0]))
-                try:
-                    bpy.ops.gpufluid.attach_cache(
-                        cache_dir=str(cache_dir),
-                        target_name=target.name if target else "",
-                        origin=tuple(float(c) for c in origin),
-                        dom_size=tuple(float(c) for c in dom_size),
-                    )
-                except Exception as e:
-                    self.report({"WARNING"}, f"bake ok, but auto-attach failed: {e}")
-                # Auto-attach whitewater cache when the bake produced one.
-                ww_dir = os.path.join(str(cache_dir), "whitewater")
-                if os.path.isdir(ww_dir):
-                    try:
-                        bpy.ops.gpufluid.attach_ww_cache(
-                            cache_dir=str(cache_dir),
-                            target_name="",   # always make a new mesh
-                            origin_x=float(origin[0]),
-                            origin_y=float(origin[1]),
-                            origin_z=float(origin[2]),
-                        )
-                    except Exception as e:
-                        self.report({"WARNING"}, f"bake ok, but ww auto-attach failed: {e}")
-        self.report({"INFO"}, "gpufluid bake complete")
-        return {"FINISHED"}
+                            f"bake ok, but ww auto-attach failed: {e}")
