@@ -15,6 +15,31 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+# Round-15 — typed contract + runtime validator. SceneDict is a TypedDict
+# (static-only), validate_scene_dict raises SceneDictError with key-path
+# on shape mismatch.
+#
+# Dual-import: relative for normal addon use, file-load fallback for the
+# `test_a8_config_builder.py` pattern that loads this file standalone via
+# `spec_from_file_location("_gpufluid_config_builder", path)` without a
+# parent package. Without the fallback the import line raises
+# `ImportError: attempted relative import with no known parent package`
+# and breaks the existing pre-round-15 test.
+try:
+    from .scene_dict import SceneDict, validate_scene_dict, SceneDictError
+except ImportError:
+    import importlib.util as _ilu
+    from pathlib import Path as _Path
+    _spec = _ilu.spec_from_file_location(
+        "_scene_dict_fallback",
+        _Path(__file__).parent / "scene_dict.py",
+    )
+    _sd = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_sd)
+    SceneDict = _sd.SceneDict
+    validate_scene_dict = _sd.validate_scene_dict
+    SceneDictError = _sd.SceneDictError
+
 if sys.version_info >= (3, 11):
     import tomllib  # stdlib
 else:  # pragma: no cover
@@ -37,8 +62,13 @@ _FLIP_ONLY_SIM_KEYS = (
 )
 
 
-def build_toml(scene_dict: Dict[str, Any]) -> str:
+def build_toml(scene_dict: SceneDict) -> str:
     """Translate a scene dict to a TOML string consumable by `gpufluid simulate`.
+
+    Round-15: input parameter is typed `SceneDict` (TypedDict) and
+    `validate_scene_dict()` is called at entry. Malformed dicts now
+    raise `SceneDictError` with the offending key path instead of
+    producing ill-typed TOML the CLI silently mishandles.
 
     Expected schema (see addon operators.bake.collect_scene)::
 
@@ -56,6 +86,9 @@ def build_toml(scene_dict: Dict[str, Any]) -> str:
     All positions in scene_dict are assumed normalised to [0,1]³ (the
     Blender bake operator handles world→unit-cube conversion).
     """
+    # Round-15 validator: catch malformed dicts EARLY with key-path
+    # error instead of letting them pass through to ill-typed TOML.
+    validate_scene_dict(scene_dict)
     dom = scene_dict["domain"]
     flu = scene_dict.get("fluid")  # legacy single source
     fluids = scene_dict.get("fluids")  # multi-source list (B1.3/B1.4)
