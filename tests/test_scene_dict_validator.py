@@ -78,13 +78,15 @@ def test_minimal_mpm_passes(sd):
 
 
 def test_with_optional_arrays_passes(sd):
+    """PLURAL keys (round-16 reviewer fix): production collect_scene
+    emits obstacles/inflows/outflows, not singular."""
     d = _minimal_valid_flip()
-    d["obstacle"] = [{"type": "box", "center": [0.5, 0.5, 0.5],
+    d["obstacles"] = [{"type": "box", "center": [0.5, 0.5, 0.5],
                        "half_size": [0.2, 0.2, 0.05]}]
-    d["inflow"] = [{"lo": [0.4, 0.4, 0.8], "hi": [0.6, 0.6, 1.0],
+    d["inflows"] = [{"lo": [0.4, 0.4, 0.8], "hi": [0.6, 0.6, 1.0],
                      "velocity": [0, -1.5, 0], "rate_per_sec": 30000,
                      "frame_start": 1, "frame_end": 60}]
-    d["outflow"] = [{"lo": [0, 0, 0], "hi": [1, 1, 0.1],
+    d["outflows"] = [{"lo": [0, 0, 0], "hi": [1, 1, 0.1],
                       "frame_start": 1, "frame_end": 60}]
     sd.validate_scene_dict(d)
 
@@ -153,31 +155,64 @@ def test_frames_zero_raises(sd):
 
 # ─── Array-of-tables shape ──────────────────────────────────────────────
 
-def test_obstacle_not_list_raises(sd):
-    d = _minimal_valid_flip(); d["obstacle"] = {"type": "box"}
-    with pytest.raises(sd.SceneDictError, match="'obstacle' must be a list"):
+def test_obstacles_not_list_raises(sd):
+    """Round-16: plural key."""
+    d = _minimal_valid_flip(); d["obstacles"] = {"type": "box"}
+    with pytest.raises(sd.SceneDictError, match="'obstacles' must be a list"):
         sd.validate_scene_dict(d)
 
 
-def test_inflow_entry_not_dict_raises(sd):
-    d = _minimal_valid_flip(); d["inflow"] = ["not_a_dict"]
-    with pytest.raises(sd.SceneDictError, match=r"inflow\[0\]"):
+def test_inflows_entry_not_dict_raises(sd):
+    d = _minimal_valid_flip(); d["inflows"] = ["not_a_dict"]
+    with pytest.raises(sd.SceneDictError, match=r"inflows\[0\]"):
         sd.validate_scene_dict(d)
 
 
 def test_reversed_inflow_range_raises(sd):
-    """Same invariant the bake operator enforces (round-5 fix);
-    validator gives defence in depth at emit-time."""
+    """Defence-in-depth: same invariant bake.execute enforces, also
+    catches a malformed scene_dict at emit-time. Plural key per
+    round-16 reviewer fix — singular silently no-op'd on production."""
     d = _minimal_valid_flip()
-    d["inflow"] = [{"frame_start": 30, "frame_end": 10}]
-    with pytest.raises(sd.SceneDictError, match=r"inflow\[0\].*frame_start"):
+    d["inflows"] = [{"frame_start": 30, "frame_end": 10}]
+    with pytest.raises(sd.SceneDictError, match=r"inflows\[0\].*frame_start"):
         sd.validate_scene_dict(d)
 
 
 def test_reversed_outflow_range_raises(sd):
     d = _minimal_valid_flip()
-    d["outflow"] = [{"frame_start": 30, "frame_end": 10}]
-    with pytest.raises(sd.SceneDictError, match=r"outflow\[0\].*frame_start"):
+    d["outflows"] = [{"frame_start": 30, "frame_end": 10}]
+    with pytest.raises(sd.SceneDictError, match=r"outflows\[0\].*frame_start"):
+        sd.validate_scene_dict(d)
+
+
+# ─── Round-16 reviewer #2: simulation sub-field shape ──────────────────
+
+def test_sim_dt_non_numeric_raises(sd):
+    """build_toml reads sim['dt'] as numeric — string would slip past
+    loose validator and crash deep in TOML emit with KeyError-style
+    confusion. Type-check IF present."""
+    d = _minimal_valid_flip(); d["simulation"]["dt"] = "0.005"
+    with pytest.raises(sd.SceneDictError, match="simulation.dt"):
+        sd.validate_scene_dict(d)
+
+
+def test_sim_fps_non_numeric_raises(sd):
+    d = _minimal_valid_flip(); d["simulation"]["fps"] = None
+    with pytest.raises(sd.SceneDictError, match="simulation.fps"):
+        sd.validate_scene_dict(d)
+
+
+def test_sim_gravity_non_numeric_raises(sd):
+    d = _minimal_valid_flip(); d["simulation"]["gravity"] = []
+    with pytest.raises(sd.SceneDictError, match="simulation.gravity"):
+        sd.validate_scene_dict(d)
+
+
+def test_output_cache_dir_non_str_raises(sd):
+    """build_toml writes output.cache_dir into the TOML string literally —
+    a non-str would produce malformed TOML at best, type-error at worst."""
+    d = _minimal_valid_flip(); d["output"]["cache_dir"] = 42
+    with pytest.raises(sd.SceneDictError, match="output.cache_dir"):
         sd.validate_scene_dict(d)
 
 

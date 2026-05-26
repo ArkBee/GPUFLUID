@@ -216,9 +216,12 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         if result is None:
             return {"PASS_THROUGH"}
         if "FINISHED" in result:
-            # Modal-success: snapshot out_dir before runner clears it.
-            out = self._out_dir
-            self.report({"INFO"}, f"gpufluid render complete: {out}")
+            # `_out_dir` lives on the operator (not runner state) so it
+            # survives `_clear_instance_state` — direct read is safe.
+            # Round-16 reviewer flagged earlier comment about "snapshot
+            # before runner clears it" as stale.
+            self.report({"INFO"},
+                        f"gpufluid render complete: {self._out_dir}")
         return result
 
     def cancel(self, context):

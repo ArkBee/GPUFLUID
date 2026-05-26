@@ -162,17 +162,24 @@ class OutflowDict(TypedDict, total=False):
 class SceneDict(TypedDict, total=False):
     """Top-level contract for the addon → CLI TOML scene config.
 
-    Required: `domain`, `simulation`, `output`. Optional: arrays of
-    inflow/outflow/obstacle, single `fluid` (box source seeding the
-    initial volume).
+    Required at top-level (in production via collect_scene): `domain`,
+    `simulation`, `output`. Optional arrays (PLURAL keys per the
+    addon's collect_scene convention — singular would be a TOML
+    section name, but scene_dict is the Python intermediate):
+    `obstacles`, `inflows`, `outflows`, `fluids`.
+
+    Round-16 reviewer caught: an earlier round-15 draft used singular
+    keys (`obstacle`, `inflow`, `outflow`) — those NEVER match production
+    data so the validator's array-shape + reversed-range checks were
+    silently no-ops. Both validator + TypedDicts now use plural.
     """
     domain: DomainDict
     simulation: SimulationDict
     output: OutputDict
-    fluid: FluidBoxDict
-    obstacle: List[ObstacleDict]
-    inflow: List[InflowDict]
-    outflow: List[OutflowDict]
+    fluids: List[FluidBoxDict]
+    obstacles: List[ObstacleDict]
+    inflows: List[InflowDict]
+    outflows: List[OutflowDict]
 
 
 # ─── Runtime validator ─────────────────────────────────────────────────
@@ -287,14 +294,31 @@ def validate_scene_dict(d: Any) -> None:
             if sim["frames"] <= 0:
                 raise SceneDictError(
                     f"'simulation.frames' must be > 0, got {sim['frames']}")
+        # Round-16: type-check numeric sim sub-fields when present.
+        # We don't REQUIRE them (test fixtures pre-round-15 use partial
+        # dicts) but if a string/None sneaks in we want a clear key-path
+        # error instead of a KeyError-style crash deep in build_toml.
+        for fkey in ("dt", "fps", "gravity"):
+            if fkey in sim and not isinstance(sim[fkey], (int, float, bool)):
+                raise SceneDictError(
+                    f"'simulation.{fkey}' must be numeric, got "
+                    f"{type(sim[fkey]).__name__}")
 
     # Output — validate IF present
-    if "output" in d and not isinstance(d["output"], dict):
-        raise SceneDictError(
-            f"'output' must be dict, got {type(d['output']).__name__}")
+    if "output" in d:
+        if not isinstance(d["output"], dict):
+            raise SceneDictError(
+                f"'output' must be dict, got {type(d['output']).__name__}")
+        if "cache_dir" in d["output"] and not isinstance(
+                d["output"]["cache_dir"], str):
+            raise SceneDictError(
+                f"'output.cache_dir' must be str, got "
+                f"{type(d['output']['cache_dir']).__name__}")
 
-    # Array-of-tables sections (optional, but if present must be list-of-dict)
-    for arr_key in ("obstacle", "inflow", "outflow"):
+    # Array-of-tables sections (optional, but if present must be list-of-dict).
+    # PLURAL keys — round-16 reviewer caught the singular bug that made
+    # this whole loop a no-op on real production scene_dicts.
+    for arr_key in ("obstacles", "inflows", "outflows", "fluids"):
         if arr_key in d:
             if not isinstance(d[arr_key], list):
                 raise SceneDictError(
@@ -307,7 +331,7 @@ def validate_scene_dict(d: Any) -> None:
                         f"got {type(entry).__name__}")
                 # Inflow / outflow timing sanity (mirrors bake.execute
                 # guard so emit-time can't slip past the check either).
-                if arr_key in ("inflow", "outflow"):
+                if arr_key in ("inflows", "outflows"):
                     fs = entry.get("frame_start")
                     fe = entry.get("frame_end")
                     if (isinstance(fs, int) and isinstance(fe, int)
