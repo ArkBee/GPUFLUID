@@ -560,3 +560,96 @@ update):
   exercise (e.g. kernels needing CUDA, removed forms with no test
   representation). Round-21 cmd_render dup + round-25 inflow gate
   + round-26 gravity ratio all use this pattern.
+
+---
+
+## 2026-05-27 update: rounds 27-32 on `feat/mpm-stability`
+
+Continuation of the MPM-stability sprint. 7 more commits, 3 more
+independent reviewer rounds (27/29/31). The round-31 sweep ran as
+a parallel orchestrator (3 background workers, non-overlapping
+ownership) — first use of the orchestrator-rules ownership-map
+discipline during this sprint.
+
+**What shipped:**
+
+- **Round-27** (independent reviewer, 7 issues) — 2 HIGH
+  (`PreloadCache.pop` silent leak, `_headless_render` incomplete
+  required-keys list); 3 MEDIUM (`blocks` dedup silent — the root
+  cause that let round-21 cmd_render slip in unnoticed,
+  `render_bridge` no face bounds-check, `_on_load_post` false
+  warning on non-MESH `Empty`); 2 LOW (bake auto_attach race after
+  `_is_running` cleared, `_on_load_post` no LRU-overflow warning).
+- **Round-28** — shipped fixes for all 7 round-27 findings.
+  Headline: `blocks/__init__.py` now LOGS WARNING on duplicate
+  qualname registration (was silent — exactly the root cause of
+  the round-21 cmd_render duplicate). `render_bridge` had
+  mirror-drifted from `cache_loader`; bounds-check copied across.
+  10 new tests in `test_round28_fixes.py` incl. a meta-test
+  asserting the dedup warning fires.
+- **Round-29** (independent reviewer) — 1 CRITICAL + 1 MEDIUM + 1
+  LOW. CRITICAL: `mpm_initial_velocity` was DOUBLE-SCALED with the
+  WRONG axis — addon scaled by `inv_size[1]` (Y), CLI then
+  re-scaled by `inv_dom_z` (Z); on a 2:1 Y:Z aspect domain the
+  user-specified velocity was 4× off. Every other MPM velocity
+  knob ships unscaled — classic mirror-drift (§9.6). MEDIUM:
+  `whitewater_potentials` no `v_max`/`radius`/`dx` validation.
+  LOW: `cubic_ref` missing empty/NaN guard.
+- **Round-30** — shipped all 3 round-29 fixes; added
+  `@block("M5.11.5")` to mixbox; added `[BLK ...]` source-grep
+  test refs for S2.17.7, M5.11.4, M5.11.4.H, M5.11.5. Also fixed
+  a self-introduced round-28 test-isolation bug: popping
+  `gpufluid.blocks` from `sys.modules` created a fresh
+  `BlockError` class instance which broke `pytest.raises` matching
+  in downstream tests.
+- **Round-31 (parallel sprint)** — orchestrator ran 3 background
+  workers concurrently on non-overlapping ownership:
+  `bug-hunter-round31` (READ-ONLY on `src/` + `addon/`),
+  `docs-syncer-lessons` (`~/.claude/CLAUDE.md` — out-of-repo),
+  cert harness (`certification_report.md`). All three landed
+  cleanly. Reviewer found 2 HIGH + 3 MEDIUM + 1 LOW. Cert returned
+  6/6 PASS confirming branch still shippable.
+- **Round-32** — shipped all 6 round-31 fixes. The big one: FLIP
+  solver had NO NaN-divergence trap — exact symmetric oversight
+  with the MPM round-20 fix. Now ships `FlipDivergenceError` +
+  `has_diverged()` + CLI per-frame check + cache.json
+  `truncated_at_frame` + rc=2 — mirrors MPM pattern bit-for-bit.
+  Also added `solver` / `truncated_at_frame` / `truncation_reason`
+  fields to the `CacheManifest` dataclass to close the
+  schema-drift gap reviewer flagged (the typed reader had been
+  silently dropping the fields MPM-side raw-JSON writers were
+  injecting). Other fixes: PLY non-triangle face rejection,
+  `DomainTransform` per-axis degeneracy guard, `OT_clear_cache`
+  selective preload invalidate (was clearing ALL domains'
+  preloads), pushback `snap_eps` now `dx*0.1` capped at 1e-4.
+  8 new tests in `test_round32_fixes.py`.
+
+**Lessons shipped to `~/.claude/CLAUDE.md` §9.11 + §9.12** (by
+`docs-syncer-lessons` during the round-31 parallel sprint —
+previously listed as candidates above, now live in global rules):
+
+- **§9.11 — Guard comments mandatory**: every defensive guard
+  requires an inline `# dodge: <scenario>` comment so future-you
+  can spot when the guard inverts intent. Real example: round-23
+  added `if g_scene != 0.0 else 1.0` "for div-by-zero" but there
+  was no division → guard inverted zero-G scene intent → caught
+  only on round-26 self-review.
+- **§9.12 — Source-grep contract tests**: cheap regression
+  insurance for code paths that can't be unit-tested (Warp
+  kernels, removed forms, stacked decorators). Read source as
+  text, strip comments, assert pattern (not) present. Three real
+  examples now shipped: inflow gate `==` form, gravity ratio
+  inversion, `mpm_initial_velocity` pre-scale.
+
+**State of test suite:** 107 unit tests green (8 new in
+`test_round32_fixes` on top of the round-20-26 26 new tests).
+Source-grep contract tests still in place + extended.
+
+**Branch state:** `feat/mpm-stability` is **14 commits** beyond
+`main`. Cert harness 6/6 PASS (re-run during round-31 by parallel
+cert worker). Ready for merge.
+
+**Open follow-ups:** none from reviewers (round-31 was the most
+recent and round-32 addressed all 6). Pre-existing A8.* addon
+block-registry sync failures + flaky perf test
+`test_s2_16_sparse_jacobi` remain (both pre-date this sprint).
