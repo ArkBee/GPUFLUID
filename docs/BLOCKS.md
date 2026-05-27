@@ -67,6 +67,7 @@ additionally has at least one `test_*` matching the block ID slug;
 | S2.17.3 | Particle pushback at domain walls: slip-clamp to [lo, hi]³, zero normal velocity, preserve tangential, reset F/C | S2 | `?` | impl |
 | S2.17.4 | Tap-zone terminal velocity cap (downward only): mimics air drag on a laminar stream | S2 | `?` | impl |
 | S2.17.5 | Above-obstacle anti-splash \|v_z\| clamp: caps stress-launched upward outliers at a physical hydraulic-jump bound | S2 | `?` | impl |
+| S2.17.7 | MPM inflow gate kernel + seed_inflow_particles (pre-allocate held particles, release at spawn_step) | S2 | `src/gpufluid/sim/mpm/inflow.py` | impl,test |
 | S2.17.PATCH.EOS | Overlay: clamp J in kirchoff_stress_water to bound pressure spike at rigid contact | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl |
 | S2.17.PATCH.SLIP | Overlay fix: write projected v in slip-surface branch instead of zero | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl |
 | S2.18 | Per-particle scalar attribute: P2G → normalize → G2P (B11) | S2 | `src/gpufluid/solvers/solver3d.py` | impl,test |
