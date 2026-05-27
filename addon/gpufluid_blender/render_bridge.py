@@ -67,6 +67,21 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
         "loop_total", np.full(n_f, 3, dtype=np.int32))
     me.polygons.foreach_set(
         "vertices", np.asarray(faces, dtype=np.int32).ravel())
+    if colors is not None and len(colors) != n_v:
+        # Round-22: previously this branch was a silent `pass` — a writer
+        # producing a mismatched colour block (third-party PLY drift,
+        # future writer bug, partial-write corruption) would drop the
+        # whole Col attribute and the user would see uniform fluid
+        # without knowing why. Log the mismatch loudly so the failure
+        # mode is visible without leaving stale Col data attached.
+        try:
+            import logging
+            logging.getLogger("gpufluid.addon").warning(
+                "gpufluid.render_bridge: colour count %d != vertex count %d "
+                "for mesh; dropping Col attribute. Bake/writer drift?",
+                len(colors), n_v)
+        except Exception:
+            pass
     if colors is not None and len(colors) == n_v:
         # PLY ships uint8 0..255; FLOAT_COLOR wants 0..1. Build (N,4)
         # by appending alpha=1, write via foreach_set on the attribute.
@@ -116,7 +131,12 @@ class FrameMeshLoader:
         # Defer the heavy import so this module loads outside Blender.
         from gpufluid.io.ply import read_ply
         f = scene.frame_current
-        idx = f - 1
+        # Round-22: clamp f-1 at 0. Blender lets the user scrub to
+        # frame 0 (or negative frames in some setups); pre-round-22
+        # we computed idx=-1, the path `frame_-001.ply` never existed
+        # so the loader silently no-op'd and the sim-time text read
+        # "-0.017 s". Treat frame ≤ 1 as the bake's first dump.
+        idx = max(0, f - 1)
         if self.sim_time_text is not None:
             t = idx / float(self.fps)
             self.sim_time_text.data.body = f"sim time: {t:6.3f} s"

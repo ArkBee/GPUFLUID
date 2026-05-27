@@ -157,6 +157,11 @@ class MpmConfig:
     inflows: Sequence[MpmInflow] = field(default_factory=tuple)
     fps: int = 60
     device: str = "cuda:0"
+    # Round-22: seed for the inflow-particle RNG. Default 42 preserves
+    # pre-round-22 determinism (regression tests + repro of bake hashes);
+    # set to a different int per-bake when comparing variability, or
+    # set to None for non-deterministic (system-entropy) inflows.
+    seed: int | None = 42
 
     def dx(self) -> float:
         return self.grid_lim / self.n_grid
@@ -255,7 +260,9 @@ class MpmSolver:
                 f"initial_column must be (N, 3); got {initial.shape}"
             )
         self.n_initial = initial.shape[0]
-        rng = np.random.default_rng(42)
+        # Round-22: respect cfg.seed (defaults to 42 for backwards-compat
+        # determinism; pre-round-22 this was a hardcoded literal).
+        rng = np.random.default_rng(cfg.seed)
         inflow_chunks: list[np.ndarray] = []
         # gate metadata, keyed by inflow index: (base_idx, n, hold_wp, spawn_wp, velocity)
         self._inflow_gates: list = []
@@ -549,9 +556,15 @@ class MpmSolver:
         return out_dir
 
     def __del__(self):
+        # Round-22: catch-all. During Python interpreter shutdown the
+        # `os` module's attributes (or `os` itself in extreme cases)
+        # can become None — `os.unlink` then raises TypeError, not
+        # the AttributeError/OSError family we used to catch. Broad
+        # `Exception` is justified: this is best-effort cleanup of a
+        # tempfile path; never propagate from a destructor.
         try:
             os.unlink(self._tmp_h5)
-        except (AttributeError, FileNotFoundError, OSError):
+        except Exception:
             pass
 
 
