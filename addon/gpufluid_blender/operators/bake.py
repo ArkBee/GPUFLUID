@@ -115,6 +115,25 @@ def collect_scene(context, domain_obj):
         # the unit cube even when the domain is anisotropic.
         avg_inv = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
         if oprops.obstacle_type == "BBOX":
+            # Round-52: detect non-identity rotation on a BBOX obstacle.
+            # The world-space AABB collapses the rotation into an
+            # axis-aligned box that is BIGGER than the original mesh
+            # (corners stick out further on diagonals) AND silently
+            # drops the orientation — MPM has no idea the cube is
+            # tilted. Live-test caught this when fluid did not slide
+            # off "tilted" cubes as expected. Recommend MESH type.
+            rx, ry, rz = (float(c) for c in o.rotation_euler)
+            if abs(rx) + abs(ry) + abs(rz) > 1e-4:
+                deg = (f"({rx*57.2958:+.1f}°, {ry*57.2958:+.1f}°, "
+                       f"{rz*57.2958:+.1f}°)")
+                warnings.append(
+                    f"obstacle '{o.name}' has BBOX type but non-zero "
+                    f"rotation {deg} — the solver will see an axis-"
+                    f"aligned bbox of the rotated corners (bigger than "
+                    f"the original) and lose the tilt. Switch to "
+                    f"obstacle_type=MESH for orientation-aware "
+                    f"collision (mesh OBJ is exported with rotation "
+                    f"baked into world-space vertices).")
             obstacles.append({
                 "type": "box",
                 "center": to_sim(centre_w),
