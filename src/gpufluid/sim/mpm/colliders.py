@@ -91,7 +91,17 @@ def k_sdf_box_collide(
     if vn < 0.0:
         v = v - vn * n
     # Top-face friction (surface_type == 1 means "slip with top friction"):
-    # damp tangential v on +Z face when configured
+    # damp tangential v on +Z face when configured.
+    # Round-34: pre-round-34 we did `v = v * param.friction` AFTER the
+    # inward-normal projection — that also damped the NORMAL component
+    # (the outward-flowing remainder), making particles just-detached
+    # from the surface decelerate vertically too. Correct: separate
+    # tangential vs normal AFTER projection, scale ONLY tangential.
     if param.surface_type == 1 and nz > 0.99:
-        v = v * param.friction
+        # Re-decompose v post-projection: vn is outward-only (vn >= 0
+        # after the if vn<0 clip above); tangential = v - vn*n.
+        vn_post = wp.dot(v, n)
+        v_normal = vn_post * n
+        v_tangent = v - v_normal
+        v = v_normal + param.friction * v_tangent
     state.grid_v_out[gx, gy, gz] = v

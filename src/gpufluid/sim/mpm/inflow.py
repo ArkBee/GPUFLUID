@@ -132,6 +132,23 @@ def seed_inflow_particles(
         kf_frames = kf[:, 0]
         kf_lo = kf[:, 1:4]
         kf_hi = kf[:, 4:7]
+        # Round-34: validate keyframes upfront. Pre-round-34 np.interp
+        # silently mis-interpolated when kf_frames was non-monotone
+        # (easy TOML typo: rows in wrong order); and any keyframe with
+        # lo > hi produced collapsed/inverted spawn AABB (the static
+        # path raises via rng.uniform(low>=high); the keyframe path
+        # was permissive). Both fail loudly now with the offending row.
+        if len(kf_frames) > 1 and np.any(np.diff(kf_frames) < 0):
+            raise ValueError(
+                f"MpmInflow.keyframes: kf_frames must be monotone "
+                f"non-decreasing; got {kf_frames.tolist()} — sort the "
+                f"keyframe rows by frame index in the TOML.")
+        if np.any(kf_hi < kf_lo):
+            bad_row = int(np.where(np.any(kf_hi < kf_lo, axis=1))[0][0])
+            raise ValueError(
+                f"MpmInflow.keyframes row {bad_row}: hi must be >= lo "
+                f"per axis; got lo={kf_lo[bad_row].tolist()} "
+                f"hi={kf_hi[bad_row].tolist()}.")
         # For each particle, find the interpolation bracket. np.interp handles
         # out-of-range by clamping to endpoints, which is exactly what we
         # want for spawn frames slightly outside the keyframe span.

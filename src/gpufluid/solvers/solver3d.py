@@ -2685,6 +2685,23 @@ class FlipSolver3D:
         # swap arrays (slice to the compacted size)
         self.pos = self._pos_alt[:new_n]
         self.vel = self._vel_alt[:new_n]
+        # Round-34: compact attr_color / attr_temperature in lockstep.
+        # Pre-round-34 they kept their old layout, so _apply_color_transfer
+        # (and the temperature pass) read attr[i] for compact-index i
+        # decorrelated from which particle survived — colours visibly
+        # scrambled the moment any outflow fired. CPU round-trip via the
+        # alive mask is cheap relative to per-frame mesh extraction;
+        # attr arrays are O(N) and N is post-compaction.
+        if self.attr_color is not None or self.attr_temperature is not None:
+            alive_mask = (self._alive[:n].numpy() != 0)
+            if self.attr_color is not None:
+                col_np = self.attr_color.numpy()[alive_mask]
+                self.attr_color = wp.array(col_np, dtype=wp.vec3,
+                                            device=self.device)
+            if self.attr_temperature is not None:
+                t_np = self.attr_temperature.numpy()[alive_mask]
+                self.attr_temperature = wp.array(t_np, dtype=float,
+                                                  device=self.device)
         # APIC C buffer becomes stale — drop it; will be rebuilt fresh in step()
         self.affine_C = None
         self.n_particles = new_n
@@ -3904,6 +3921,29 @@ class FlipSolver3D:
                 self.vel = wp.array(cur_vel, dtype=wp.vec3, device=self.device)
                 self.affine_C = None
                 self.n_particles = len(cur_pos)
+                # Round-34: extend attribute arrays to match the new
+                # particle count. Pre-round-34 they kept their old
+                # length → `_apply_color_transfer` launched with
+                # dim=new_n_particles indexed attr_color[i] for
+                # i >= old_len = OOB read (Warp may not check, returning
+                # arbitrary bytes). Trigger: any base-fluid that has a
+                # colour set + any inflow active. Use per-emit-event
+                # carry if FluidInflowEvent ever exposes attr; for now,
+                # extend with sensible defaults (zero colour, 20°C
+                # temperature) so the bake stays well-defined.
+                n_added = len(emit_pos)
+                if self.attr_color is not None:
+                    prev_col = self.attr_color.numpy()
+                    pad = np.zeros((n_added, 3), dtype=np.float32)
+                    self.attr_color = wp.array(
+                        np.concatenate([prev_col, pad], axis=0),
+                        dtype=wp.vec3, device=self.device)
+                if self.attr_temperature is not None:
+                    prev_t = self.attr_temperature.numpy()
+                    pad = np.full((n_added,), 20.0, dtype=np.float32)
+                    self.attr_temperature = wp.array(
+                        np.concatenate([prev_t, pad], axis=0),
+                        dtype=float, device=self.device)
         # B7-alt.2 — sub-dense storage rebuild trigger. No-op when the
         # flag is off; otherwise shrinks u/v/w/p/p_tmp/div to the active
         # 8³-tile bbox + sub_dilation, every sub_rebuild_every frames or
