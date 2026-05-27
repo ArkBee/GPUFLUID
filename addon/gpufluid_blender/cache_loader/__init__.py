@@ -410,9 +410,27 @@ def _preload_sequence(obj, cache_dir, pattern, origin, max_frames=None,
         try:
             import json
             with open(cache_json_path, "r", encoding="utf-8") as fh:
-                fc = int(json.load(fh).get("frame_count", max_frames))
+                manifest = json.load(fh)
+            fc = int(manifest.get("frame_count", max_frames))
             if fc > 0:
                 max_frames = min(max_frames, fc)
+            # Round-40: cache.json may carry truncated_at_frame +
+            # truncation_reason (round-20 MPM, round-32 FLIP). On
+            # scene reopen the loader previously honoured frame_count
+            # silently — user saw a clean preview that ended abruptly
+            # with no indication the bake had diverged. Now: surface
+            # a one-line WARNING per domain so the system console
+            # shows what happened, with the recovery hint embedded in
+            # the truncation_reason value.
+            t_at = manifest.get("truncated_at_frame")
+            t_reason = manifest.get("truncation_reason")
+            if t_at is not None:
+                _addon_logger.warning(
+                    "cache: '%s' loaded from a TRUNCATED bake "
+                    "(reason=%s, last valid frame=%s of %s requested). "
+                    "Preview will play but ends early; re-bake with "
+                    "softer params to recover.",
+                    obj.name, t_reason or "unknown", t_at, fc)
         except Exception as exc:  # noqa: BLE001
             _addon_logger.warning(
                 "cache: cache.json read failed (%s) — falling back to dir scan",

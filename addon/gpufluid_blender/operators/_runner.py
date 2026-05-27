@@ -328,6 +328,29 @@ class ModalSubprocessRunner:
                     logger.info("%s: %s", log_prefix, line.rstrip())
         if rc is None:
             return None  # caller returns {"PASS_THROUGH"}
+        # Round-40: subprocess exited — drain remaining queued lines
+        # BEFORE _finish() clears state. Pre-round-40 the per-tick
+        # 50-line cap above could leave the OS-pipe tail unread (MPM
+        # divergence dumps full stack in last ~30ms; FLIP timeouts
+        # similar) — user saw "failed rc=N" with zero diagnostics
+        # past the cap. Best-effort: join drain thread (1s) so its
+        # `None` sentinel reaches the queue, then drain until empty.
+        # Mirrors the round-38 sync-path timeout-drain fix.
+        if self._stdout_thread is not None:
+            try:
+                self._stdout_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        if self._stdout_q is not None:
+            while True:
+                try:
+                    line = self._stdout_q.get_nowait()
+                except queue.Empty:
+                    break
+                if line is None:
+                    break
+                if logger is not None and log_prefix is not None:
+                    logger.info("%s: %s", log_prefix, line.rstrip())
         return self._finish(operator, context, ok=(rc == 0),
                             rc=rc,
                             friendly_error_for_rc=friendly_error_for_rc)

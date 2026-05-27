@@ -2450,6 +2450,23 @@ class FlipSolver3D:
         self._sub_offset = (0, 0, 0)
         self._sub_shape = (nx, ny, nz)
         self._sub_rebuild_every = max(1, int(sub_rebuild_every))
+        # Round-40: sub_dilation < 1 in combination with enable_sub_dense
+        # would let live fluid reach the sub-dense bbox edge where the
+        # GS-RB kernel reads off-grid pressure as 0 without compensating
+        # the diagonal — slow convergence + measurable pressure error
+        # at the band edge. _relayout transiently sets it to 0 for the
+        # proximity-check (CPU-only), then restores; that's safe. Any
+        # other caller running a pressure solve with sub_dense + 0
+        # dilation hits the bug. Bound to >= 1 to make the failure mode
+        # unreachable from the public constructor.
+        if enable_sub_dense and int(sub_dilation) < 1:
+            raise ValueError(
+                f"FlipSolver3D: enable_sub_dense=True requires "
+                f"sub_dilation >= 1 (got {sub_dilation}). The GS-RB "
+                f"pressure kernel reads pressure across the sub-dense "
+                f"bbox edge as zero without diagonal compensation, "
+                f"so a zero dilation lets live fluid hit a band-edge "
+                f"discretisation error.")
         self._sub_dilation = max(0, int(sub_dilation))
         self._last_sub_rebuild_frame = -1  # -1 = never rebuilt
 
@@ -2880,6 +2897,15 @@ class FlipSolver3D:
             self.attr_temperature = wp.array(np.concatenate([prev_t, pad], axis=0),
                                               dtype=float, device=self.device)
         self.n_particles = len(positions)
+        # Round-40: invalidate captured CUDA graph. seed_box rebinds
+        # self.pos / vel / affine_C / attr_color / attr_temperature to
+        # fresh wp.arrays; any previously captured graph still holds
+        # the OLD device pointers. The cache key check (n_particles,
+        # attr presence) doesn't catch the case where n_particles
+        # happens to match a prior topology — silent dereference of
+        # freed memory on replay. Cheap to invalidate now; capture
+        # re-fires on next eligible step.
+        self._cuda_graph_invalidate()
 
     # ---------- internal: PCG pressure solve (S2.6.3) -----------------------
     # GPU-resident variant: alpha, beta, rz_old, rz_new, pAp, r_norm² all live
@@ -4052,3 +4078,8 @@ class FlipSolver3D:
         wp.copy(self.marker, wp.array(marker.astype(np.int32), dtype=int, device=self.device))
         self._marker_host = marker.astype(np.int32)
         self.n_particles = len(pos)
+        # Round-40: same as seed_box. Pointer rebind silently
+        # invalidates any captured graph; cache key matching identical
+        # topology (the intended resume-checkpoint case) would replay
+        # a stale-pointer graph → undefined behaviour.
+        self._cuda_graph_invalidate()
