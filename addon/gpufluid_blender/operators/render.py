@@ -48,8 +48,11 @@ def _resolve_cache_dir(domain) -> Optional[Path]:
     """Pull the cache dir off the Domain prop, resolving // and ~."""
     cd = (domain.gpufluid_domain.cache_dir or "").strip()
     if not cd:
-        # Bake stores its run dir as a custom prop after a successful bake.
-        cd = str(domain.get("gpufluid_cache_dir", "")).strip()
+        # Bake stores its run dir as a bake-trace prop after a successful
+        # bake — round-19 routes through cache_binding (no magic strings).
+        from .. import cache_binding as _cb
+        trace = _cb.get_bake_trace(domain)
+        cd = str(trace["cache_dir"]).strip() if trace else ""
     if not cd:
         return None
     return Path(bpy.path.abspath(cd)).expanduser().resolve()

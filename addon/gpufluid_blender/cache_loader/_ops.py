@@ -99,11 +99,12 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
             mesh = bpy.data.meshes.new("gpufluid_cache_mesh")
             target = bpy.data.objects.new("gpufluid_cache", mesh)
             context.scene.collection.objects.link(target)
-        target["gpufluid_cache_dir"] = cache_dir
-        target["gpufluid_cache_pattern"] = "mesh/frame_{:04d}.ply"
-        target["gpufluid_cache_frame_offset"] = self.frame_offset
-        target["gpufluid_cache_origin"] = list(self.origin)
-        target["gpufluid_cache_dom_size"] = list(self.dom_size)
+        # Round-19: centralised via cache_binding.set_cache_binding —
+        # no more magic strings sprayed across 3 files.
+        from .. import cache_binding as _cb
+        _cb.set_cache_binding(
+            target, cache_dir, list(self.origin), list(self.dom_size),
+            frame_offset=self.frame_offset)
 
         # FAST PATH (I6.2.ABC) — Alembic + MeshSequenceCache. CURRENTLY
         # DISABLED because Blender 5.1's MSC modifier on a multi-sub-object
@@ -198,10 +199,11 @@ class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
             mesh = bpy.data.meshes.new("gpufluid_ww_mesh")
             target = bpy.data.objects.new("gpufluid_whitewater", mesh)
             context.scene.collection.objects.link(target)
-        target["gpufluid_ww_cache_dir"] = cache_dir
-        target["gpufluid_ww_cache_frame_offset"] = self.frame_offset
-        target["gpufluid_ww_cache_origin"] = [
-            self.origin_x, self.origin_y, self.origin_z]
+        from .. import cache_binding as _cb
+        _cb.set_ww_binding(
+            target, cache_dir,
+            (self.origin_x, self.origin_y, self.origin_z),
+            frame_offset=self.frame_offset)
         _frame_change_handler(context.scene)
         self.report({"INFO"}, f"whitewater cache attached to '{target.name}'")
         return {"FINISHED"}
@@ -216,13 +218,12 @@ class GPUFLUID_OT_detach_cache(bpy.types.Operator):
     def poll(cls, context):
         # Pass if EITHER the active object has cache props OR a
         # gpufluid_cache / gpufluid_whitewater object exists in scene.
-        # (Bake leaves trace props on the Domain too; execute() targets
-        # the real cache objects below.)
+        # Round-19: use cache_binding helpers instead of raw key lookup.
         if context.scene is None:
             return False
+        from .. import cache_binding as _cb
         for o in context.scene.objects:
-            if (o.get("gpufluid_cache_dir") is not None
-                    or o.get("gpufluid_ww_cache_dir") is not None):
+            if _cb.has_cache_binding(o) or _cb.has_ww_binding(o):
                 return True
         for n in ("gpufluid_cache", "gpufluid_whitewater"):
             if n in context.scene.objects:
@@ -230,41 +231,17 @@ class GPUFLUID_OT_detach_cache(bpy.types.Operator):
         return False
 
     def execute(self, context):
-        # Live-found 2026-05-25: original execute operated on
+        # Live-found 2026-05-25 (round-5): original execute operated on
         # context.active_object, which is typically Domain after a bake.
-        # Domain carries bake-trace props (gpufluid_cache_dir,
-        # gpufluid_origin, gpufluid_dom_size — note: different names from
-        # the per-object cache props), so the for-loop silently no-op'd
-        # on the real cache object and the op reported FINISHED while
-        # achieving nothing. Also _PRELOAD wasn't touched, so a re-attach
-        # of the same name skipped the eviction path.
-        #
-        # Now: scan the scene for cache-bearing objects (gpufluid_cache,
-        # gpufluid_whitewater, or anything with the per-object cache
-        # props), strip per-object props, AND scrub the Domain's
-        # bake-trace props, AND drop the _PRELOAD entry.
-        all_cache_keys = (
-            "gpufluid_cache_dir", "gpufluid_cache_pattern",
-            "gpufluid_cache_frame_offset", "gpufluid_cache_origin",
-            "gpufluid_cache_dom_size",
-            "gpufluid_ww_cache_dir", "gpufluid_ww_cache_frame_offset",
-            "gpufluid_ww_cache_origin",
-        )
-        # Domain's bake-trace prop names differ — strip these from any
-        # object that has them (almost always the Domain).
-        domain_trace_keys = (
-            "gpufluid_cache_dir", "gpufluid_origin", "gpufluid_dom_size",
-        )
+        # Domain carries bake-trace props with deliberately DIFFERENT
+        # names from the cache-obj per-object props — the for-loop
+        # silently no-op'd on the real cache object. Round-19 centralised
+        # both name groups in `cache_binding.clear_all_bindings` so this
+        # operator can't drift again.
+        from .. import cache_binding as _cb
         n_cleaned = 0
         for o in list(context.scene.objects):
-            had = False
-            for k in all_cache_keys:
-                if k in o.keys():
-                    del o[k]; had = True
-            for k in domain_trace_keys:
-                if k in o.keys():
-                    del o[k]; had = True
-            if had:
+            if _cb.clear_all_bindings(o):
                 n_cleaned += 1
             # Drop preload table — match cache_loader behaviour
             if o.name in _PRELOAD:

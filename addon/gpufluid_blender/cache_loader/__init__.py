@@ -498,12 +498,13 @@ def _frame_change_handler(scene, depsgraph=None):
         # own bookkeeping) but is not a render target.
         if obj.type != "MESH":
             continue
-        # Surface mesh path
-        cache_dir = obj.get("gpufluid_cache_dir")
+        # Surface mesh path — round-19: cache_binding accessors.
+        from .. import cache_binding as _cb
+        cache_dir = _cb.get_cache_dir(obj)
         if cache_dir:
-            pattern = obj.get("gpufluid_cache_pattern", "mesh/frame_{:04d}.ply")
-            offset = int(obj.get("gpufluid_cache_frame_offset", 0))
-            origin = list(obj.get("gpufluid_cache_origin", [0.0, 0.0, 0.0]))
+            pattern = _cb.get_cache_pattern(obj)
+            offset = _cb.get_cache_frame_offset(obj)
+            origin = list(_cb.get_cache_origin(obj))
             idx = f - offset
             if idx >= 0:
                 # FAST PATH — pre-loaded sequence: pointer swap only.
@@ -535,11 +536,11 @@ def _frame_change_handler(scene, depsgraph=None):
                         _addon_logger.warning(
                             "cache: error at frame %d for '%s': %s",
                             f, obj.name, exc)
-        # Whitewater point-cloud path
-        ww_dir = obj.get("gpufluid_ww_cache_dir")
+        # Whitewater point-cloud path — round-19: cache_binding accessors.
+        ww_dir = _cb.get_ww_cache_dir(obj)
         if ww_dir:
-            offset = int(obj.get("gpufluid_ww_cache_frame_offset", 0))
-            origin = list(obj.get("gpufluid_ww_cache_origin", [0.0, 0.0, 0.0]))
+            offset = _cb.get_ww_cache_frame_offset(obj)
+            origin = list(_cb.get_ww_cache_origin(obj))
             idx = f - offset
             if idx >= 0:
                 pos_path = os.path.join(ww_dir, "whitewater", f"frame_{idx:04d}.npy")
@@ -577,13 +578,12 @@ def _on_load_post(_dummy):
     # `_free_table_static` per entry (defensive against ReferenceError)
     # before clearing.
     _PRELOAD.free_all()
+    from .. import cache_binding as _cb
     for obj in bpy.data.objects:
-        cache_dir = obj.get("gpufluid_cache_dir")
+        cache_dir = _cb.get_cache_dir(obj)
         if not cache_dir or not os.path.isdir(str(cache_dir)):
             continue
-        pattern = obj.get("gpufluid_cache_pattern", "mesh/frame_{:04d}.ply")
-        origin_key = "gpufluid_cache_origin"
-        dom_size_key = "gpufluid_cache_dom_size"
+        pattern = _cb.get_cache_pattern(obj)
         # Round-5 reviewer caught: silently defaulting dom_size to
         # (1, 1, 1) when the prop is missing positions every preloaded
         # mesh in the [0,1]³ corner of world — worse UX than the
@@ -591,15 +591,16 @@ def _on_load_post(_dummy):
         # baked state. .blend files saved before round-3 (when
         # gpufluid_cache_dom_size became a per-object prop) hit this.
         # Skip reattach with a warning instead of silently miscaling.
-        if origin_key not in obj.keys() or dom_size_key not in obj.keys():
+        if (_cb.KEY_CACHE_ORIGIN not in obj.keys()
+                or _cb.KEY_CACHE_DOM_SIZE not in obj.keys()):
             _addon_logger.warning(
-                "cache_loader: '%s' has gpufluid_cache_dir but no saved "
+                "cache_loader: '%s' has cache_dir but no saved "
                 "origin/dom_size — skipping load_post auto-reattach. "
                 "Re-bake (or click Attach Surface) to repopulate.",
                 obj.name)
             continue
-        origin = list(obj[origin_key])
-        dom_size = tuple(obj[dom_size_key])
+        origin = list(_cb.get_cache_origin(obj))
+        dom_size = tuple(_cb.get_cache_dom_size(obj))
         try:
             _preload_sequence(obj, str(cache_dir), str(pattern),
                               origin, dom_size=dom_size)

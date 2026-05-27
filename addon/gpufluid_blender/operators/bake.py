@@ -450,9 +450,10 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # also wants the guard so two parallel scripted bakes don't both
         # Popen into the same cache_dir.
         GPUFLUID_OT_bake._is_running = True
-        domain["gpufluid_origin"] = list(origin)
-        domain["gpufluid_dom_size"] = list(dom_size)
-        domain["gpufluid_cache_dir"] = str(cache_dir)
+        # Round-19: bake-trace via cache_binding (single source of key strings).
+        from .. import cache_binding as _cb
+        _cb.set_bake_trace(domain, str(cache_dir),
+                            tuple(origin), tuple(dom_size))
 
         # Remember for auto-attach (sync path uses inline; modal calls
         # _finish_auto_attach via tick_modal → _finish_complete below).
@@ -543,11 +544,13 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         if domain is None:
             return
         target = domain.gpufluid_domain.target_object
-        cache_dir = domain.get("gpufluid_cache_dir", "")
-        origin = domain.get("gpufluid_origin", [0, 0, 0])
-        if not cache_dir:
+        from .. import cache_binding as _cb
+        trace = _cb.get_bake_trace(domain)
+        if trace is None:
             return
-        dom_size = list(domain.get("gpufluid_dom_size", [1.0, 1.0, 1.0]))
+        cache_dir = trace["cache_dir"]
+        origin = list(trace["origin"])
+        dom_size = list(trace["dom_size"])
         try:
             bpy.ops.gpufluid.attach_cache(
                 cache_dir=str(cache_dir),
