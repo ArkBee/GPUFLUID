@@ -149,10 +149,14 @@ def test_blocks_duplicate_qualname_warns(caplog):
     """Round-28: duplicate qualname under one block_id was silently
     dropped pre-round-28 (this is the bug class that let the round-21
     cmd_render duplicate slip through). Now: WARNING via
-    'gpufluid.blocks' logger."""
-    # Fresh-import blocks module so the registry is clean enough for
-    # this test (other tests may have already populated it).
-    sys.modules.pop("gpufluid.blocks", None)
+    'gpufluid.blocks' logger.
+
+    Round-30 fix: do NOT pop+reimport `gpufluid.blocks` — that creates
+    a NEW BlockError class instance and breaks `pytest.raises(
+    BlockError)` matching in any test that ran earlier (the production
+    code's BlockError baked in at import time stays the old class).
+    Instead, register the duplicate directly against the existing
+    module's registry."""
     import gpufluid.blocks as bl
 
     @bl.block("Z99.7", "first")

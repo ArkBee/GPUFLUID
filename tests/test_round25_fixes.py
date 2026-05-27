@@ -173,6 +173,7 @@ def test_whitewater_gravity_ratio_zero_scene_zeros_per_class():
         "class gravities, not snap back to defaults")
 
 
+# [BLK S2.17.7] — inflow gate kernel + seed_inflow_particles validation
 def test_inflow_gate_uses_ge_not_eq_in_source():
     """Round-25: the wp.kernel can't run on the test machine without
     CUDA + a live State struct, so we verify the contract at the

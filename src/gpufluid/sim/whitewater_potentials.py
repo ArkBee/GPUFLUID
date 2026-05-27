@@ -127,6 +127,20 @@ def trapped_air_potential(
         return np.zeros((0,), dtype=np.float32)
     if pos.shape != vel.shape or pos.shape[1] != 3:
         raise ValueError(f"pos/vel must both be (N,3); got {pos.shape}, {vel.shape}")
+    # Round-30: pre-round-30 a misconfigured scene with v_max=0 or
+    # radius=0 silently produced an all-zero potential field (no
+    # whitewater emission) — or worse, FP exceptions on some CUDA
+    # targets from div-by-zero in `vij_mag / v_max`. Caller (typically
+    # scene TOML `whitewater_potential_v_max` / `_radius`) got no
+    # error, just a silent no-op. Validate upfront with actionable msg.
+    if v_max <= 0.0:
+        raise ValueError(
+            f"trapped_air_potential: v_max must be > 0, got {v_max}. "
+            f"Default 10.0 m/s suits water-scale sims.")
+    if radius <= 0.0:
+        raise ValueError(
+            f"trapped_air_potential: radius must be > 0, got {radius}. "
+            f"Typical 2..3·dx (e.g. ~0.03 for a 1m / 64-cell domain).")
     dev = default_device()
     pos_wp = wp.array(pos.astype(np.float32), dtype=wp.vec3, device=dev)
     vel_wp = wp.array(vel.astype(np.float32), dtype=wp.vec3, device=dev)
@@ -379,6 +393,12 @@ def wave_crest_potential(
     if grid_res < 4:
         raise ValueError(f"grid_res {grid_res} too small; need ≥4 for "
                          f"central differences to make sense.")
+    # Round-30: same defence as trapped_air_potential. Pre-round-30
+    # dx=0 produced div-by-zero in the gradient kernel, dx<=0 yielded
+    # silent zero output. Validate upfront.
+    if dx <= 0.0:
+        raise ValueError(
+            f"wave_crest_potential: dx must be > 0, got {dx}")
     dev = default_device()
     pos_wp = wp.array(pos.astype(np.float32), dtype=wp.vec3, device=dev)
     chi_a = zeros((grid_res, grid_res, grid_res), dev=dev)

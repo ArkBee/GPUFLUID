@@ -241,10 +241,19 @@ def collect_scene(context, domain_obj):
             "mpm_cube_friction": dprops.mpm_cube_friction,
             "mpm_v_terminal": dprops.mpm_v_terminal,
             "mpm_vz_max_splash": dprops.mpm_vz_max_splash,
-            # m/s in UI → unit/s in solver basis. Matches the inflow-velocity
-            # convention (bake.py inflow path, ~line 321) so the column pours
-            # at the same speed regardless of domain world size.
-            "mpm_initial_velocity": float(dprops.mpm_initial_velocity) * inv_size[1],
+            # Round-30: pre-round-30 this pre-scaled by `inv_size[1]` (Y)
+            # — DOUBLE wrong: (1) the CLI then rescales by `inv_dom_z`
+            # (Z) at commands.py:238, so the resulting initial_velocity_z
+            # was multiplied by `inv_size[1] * inv_size[2]` — off by
+            # 4× on a 2:1 Y:Z aspect domain; (2) wrong axis entirely
+            # (Y not Z). Other MPM velocity knobs (mpm_v_terminal,
+            # mpm_vz_max_splash) ship UNSCALED from here and ride the
+            # CLI's single Z-rescaling — consistent. The pre-round-30
+            # comment claimed "matches inflow-velocity convention" but
+            # inflow uses per-axis `normalize_velocity`, not a single-
+            # axis pre-multiply. Now: ship UNSCALED, let the CLI do
+            # the single correct Z scaling once.
+            "mpm_initial_velocity": float(dprops.mpm_initial_velocity),
         },
         "output": _output_dict(dprops),
         # Phase 1 escape-hatch: raw TOML string deep-merged in config_builder.
