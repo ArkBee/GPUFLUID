@@ -34,6 +34,15 @@ def k_cube_pushback(
     snap_eps: float,
 ):
     p = wp.tid()
+    # Round-44: skip held inflow particles (selection == 1). Pre-
+    # round-44 the kernel still ran on them — wasting F/F_trial/C
+    # resets every step and, when a held particle's hold_pos
+    # overlapped this cube, rewriting position before next _pre_step's
+    # gate could re-bind. The gate kernel re-clobbers state on the
+    # next step so the visible artefact was masked in the common
+    # case, but the F-reset + grid-write cost is real.
+    if state.particle_selection[p] == 1:
+        return
     pos = state.particle_x[p]
     rx = pos[0] - cx
     ry = pos[1] - cy
@@ -93,6 +102,12 @@ def k_wall_pushback(
     hi_x: float, hi_y: float, hi_z: float,
 ):
     p = wp.tid()
+    # Round-44: same selection gate as k_cube_pushback. Held inflow
+    # particles sit at hold_pos which may be just outside [lo, hi];
+    # pre-round-44 we clamped them every step (wasted writes) and the
+    # gate kernel re-bound next step.
+    if state.particle_selection[p] == 1:
+        return
     pos = state.particle_x[p]
     v = state.particle_v[p]
     vx = v[0]; vy = v[1]; vz = v[2]

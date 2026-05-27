@@ -68,6 +68,21 @@ class OutflowBox:
     frame_start: int = 0
     frame_end: int = 10_000
 
+    def __post_init__(self):
+        # Round-44: mirror of round-33 MPM-inflow-keyframe `lo > hi`
+        # fix. Pre-round-44 a reversed AABB silently produced a
+        # zero-volume box → `apply_outflows` containment test failed
+        # for every particle → outflow became silent no-op. User saw
+        # particles accumulating where they expected drain. Now: loud
+        # raise upfront with the offending axis named.
+        for axis, (lo_v, hi_v) in enumerate(zip(self.lo, self.hi)):
+            if hi_v < lo_v:
+                axis_name = "xyz"[axis]
+                raise ValueError(
+                    f"OutflowBox: hi[{axis_name}]={hi_v} < lo[{axis_name}]"
+                    f"={lo_v}. Outflow box AABB must have hi >= lo on "
+                    f"every axis (got lo={self.lo}, hi={self.hi}).")
+
     def publish_for_frame(self, queue, frame_idx: int) -> None:
         """F3.6.C1 dual-path: push a FluidOutflowEvent describing the
         cull bbox if this outflow is active for `frame_idx`. The solver

@@ -184,6 +184,16 @@ def apply_eevee_preset(scene: Any, samples: int = 16) -> dict:
     so tests can verify across Blender version differences.
     """
     log: dict[str, Any] = {}
+    # Round-44: skip if scene's render engine is not Eevee. Pre-
+    # round-44 the function mutated scene.eevee unconditionally;
+    # under engine='CYCLES' / 'BLENDER_WORKBENCH' the Cycles render
+    # ignores the changes but the hidden Eevee state was silently
+    # corrupted. If the user later switched back to Eevee they got
+    # the headless preset (no bloom/SSR/GTAO) without asking.
+    engine = getattr(getattr(scene, "render", None), "engine", None)
+    if engine and engine not in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+        log["skipped_engine"] = engine
+        return log
     ee = getattr(scene, "eevee", None)
     if ee is None:
         return log
