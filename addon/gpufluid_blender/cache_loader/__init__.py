@@ -311,15 +311,21 @@ class PreloadCache:
 _PRELOAD: PreloadCache = PreloadCache()
 
 
-# Blender's addon prefs are keyed by the addon-root package, which is the
-# parent of this module — NOT __package__ verbatim and NOT the top-level
-# segment. Examples seen live:
-#   * Legacy install: __package__ == "gpufluid_blender.cache_loader"
-#     → addon-root = "gpufluid_blender"
-#   * 4.2+ extension: __package__ == "bl_ext.user_default.gpufluid_blender.cache_loader"
-#     → addon-root = "bl_ext.user_default.gpufluid_blender"
-# rsplit one level off — works for both layouts.
-_ADDON_PKG = (__package__ or "").rsplit(".", 1)[0]
+# Round-18 (senior code-smell #5): centralised. Was
+# `__package__.rsplit('.', 1)[0]` which works by coincidence only for a
+# one-level-nested submodule. Import the addon-root constant from the
+# addon's `__init__.py` — the single source of truth (works at any
+# nesting depth + any addon install layout).
+#
+# Test-stub fallback: unit tests load this package via
+# `spec_from_file_location` with a synthetic `gpufluid_blender` parent
+# that doesn't carry ADDON_PKG. In that path we fall back to the
+# rsplit pattern — the fallback only fires under test stubs, never
+# in real Blender.
+try:
+    from .. import ADDON_PKG as _ADDON_PKG
+except ImportError:
+    _ADDON_PKG = (__package__ or "").rsplit(".", 1)[0]
 
 
 def _preload_cap() -> int:

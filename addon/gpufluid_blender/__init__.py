@@ -19,6 +19,21 @@ logger = logging.getLogger("gpufluid.addon")
 logger.addHandler(logging.NullHandler())
 
 
+# Round-18 (senior code-smell #5, lesson 9.10): single source of truth for
+# the addon-root package name. Used as the key into
+# `bpy.context.preferences.addons[...]`. THIS file lives at the addon root,
+# so its `__package__` IS the addon root, regardless of layout:
+#   * Legacy install:        ADDON_PKG == "gpufluid_blender"
+#   * 4.2+ extension install: ADDON_PKG == "bl_ext.user_default.gpufluid_blender"
+#
+# Previously nested modules (cache_loader/__init__.py) did
+# `__package__.rsplit('.', 1)[0]` — works ONLY because cache_loader is
+# exactly one level deep. A future nested-deeper submodule would silently
+# get the wrong key + fall through to default prefs. Centralised here so
+# every consumer imports the SAME constant via `from .. import ADDON_PKG`.
+ADDON_PKG: str = __package__
+
+
 bl_info = {
     "name": "gpufluid",
     "author": "gpufluid contributors",

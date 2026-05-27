@@ -15,6 +15,11 @@ import os
 import shutil
 import sys
 
+# Round-18: single-source-of-truth addon-root package name.
+# Replaces `__package__` direct use — would silently mis-key on prefs
+# lookup if `preferences.py` ever moved into a subpackage.
+from . import ADDON_PKG
+
 
 def _has_gpufluid(python_exe: str) -> bool:
     """Return True if the given Python can import gpufluid (quick subprocess)."""
@@ -84,7 +89,7 @@ class GPUFLUID_OT_detect_interpreter(bpy.types.Operator):
                       "($VIRTUAL_ENV, $GPUFLUID_PYTHON, or python on PATH)")
 
     def execute(self, context):
-        prefs = context.preferences.addons[__package__].preferences
+        prefs = context.preferences.addons[ADDON_PKG].preferences
         guess = _detect_interpreter()
         if not guess:
             self.report({"WARNING"},
@@ -145,7 +150,7 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
 
 
 def get_prefs(context) -> "GpufluidPreferences":
-    return context.preferences.addons[__package__].preferences
+    return context.preferences.addons[ADDON_PKG].preferences
 
 
 def auto_fill_interpreter_on_first_use() -> None:
@@ -154,7 +159,7 @@ def auto_fill_interpreter_on_first_use() -> None:
     something useful. No-op if the user has already set it (so we never
     overwrite a deliberate choice)."""
     try:
-        prefs = bpy.context.preferences.addons[__package__].preferences
+        prefs = bpy.context.preferences.addons[ADDON_PKG].preferences
     except (KeyError, AttributeError):
         return
     if prefs.interpreter_path.strip():
