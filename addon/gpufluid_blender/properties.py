@@ -278,7 +278,13 @@ class GpufluidObstacleProps(bpy.types.PropertyGroup):
 class GpufluidInflowProps(bpy.types.PropertyGroup):
     is_inflow: bpy.props.BoolProperty(name="Is gpufluid Inflow", default=False)
     velocity: bpy.props.FloatVectorProperty(
-        name="Initial velocity", default=(0.0, -3.0, 0.0), size=3, subtype="VELOCITY",
+        name="Initial velocity", default=(0.0, 0.0, 0.0), size=3, subtype="VELOCITY",
+        description="Per-particle initial velocity (m/s, world axes). "
+                    "Default (0,0,0) = pure gravity drop. Set Z<0 for a "
+                    "downward kick like a faucet; set X/Y for a hose-style "
+                    "sideways spray. Pre-round-51 default was (0,-3,0) — "
+                    "live-test caught: silently shot particles sideways "
+                    "even when the user expected gravity-only flow.",
     )
     rate_per_sec: bpy.props.FloatProperty(name="Particles/sec", default=10000.0, min=0.0)
     frame_start: bpy.props.IntProperty(name="Frame Start", default=0, min=0)
