@@ -270,7 +270,27 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     print(f"[mpm] particles={solver.n_particles} "
           f"(initial={n_init}, inflow_pool={n_inflow})  "
           f"cubes={len(cubes)}  inflows={len(inflows)}  out={cache_dir}")
-    solver.run(particles_dir, progress=True)
+    # Round-20: catch MpmDivergenceError + write truncated cache.json +
+    # exit rc=2. Pre-round-20 path silently swallowed NaN-divergence
+    # via `print + break` in solver.run, leaving rc=0 + a misleading
+    # cache.json with full frame_count. Addon's round-10 truncation
+    # sanity caught it via mesh count vs cache.json mismatch, but the
+    # user got no specific signal about WHY.
+    from ..sim.mpm.solver import MpmDivergenceError
+    truncated_at: int | None = None
+    try:
+        solver.run(particles_dir, progress=True)
+    except MpmDivergenceError as exc:
+        truncated_at = exc.last_dumped_frame
+        # Stderr so addon's stdout-drain doesn't conflate with progress.
+        import sys as _sys
+        print(
+            f"[mpm] {exc} — recovery: lower bulk_modulus (default 1500), "
+            f"lower dt, or shrink resolution. See docs/BACKLOG.md MPM "
+            f"stability entry.", file=_sys.stderr)
+        # Fall through to mesh pass below: meshes whatever frames were
+        # successfully dumped to particles_raw, writes truthful
+        # cache.json with truncated_at_frame, then exits rc=2.
 
     # Mesh pass — turn the per-frame point clouds into triangle meshes
     # the addon's Attach Cache (A8.6) can stream.
@@ -380,10 +400,16 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         # default to it. Re-enable once we have a single-object animated-
         # vertex Alembic writer (likely via pyalembic, not wm.alembic_export).
     else:
-        frame_count = cfg.n_frames // cfg.dump_every + 1
+        # Round-20: count actual particles_raw files on disk, not the
+        # requested target. Matters when MPM diverged — pre-round-20
+        # this reported the FULL n_frames count even on truncated bakes.
+        frame_count = len(list(particles_dir.glob("sim_*.ply")))
 
-    # Cache manifest so A8.6 / A8.12 can locate the bake.
-    (cache_dir / "cache.json").write_text(json.dumps({
+    # Cache manifest so A8.6 / A8.12 can locate the bake. If MPM
+    # diverged, frame_count reports the ACTUAL written count (so the
+    # addon's preload reads exactly what's on disk) and
+    # truncated_at_frame is the divergence point.
+    manifest = {
         "schema_version": 1,
         "gpufluid_version": __version__,
         "solver": "mpm",
@@ -395,8 +421,15 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         "resolution": list(scene.domain.resolution),
         "dx": scene.dx,
         "notes": f"sim={sim.frames * sim.dt:.2f}s",
-    }, indent=2))
-    return 0
+    }
+    if truncated_at is not None:
+        # Round-20: surface the divergence point so the addon's
+        # _runner.py can give a specific ERROR message instead of the
+        # generic "subprocess failed rc=2".
+        manifest["truncated_at_frame"] = int(truncated_at)
+        manifest["truncation_reason"] = "mpm_divergence"
+    (cache_dir / "cache.json").write_text(json.dumps(manifest, indent=2))
+    return 0 if truncated_at is None else 2
 
 
 def cmd_simulate(args: argparse.Namespace) -> int:

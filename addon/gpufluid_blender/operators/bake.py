@@ -471,6 +471,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 self, argv, int(self.sync_timeout_sec),
                 log_prefix="bake", logger=logger,
                 on_complete=self._sync_post_bake_then_attach,
+                friendly_error_for_rc=self._friendly_error_for_rc,
             )
             return res
 
@@ -486,6 +487,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             frame_regex=_FRAME_RE,
             on_progress=self._update_status,
             logger=logger, log_prefix="bake",
+            friendly_error_for_rc=self._friendly_error_for_rc,
         )
         if result is None:
             return {"PASS_THROUGH"}
@@ -507,6 +509,31 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         """Called by runner.tick_modal on each parsed `frame N/M` line."""
         bpy.context.workspace.status_text_set(
             f"gpufluid: frame {current}/{total}")
+
+    def _friendly_error_for_rc(self, rc: int):
+        """Round-20: translate CLI rc into actionable error message.
+        Reads ``<cache_dir>/cache.json`` for the rc=2 (MPM divergence)
+        case — surfaces the truncated frame + recovery hint. Returns
+        ``None`` when no specific guidance applies (runner falls back
+        to generic 'rc=N' wording)."""
+        if rc != 2:
+            return None
+        try:
+            import json as _json
+            manifest = _json.loads(
+                (Path(self._cache_dir_str) / "cache.json").read_text())
+            if manifest.get("truncation_reason") != "mpm_divergence":
+                return None
+            frame = manifest.get("truncated_at_frame", "?")
+            total = manifest.get("frame_count", "?")
+            return (
+                f"gpufluid bake: MPM solver diverged at frame {frame}; "
+                f"{total} valid frames written to {self._cache_dir_str}. "
+                f"Recovery: lower Bulk Modulus (default 1500), lower dt, "
+                f"or shrink resolution, then re-bake. Use 'Attach Cache' "
+                f"to load the partial result.")
+        except Exception:
+            return None
 
     def _sync_post_bake_then_attach(self) -> None:
         """Sync on_complete: run truncation sanity, then auto-attach.
