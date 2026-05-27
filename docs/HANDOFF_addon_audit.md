@@ -1,4 +1,4 @@
-# Addon-audit branch — session handoff (last updated 2026-05-26, round-19)
+# Addon-audit branch — session handoff (last updated 2026-05-27, round-26)
 
 > **Read this file first** if you're continuing work on the addon
 > audit / refactor sprint. Self-contained — does NOT depend on the
@@ -484,3 +484,79 @@ The branch represents a complete production-hardening sprint of the
 addon. If you're picking up after merge, the addon should behave
 exactly as documented in `docs/QUICKSTART.md` and any deviation is a
 regression worth investigating with the cert harness first.
+
+---
+
+## 2026-05-27 update: rounds 20-26 on `feat/mpm-stability`
+
+After merging `fix/addon-audit-fixes` to main, a new sprint focused
+on MPM solver stability + remaining whitewater bugs landed on a
+fresh branch `feat/mpm-stability`. 7 commits, 3 reviewer rounds
+(21/23/25/27) each independent, each found new real bugs.
+
+**What shipped:**
+
+- **Round-20** — `MpmDivergenceError`: solver raises typed exception
+  on NaN (per-step check; was silent `print + break`); CLI writes
+  truthful `cache.json` with `truncated_at_frame`, exits rc=2; addon
+  `OT_bake` reads cache.json on rc=2 → friendly recovery message.
+- **Round-21** — fixed CRITICAL `cmd_render` duplicate that left
+  `cmd_bench` unregistered + HIGH mesh-pass sidecar index desync
+  (gap in PLY sequence offset colours by N frames).
+- **Round-22** — 4 MEDIUMs: render_bridge frame 0 → idx −1 (silent
+  no-op + negative sim-time text), colour-count mismatch silent
+  drop (now WARNING logged), `MpmSolver.__del__` `TypeError` at
+  interpreter shutdown, hardcoded `default_rng(42)` → `cfg.seed`.
+- **Round-23** — CRITICAL whitewater Z-up: entire feature applied
+  gravity / spawn_offset / kick to Y while project is Z-up; tests
+  were written to match the bug (best example of lesson §9.2).
+  Plus HIGH: `scene.simulation.gravity` was dropped into legacy
+  cfg fields the new step() doesn't read; HIGH:
+  `whitewater_trapped_air_weight` missing from addon emit; LOW:
+  start_sync's Thread() construction missing orphan-Popen-kill
+  guard (mirror drift INSIDE one class — lesson §9.6).
+- **Round-24** — closed deferred items: CI script wipes CACHE_DIR
+  before run (was: stale files satisfied count gates, lesson §9.2),
+  per-frame sidecar de-dup (write once at frame 0, mesher falls
+  back), whitewater attach shape-mismatch guard.
+- **Round-25** — HIGH: MPM inflow gate used `==` not `>=` — any
+  particle with `spawn_step = 0` (rounded from `frame_floats < 1/
+  dump_every`) stayed pinned forever, silently dropped from PLY.
+  Plus MEDIUMs: `_rebuild_mesh` cleared geometry before validating
+  (corrupt mid-sequence PLY blanked screen); `_headless_render`
+  malformed-JSON traceback (now one-line SystemExit); LOW: ASCII
+  PLY silently misparsed in addon's parallel reader; LOW:
+  `seed_inflow_particles` reversed range now raises early.
+- **Round-26 (self-review)** — zero-gravity scene bug I introduced
+  in round-23: the ratio guard `if g_scene != 0.0 else 1.0` was
+  meant for div-by-zero (no such risk) but inverted user intent —
+  setting gravity=0 snapped per-class gravities back to defaults.
+  Dropped guard, added source-grep regression test.
+
+**State of test suite:** 82 unit tests green (rounds 20-26 added 26
+new across `test_mpm_divergence`, `test_round22_fixes`,
+`test_round23_fixes`, `test_round24_fixes`, `test_round25_fixes`).
+Three source-grep contract tests (whitewater gravity ratio form,
+MPM inflow gate form, cmd_render duplicate guard).
+
+**Branch state:** `feat/mpm-stability` is 7 commits beyond `main`.
+Ready for review/merge; cert harness needs re-run on this branch.
+
+**Open follow-ups:**
+- LOW: pushback `_post_step` doesn't re-gate held particles; only
+  bookkeeping, no user-visible artefact.
+- LOW: `MpmConfig.fps`/`device` defaults written to public dataclass
+  but per-bake overrides in scene config — minor documentation gap.
+
+Lessons added (to be added to `~/.claude/CLAUDE.md §9` on next
+update):
+
+- **§9.11 (candidate)**: when introducing a guard, explicitly state
+  what it's for IN A COMMENT. Round-26 caught the round-23 guard
+  inverting user intent because there was no comment to tell future-
+  me what the guard was supposed to dodge.
+- **§9.12 (candidate)**: source-grep contract tests are cheap regression
+  insurance for "must / must not" patterns the actual test can't
+  exercise (e.g. kernels needing CUDA, removed forms with no test
+  representation). Round-21 cmd_render dup + round-25 inflow gate
+  + round-26 gravity ratio all use this pattern.
