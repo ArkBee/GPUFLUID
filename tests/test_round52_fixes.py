@@ -35,7 +35,7 @@ def test_bake_warns_on_bbox_with_rotation():
     assert bbox_pos > 0, "BBOX branch missing — collect_scene refactored?"
     # Within 600 chars after the branch, must reference rotation_euler
     # and a warnings.append call.
-    window = code[bbox_pos:bbox_pos + 800]
+    window = code[bbox_pos:bbox_pos + 1600]  # widened round-54
     assert "rotation_euler" in window, (
         "round-52 regressed: BBOX branch must inspect rotation_euler")
     assert "warnings.append" in window, (

@@ -120,27 +120,53 @@ def collect_scene(context, domain_obj):
         # the unit cube even when the domain is anisotropic.
         avg_inv = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
         if oprops.obstacle_type == "BBOX":
-            # Round-52/53: detect non-identity rotation on a BBOX
-            # obstacle. The world-space AABB collapses rotation into an
-            # axis-aligned box that is BIGGER than the original mesh
-            # AND silently drops the orientation — MPM has no idea the
-            # cube is tilted. Round-52 emitted only a warning; round-53
-            # AUTO-PROMOTES to MESH type (which exports world-space
-            # vertices via _export_obj — rotation baked in — and routes
-            # through D4.3.GPU.BVH SDF mesh-marker which IS orientation-
-            # aware). User still gets a one-line INFO so they know the
-            # promotion happened.
+            # Round-52/53/54: detect "this BBOX won't fit the geometry"
+            # and auto-promote to MESH. Two trigger paths:
+            #   (a) `rotation_euler != 0` (round-53): visible tilt
+            #       not yet baked into mesh data.
+            #   (b) round-54 — Apply Rotation (Ctrl+A → R) zeroes
+            #       rotation_euler but BAKES the rotation into mesh
+            #       vertex data. round-53 detection misses this case
+            #       and falls back to AABB-of-rotated-mesh (bigger fat
+            #       box again). Now we ALSO check if the mesh's loop
+            #       triangles all have axis-aligned face normals — if
+            #       any face normal isn't ±X/±Y/±Z within 5°, the mesh
+            #       isn't an axis-aligned cube and BBOX type will
+            #       butcher it. Promote.
             rx, ry, rz = (float(c) for c in o.rotation_euler)
-            if abs(rx) + abs(ry) + abs(rz) > 1e-4 and o.type == "MESH":
-                deg = (f"({rx*57.2958:+.1f}°, {ry*57.2958:+.1f}°, "
-                       f"{rz*57.2958:+.1f}°)")
+            rotation_nonzero = abs(rx) + abs(ry) + abs(rz) > 1e-4
+
+            non_axis_aligned = False
+            if o.type == "MESH" and not rotation_nonzero:
+                try:
+                    me = o.data
+                    me.calc_loop_triangles()
+                    for tri in me.loop_triangles:
+                        n = tri.normal
+                        # axis-aligned if dominant axis component is
+                        # essentially ±1 (other two near zero). cos(5°)
+                        # ≈ 0.996. Use 0.99 for a safe margin.
+                        if max(abs(n.x), abs(n.y), abs(n.z)) < 0.99:
+                            non_axis_aligned = True
+                            break
+                except Exception:
+                    pass
+
+            if (rotation_nonzero or non_axis_aligned) and o.type == "MESH":
+                if rotation_nonzero:
+                    deg = (f"({rx*57.2958:+.1f}°, {ry*57.2958:+.1f}°, "
+                           f"{rz*57.2958:+.1f}°)")
+                    why = f"rotation {deg}"
+                else:
+                    why = ("mesh has non-axis-aligned faces — "
+                           "rotation was Apply'd into mesh data")
                 warnings.append(
-                    f"obstacle '{o.name}' BBOX type + rotation {deg} → "
-                    f"auto-promoted to MESH so the solver sees the tilt "
-                    f"(was: axis-aligned bbox of rotated corners, bigger "
-                    f"than the mesh + tilt lost). To opt out, zero the "
-                    f"rotation and bake the rotation into the mesh data "
-                    f"via Apply Rotation (Ctrl+A).")
+                    f"obstacle '{o.name}' BBOX type + {why} → "
+                    f"auto-promoted to MESH so the solver sees the "
+                    f"real shape (was: axis-aligned bbox bigger than "
+                    f"the mesh + orientation lost). For axis-aligned "
+                    f"primitives use BBOX directly; for anything "
+                    f"tilted/non-cube, MESH is the right type.")
                 # Inline the MESH branch instead of jumping with goto-
                 # like control flow.
                 mesh_path = os.path.join(
