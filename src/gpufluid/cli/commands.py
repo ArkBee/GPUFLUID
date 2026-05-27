@@ -270,7 +270,27 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     print(f"[mpm] particles={solver.n_particles} "
           f"(initial={n_init}, inflow_pool={n_inflow})  "
           f"cubes={len(cubes)}  inflows={len(inflows)}  out={cache_dir}")
-    solver.run(particles_dir, progress=True)
+    # Round-20: catch MpmDivergenceError + write truncated cache.json +
+    # exit rc=2. Pre-round-20 path silently swallowed NaN-divergence
+    # via `print + break` in solver.run, leaving rc=0 + a misleading
+    # cache.json with full frame_count. Addon's round-10 truncation
+    # sanity caught it via mesh count vs cache.json mismatch, but the
+    # user got no specific signal about WHY.
+    from ..sim.mpm.solver import MpmDivergenceError
+    truncated_at: int | None = None
+    try:
+        solver.run(particles_dir, progress=True)
+    except MpmDivergenceError as exc:
+        truncated_at = exc.last_dumped_frame
+        # Stderr so addon's stdout-drain doesn't conflate with progress.
+        import sys as _sys
+        print(
+            f"[mpm] {exc} — recovery: lower bulk_modulus (default 1500), "
+            f"lower dt, or shrink resolution. See docs/BACKLOG.md MPM "
+            f"stability entry.", file=_sys.stderr)
+        # Fall through to mesh pass below: meshes whatever frames were
+        # successfully dumped to particles_raw, writes truthful
+        # cache.json with truncated_at_frame, then exits rc=2.
 
     # Mesh pass — turn the per-frame point clouds into triangle meshes
     # the addon's Attach Cache (A8.6) can stream.
@@ -297,17 +317,24 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             from ..meshing.colormap import get_colormap
             cmap_fn = get_colormap(cmap_name)
         use_temp_color = bool(cmap_fn) and has_temp_path
-        frame_idx = 0
+        # Round-21: index sidecars by `step // dump_every`, not by a
+        # local counter. The solver writes sidecar
+        # `colors/frame_NNNN.npy` with NNNN = step // dump_every
+        # (solver.py save_frame_ply); a local counter that only
+        # increments on success would mis-align by every missing PLY,
+        # silently swapping colour data between frames.
+        frames_written = 0
         for step in range(0, cfg.n_frames + 1, cfg.dump_every):
             ply = particles_dir / f"sim_{step:010d}.ply"
             if not ply.exists():
                 continue
+            frame_idx = step // max(1, cfg.dump_every)
             pts = read_points_ply(ply)
             if pts.shape[0] == 0:
                 write_ply(mesh_dir / f"frame_{frame_idx:04d}.ply",
                           np.zeros((0, 3), np.float32),
                           np.zeros((0, 3), np.int32))
-                frame_idx += 1
+                frames_written += 1
                 continue
             pos_wp = wp.array(pts, dtype=wp.vec3, device=mesher.device)
             v, fc = mesher.extract(
@@ -328,14 +355,22 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             # the regular colour sidecar.
             vc_u8 = None
             cols_np = None  # (P, 3) float32 in [0,1] for whichever source
+            # Round-24: sidecars now de-duplicated — frame 0 written
+            # once; subsequent frames only get their own .npy when the
+            # particle count drifts (mid-bake spawn/death). Fall back
+            # to frame_0000.npy whenever the per-frame file is absent.
             if use_temp_color and v.shape[0] > 0:
                 temp_path = temps_dir / f"frame_{frame_idx:04d}.npy"
+                if not temp_path.exists():
+                    temp_path = temps_dir / "frame_0000.npy"
                 if temp_path.exists():
                     temps_np = np.load(temp_path).astype(np.float32)
                     if temps_np.shape[0] == pts.shape[0]:
                         cols_np = cmap_fn(temps_np, t_min_cfg, t_max_cfg)
             if cols_np is None and has_color_path and v.shape[0] > 0:
                 col_path = colors_dir / f"frame_{frame_idx:04d}.npy"
+                if not col_path.exists():
+                    col_path = colors_dir / "frame_0000.npy"
                 if col_path.exists():
                     loaded = np.load(col_path).astype(np.float32)
                     if loaded.shape[0] == pts.shape[0]:
@@ -361,8 +396,8 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                     )
             write_ply(mesh_dir / f"frame_{frame_idx:04d}.ply", v, fc,
                       vertex_colors=vc_u8)
-            frame_idx += 1
-        frame_count = frame_idx
+            frames_written += 1
+        frame_count = frames_written
         if use_temp_color:
             cmode = f" (vertex colour from temperature: {cmap_name})"
         elif has_color_path:
@@ -380,10 +415,16 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         # default to it. Re-enable once we have a single-object animated-
         # vertex Alembic writer (likely via pyalembic, not wm.alembic_export).
     else:
-        frame_count = cfg.n_frames // cfg.dump_every + 1
+        # Round-20: count actual particles_raw files on disk, not the
+        # requested target. Matters when MPM diverged — pre-round-20
+        # this reported the FULL n_frames count even on truncated bakes.
+        frame_count = len(list(particles_dir.glob("sim_*.ply")))
 
-    # Cache manifest so A8.6 / A8.12 can locate the bake.
-    (cache_dir / "cache.json").write_text(json.dumps({
+    # Cache manifest so A8.6 / A8.12 can locate the bake. If MPM
+    # diverged, frame_count reports the ACTUAL written count (so the
+    # addon's preload reads exactly what's on disk) and
+    # truncated_at_frame is the divergence point.
+    manifest = {
         "schema_version": 1,
         "gpufluid_version": __version__,
         "solver": "mpm",
@@ -395,8 +436,15 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         "resolution": list(scene.domain.resolution),
         "dx": scene.dx,
         "notes": f"sim={sim.frames * sim.dt:.2f}s",
-    }, indent=2))
-    return 0
+    }
+    if truncated_at is not None:
+        # Round-20: surface the divergence point so the addon's
+        # _runner.py can give a specific ERROR message instead of the
+        # generic "subprocess failed rc=2".
+        manifest["truncated_at_frame"] = int(truncated_at)
+        manifest["truncation_reason"] = "mpm_divergence"
+    (cache_dir / "cache.json").write_text(json.dumps(manifest, indent=2))
+    return 0 if truncated_at is None else 2
 
 
 def cmd_simulate(args: argparse.Namespace) -> int:
@@ -463,10 +511,16 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 raise BlockError("C7.2", f"motion not supported on obstacle: {type(ob).__name__}")
     # v0.5 — register inflows / outflows
     for inf in scene.inflow:
+        # Round-46: forward per-inflow color + temperature. Pre-round-46
+        # the construction dropped both even though `InflowCfg` exposed
+        # them (round-45 reviewer caught: MPM path forwarded, FLIP
+        # didn't → mirror drift §9.6, particles spawned default-black).
         solver.add_inflow(InflowBox(
             lo=inf.lo, hi=inf.hi, velocity=inf.velocity,
             rate_per_sec=inf.rate_per_sec,
             frame_start=inf.frame_start, frame_end=inf.frame_end,
+            color=getattr(inf, "color", None),
+            temperature=getattr(inf, "temperature", None),
         ))
     for out in scene.outflow:
         solver.add_outflow(OutflowBox(
@@ -517,12 +571,36 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     ww_dir = None
     if scene.output.whitewater:
         from ..sim.whitewater import WhitewaterSystem, WhitewaterConfig
+        # Round-23: pre-round-23 we set the legacy `gravity` +
+        # `lifetime_sec` fields and they were silently dropped — the
+        # actual step() reads only the per-class `gravity_foam/spray
+        # /bubble` and `lifetime_foam/spray/bubble` fields. User-set
+        # scene.simulation.gravity (low-G scene) or
+        # whitewater_lifetime_sec had ZERO effect. Round-23 fans them
+        # out: `gravity_spray` = scene gravity (full G), bubble/foam
+        # scaled relative to their defaults (-9.81); lifetime_sec
+        # applied uniformly to all three classes.
+        g_scene = float(scene.simulation.gravity)
+        # Round-26 self-fix: pre-round-26 the guard was `if g_scene !=
+        # 0.0 else 1.0` — meant to dodge a non-existent div-by-zero,
+        # but it inverted user intent: setting gravity=0 (zero-G scene)
+        # snapped ratio back to 1.0 and per-class gravities to their
+        # full defaults. Now ratio is just `g_scene / -9.81`; zero
+        # gravity correctly zeros all three per-class gravities.
+        ratio = g_scene / -9.81
+        life = float(scene.output.whitewater_lifetime_sec)
         ww_cfg = WhitewaterConfig(
             speed_threshold=scene.output.whitewater_speed_threshold,
             emit_per_frame_max=scene.output.whitewater_emit_per_frame_max,
             total_cap=scene.output.whitewater_total_cap,
-            lifetime_sec=scene.output.whitewater_lifetime_sec,
-            gravity=scene.simulation.gravity,
+            lifetime_sec=life,
+            lifetime_foam=life,
+            lifetime_spray=life,
+            lifetime_bubble=life,
+            gravity=g_scene,
+            gravity_spray=-9.81 * ratio,   # full gravity (down)
+            gravity_foam=-0.5 * ratio,     # near-neutral
+            gravity_bubble=+3.0 * ratio,   # buoyant (sign preserved)
         )
         ww_sys = WhitewaterSystem(ww_cfg)
         ww_dir = cache_dir / "whitewater"; ww_dir.mkdir(exist_ok=True)
@@ -543,6 +621,12 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
     start_frame = int(getattr(args, "start_frame", 0))
     checkpoint_every = int(getattr(args, "checkpoint_every", 0))
+    # Round-32: FLIP divergence trap (mirror of MPM round-20).
+    # FlipSolver3D had NO NaN guard pre-round-32 — divergent pressure
+    # oscillation produced NaN particle velocities, propagated, and
+    # cache.json reported full frame_count with garbage PLYs.
+    from ..solvers.solver3d import FlipDivergenceError
+    flip_truncated_at: int | None = None
     for frame in range(start_frame, scene.simulation.frames):
         # v0.5 per-frame hook: anim obstacles + inflow/outflow
         solver.prepare_frame(frame, 1.0 / scene.simulation.fps)
@@ -574,11 +658,34 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 # Refresh marker host snapshot — the per-step P2G marker is only
                 # live on GPU, so without this the reseed sees only walls/obstacles.
                 current_marker = solver.marker.numpy()
-                new_pos, new_vel, n_emit, n_cull = reseed_particles(
-                    cur_pos, cur_vel, current_marker, solver.dx, reseed_cfg, rng_reseed)
+                # Round-36: pass attrs through CPU reseed so they stay
+                # row-aligned with pos/vel (round-35 reviewer caught
+                # exact §9.6 mirror-drift — GPU path got attr handling
+                # in round-34, CPU sibling forgotten). Variant return:
+                # 6-tuple when any attr is non-None, else 4-tuple.
+                cur_col = (solver.attr_color.numpy()
+                           if solver.attr_color is not None else None)
+                cur_temp = (solver.attr_temperature.numpy()
+                            if solver.attr_temperature is not None else None)
+                has_attrs = cur_col is not None or cur_temp is not None
+                out = reseed_particles(
+                    cur_pos, cur_vel, current_marker, solver.dx, reseed_cfg,
+                    rng_reseed,
+                    attr_color=cur_col, attr_temperature=cur_temp)
+                if has_attrs:
+                    new_pos, new_vel, n_emit, n_cull, new_col, new_temp = out
+                else:
+                    new_pos, new_vel, n_emit, n_cull = out
+                    new_col, new_temp = None, None
                 if n_emit > 0 or n_cull > 0:
                     solver.pos = wp.array(new_pos, dtype=wp.vec3, device=solver.device)
                     solver.vel = wp.array(new_vel, dtype=wp.vec3, device=solver.device)
+                    if new_col is not None:
+                        solver.attr_color = wp.array(
+                            new_col, dtype=wp.vec3, device=solver.device)
+                    if new_temp is not None:
+                        solver.attr_temperature = wp.array(
+                            new_temp, dtype=float, device=solver.device)
                     solver.affine_C = None
                     solver.n_particles = len(new_pos)
         ts = time.time()
@@ -598,6 +705,18 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                             pressure_iters=scene.simulation.pressure_iters,
                             pressure_solver=scene.simulation.pressure_solver)
         t_sim_total += time.time() - ts
+        # Round-32: NaN check once per frame. step+step_cfl don't raise
+        # on divergence — we sample positions and break out so the
+        # cache.json can be written with truncated_at_frame instead of
+        # the misleading full frame_count.
+        if solver.has_diverged():
+            flip_truncated_at = frame
+            print(
+                f"[flip] solver diverged at frame {frame} "
+                f"(last dumped: {frame}/{scene.simulation.frames}). "
+                f"Recovery: lower dt, raise pressure_iters, or shrink "
+                f"resolution.", file=sys.stderr)
+            break
 
         if extractor is not None:
             tm = time.time()
@@ -724,15 +843,28 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         write_usd_mesh_sequence(usd_path, usd_frames, fps=scene.simulation.fps)
         print(f"           wrote USD: {usd_path}")
 
+    # Round-32: if FLIP diverged, frame_count reports ACTUAL written
+    # frames (not the cfg target), and we inject truncation_reason
+    # via the manifest. The dataclass-typed manifest filters unknown
+    # keys (round-31 reviewer #3 schema-drift finding), so we have to
+    # write through raw JSON for the truncation marker. Done below.
+    flip_frame_count = (
+        flip_truncated_at + 1 if flip_truncated_at is not None
+        else scene.simulation.frames)
     manifest = CacheManifest(
         fps=scene.simulation.fps,
-        frame_count=scene.simulation.frames,
+        frame_count=flip_frame_count,
         mesh_pattern="mesh/frame_{:04d}.ply",
         particles_pattern="particles/frame_{:04d}.npy" if scene.output.particles else None,
         domain_size=list(scene.domain_size),
         resolution=list(scene.domain.resolution),
         dx=scene.dx,
         notes=f"sim={t_sim_total:.1f}s mesh={t_mesh_total:.1f}s",
+        solver="flip",
+        truncated_at_frame=(int(flip_truncated_at)
+                            if flip_truncated_at is not None else None),
+        truncation_reason=("flip_divergence"
+                           if flip_truncated_at is not None else None),
     )
     manifest_path = write_cache_manifest(cache_dir, manifest)
     print(f"[gpufluid] done. cache: {cache_dir}  manifest: {manifest_path.name}")
@@ -766,7 +898,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         else:
             print("[gpufluid] cuda-graph: not eligible for any step "
                   "(PCG and pressure_block_sparse=true still fall through)")
-    return 0
+    return 0 if flip_truncated_at is None else 2
 
 
 # ---------------------------------------------------------------------------
@@ -818,44 +950,6 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 # [BLK C7.3]
 @block("C7.3", "bench command: solver throughput")
-@block("A8.12",
-       "Headless render CLI command — spawns Blender with the addon render bridge")
-def cmd_render(args: argparse.Namespace) -> int:
-    """Spawn a headless Blender process to render a baked cache.
-
-    The actual Eevee work happens inside Blender's Python via the
-    addon's ``render_bridge`` module (A8.9-A8.11). This command just
-    constructs the subprocess command line.
-    """
-    import subprocess, json as _json
-    cache_dir = Path(args.cache).resolve()
-    scene_toml = Path(args.scene).resolve()
-    out_dir = Path(args.out).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cache_json = cache_dir / "cache.json"
-    if not cache_json.exists():
-        raise BlockError("A8.12", f"cache.json not found in {cache_dir}")
-    blender = args.blender or "blender"
-    # Locate the bundled render driver script
-    driver = Path(__file__).resolve().parents[3] / "addon" / "gpufluid_blender" / "_headless_render.py"
-    if not driver.exists():
-        raise BlockError("A8.12", f"render driver missing: {driver}")
-    payload = _json.dumps({
-        "cache":  str(cache_dir),
-        "scene":  str(scene_toml),
-        "out":    str(out_dir),
-        "label":  args.label,
-        "color":  args.color,
-        "samples": args.samples,
-        "fps":    args.fps,
-        "frames": args.frames,
-    })
-    cmd = [blender, "--background", "--python", str(driver), "--", payload]
-    print(f"[render] launching: {' '.join(cmd[:3])} ... ({len(payload)} bytes config)")
-    r = subprocess.run(cmd, check=False)
-    return r.returncode
-
-
 def cmd_bench(args: argparse.Namespace) -> int:
     cfgs = [(48, 8, 50, 100), (64, 8, 50, 100), (96, 4, 40, 50)]
     print("[gpufluid] solver throughput (3D, pure GPU)")
@@ -863,11 +957,21 @@ def cmd_bench(args: argparse.Namespace) -> int:
     for n, ppc, iters, n_steps in cfgs:
         s = FlipSolver3D(nx=n, ny=n, nz=n, dx=1.0 / n)
         s.seed_box(lo=(0.05, 0.05, 0.05), hi=(0.40, 0.70, 0.40), ppc=ppc)
+        # Round-50: pre-round-50 the warmup loop AND the timed loop ran
+        # without `wp.synchronize()` — `FlipSolver3D.step()` enqueues
+        # Warp kernels asynchronously and time.time() bracketed only
+        # the Python-side dispatch latency. Reported steps/s was
+        # inflated 5-50× (often by orders of magnitude); anyone
+        # comparing perf branches with `gpufluid bench` steered on
+        # noise. Fix: sync before start_time AND after the loop so
+        # the bracket covers actual GPU work.
         for _ in range(3):
             s.step(0.005, pressure_iters=iters)
+        wp.synchronize()       # warmup queue drained
         t = time.time()
         for _ in range(n_steps):
             s.step(0.005, pressure_iters=iters)
+        wp.synchronize()       # timed queue drained before clock-stop
         dt = time.time() - t
         print(f"  {n:>4}^3      {s.n_particles:>10} {iters:>5} {n_steps/dt:>10.1f} {1000*dt/n_steps:>9.2f}ms")
     return 0

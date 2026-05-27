@@ -28,7 +28,7 @@ from ..domain_transform import DomainTransform
 from ..preferences import get_prefs
 from ..scene_validator import out_of_domain_warning
 from ._animation import _bbox_world, _bbox_world_at_frame, _is_animated
-from ._collect import _export_obj, _output_dict
+from ._collect import _export_obj, _output_dict, _safe_obj_name
 from .helpers import subprocess_drain
 from ._runner import ModalSubprocessRunner
 
@@ -142,7 +142,11 @@ def collect_scene(context, domain_obj):
             # export object's mesh as OBJ next to scene.toml
             cache_dir = bpy.path.abspath(dprops.cache_dir)
             os.makedirs(cache_dir, exist_ok=True)
-            mesh_path = os.path.join(cache_dir, f"obstacle_{o.name}.obj")
+            # Round-38: sanitise the object name for filesystem use.
+            # Blender allows `/ \ : * ? < > | "` in obj.name; Windows
+            # `open()` raises OSError on any of them.
+            mesh_path = os.path.join(
+                cache_dir, f"obstacle_{_safe_obj_name(o.name)}.obj")
             _export_obj(o, mesh_path)
             # OBJ verts are in world metres — scale to the unit cube so the
             # solver's [0,1]³ collision sampling lands on the mesh.
@@ -194,8 +198,20 @@ def collect_scene(context, domain_obj):
             if getattr(iprops, "use_temperature", False):
                 entry["temperature"] = float(iprops.temperature)
             if _is_animated(o, context) and fe > fs:
+                # Round-38: clamp the keyframe window to what the bake
+                # will actually advance through. Pre-round-38 we
+                # iterated `range(fs, fe+1)` blindly — at the default
+                # `frame_end=10000` (properties.py) any inflow whose
+                # PARENT chain has an fcurve (camera ancestor, common
+                # constraint helper) triggered 10001 calls to
+                # `_matrix_world_at_frame` (each walks parent chain ×
+                # fcurves × evaluate) → 10–60s "collect" hang + ~MB
+                # scene.toml bloat. Bake only ever advances through
+                # `dprops.frames` frames; the rest are dead-letter
+                # rows the solver never reaches.
+                fe_eff = min(fe, fs + int(dprops.frames))
                 kfs = []
-                for f in range(fs, fe + 1):
+                for f in range(fs, fe_eff + 1):
                     lf, hf = _bbox_world_at_frame(o, f)
                     ls = to_sim(lf); hs = to_sim(hf)
                     kfs.append([f, ls[0], ls[1], ls[2], hs[0], hs[1], hs[2]])
@@ -241,10 +257,19 @@ def collect_scene(context, domain_obj):
             "mpm_cube_friction": dprops.mpm_cube_friction,
             "mpm_v_terminal": dprops.mpm_v_terminal,
             "mpm_vz_max_splash": dprops.mpm_vz_max_splash,
-            # m/s in UI → unit/s in solver basis. Matches the inflow-velocity
-            # convention (bake.py inflow path, ~line 321) so the column pours
-            # at the same speed regardless of domain world size.
-            "mpm_initial_velocity": float(dprops.mpm_initial_velocity) * inv_size[1],
+            # Round-30: pre-round-30 this pre-scaled by `inv_size[1]` (Y)
+            # — DOUBLE wrong: (1) the CLI then rescales by `inv_dom_z`
+            # (Z) at commands.py:238, so the resulting initial_velocity_z
+            # was multiplied by `inv_size[1] * inv_size[2]` — off by
+            # 4× on a 2:1 Y:Z aspect domain; (2) wrong axis entirely
+            # (Y not Z). Other MPM velocity knobs (mpm_v_terminal,
+            # mpm_vz_max_splash) ship UNSCALED from here and ride the
+            # CLI's single Z-rescaling — consistent. The pre-round-30
+            # comment claimed "matches inflow-velocity convention" but
+            # inflow uses per-axis `normalize_velocity`, not a single-
+            # axis pre-multiply. Now: ship UNSCALED, let the CLI do
+            # the single correct Z scaling once.
+            "mpm_initial_velocity": float(dprops.mpm_initial_velocity),
         },
         "output": _output_dict(dprops),
         # Phase 1 escape-hatch: raw TOML string deep-merged in config_builder.
@@ -471,6 +496,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 self, argv, int(self.sync_timeout_sec),
                 log_prefix="bake", logger=logger,
                 on_complete=self._sync_post_bake_then_attach,
+                friendly_error_for_rc=self._friendly_error_for_rc,
             )
             return res
 
@@ -486,13 +512,26 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             frame_regex=_FRAME_RE,
             on_progress=self._update_status,
             logger=logger, log_prefix="bake",
+            friendly_error_for_rc=self._friendly_error_for_rc,
         )
         if result is None:
             return {"PASS_THROUGH"}
         if "FINISHED" in result:
-            # Modal-success: do auto-attach, then INFO report.
-            self._auto_attach_post_bake()
-            self.report({"INFO"}, "gpufluid bake complete")
+            # Round-28: re-arm the class-level reentrance mutex around
+            # the auto-attach call. tick_modal._finish() cleared
+            # `_is_running=False` before returning FINISHED, opening a
+            # single-tick race window where the user clicking Bake
+            # again here would spawn a fresh subprocess while
+            # `_auto_attach_post_bake` is mid-mutation of `_PRELOAD`
+            # (live-found by round-27 reviewer). Hold the mutex for
+            # the attach call too; clear after.
+            cls = self.__class__
+            try:
+                cls._is_running = True
+                self._auto_attach_post_bake()
+                self.report({"INFO"}, "gpufluid bake complete")
+            finally:
+                cls._is_running = False
         return result
 
     def cancel(self, context):
@@ -507,6 +546,31 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         """Called by runner.tick_modal on each parsed `frame N/M` line."""
         bpy.context.workspace.status_text_set(
             f"gpufluid: frame {current}/{total}")
+
+    def _friendly_error_for_rc(self, rc: int):
+        """Round-20: translate CLI rc into actionable error message.
+        Reads ``<cache_dir>/cache.json`` for the rc=2 (MPM divergence)
+        case — surfaces the truncated frame + recovery hint. Returns
+        ``None`` when no specific guidance applies (runner falls back
+        to generic 'rc=N' wording)."""
+        if rc != 2:
+            return None
+        try:
+            import json as _json
+            manifest = _json.loads(
+                (Path(self._cache_dir_str) / "cache.json").read_text())
+            if manifest.get("truncation_reason") != "mpm_divergence":
+                return None
+            frame = manifest.get("truncated_at_frame", "?")
+            total = manifest.get("frame_count", "?")
+            return (
+                f"gpufluid bake: MPM solver diverged at frame {frame}; "
+                f"{total} valid frames written to {self._cache_dir_str}. "
+                f"Recovery: lower Bulk Modulus (default 1500), lower dt, "
+                f"or shrink resolution, then re-bake. Use 'Attach Cache' "
+                f"to load the partial result.")
+        except Exception:
+            return None
 
     def _sync_post_bake_then_attach(self) -> None:
         """Sync on_complete: run truncation sanity, then auto-attach.

@@ -37,6 +37,18 @@ class CacheManifest:
     resolution: List[int] = field(default_factory=lambda: [64, 64, 64])
     dx: float = 1.0 / 64
     notes: str = ""
+    # Round-32: round-31 reviewer caught schema drift between MPM and
+    # FLIP cache.json writers. MPM writes raw dict with `solver`,
+    # `truncated_at_frame`, `truncation_reason`; FLIP wrote via this
+    # dataclass without those keys; round-32 added them to FLIP via
+    # post-hoc raw-JSON injection but `read_cache_manifest` filtered
+    # them out, dropping the info on the typed-API path. Now: the
+    # dataclass carries the optional fields, both writers + the typed
+    # reader see them consistently. `solver` defaults to "flip" for
+    # backwards-compat with pre-round-32 caches.
+    solver: str = "flip"
+    truncated_at_frame: Optional[int] = None
+    truncation_reason: Optional[str] = None
 
     def mesh_path(self, root: Path, frame: int) -> Path:
         return root / self.mesh_pattern.format(frame)

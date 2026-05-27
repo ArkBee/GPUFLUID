@@ -46,8 +46,21 @@ def reseed_particles(
     dx: float,
     cfg: ReseedConfig,
     rng: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray, int, int]:
-    """Return (new_pos, new_vel, n_emitted, n_culled).
+    attr_color: np.ndarray | None = None,
+    attr_temperature: np.ndarray | None = None,
+):
+    """Return ``(new_pos, new_vel, n_emitted, n_culled, new_color,
+    new_temperature)``.
+
+    Round-36: ``attr_color`` and ``attr_temperature`` are optional row-
+    aligned with ``pos``; when provided, they ride the same keep_mask +
+    emit-append as positions, so the CPU reseed stays in lockstep with
+    pos/vel. GPU sibling (``reseed_particles_gpu``) had this since the
+    start; the CPU path was forgotten — exact lesson §9.6 mirror-drift
+    that bit on round-35 reviewer's sweep.
+
+    Emitted particles get default attrs (zero colour, 20°C temperature),
+    matching the prepare_frame emit-append convention (round-34).
 
     ``marker_host``: (nx, ny, nz) int — only cells marked fluid (==1) are reseeded.
     Cells marked solid (==2) are skipped entirely so no particles end up in solids.
@@ -119,7 +132,23 @@ def reseed_particles(
     if n_emitted > 0:
         new_pos = np.concatenate([new_pos, emit_pos], axis=0)
         new_vel = np.concatenate([new_vel, emit_vel], axis=0)
-    return new_pos, new_vel, n_emitted, n_to_cull
+    # Round-36: variant return — preserve 4-tuple back-compat for the
+    # ~10 existing call sites that didn't pass attrs (tests etc.).
+    # 6-tuple form only fires when caller passed at least one attr.
+    if attr_color is None and attr_temperature is None:
+        return new_pos, new_vel, n_emitted, n_to_cull
+    new_color = attr_color[keep_mask] if attr_color is not None else None
+    new_temperature = (attr_temperature[keep_mask]
+                       if attr_temperature is not None else None)
+    if n_emitted > 0:
+        if attr_color is not None:
+            emit_col = np.zeros((n_emitted, 3), dtype=np.float32)
+            new_color = np.concatenate([new_color, emit_col], axis=0)
+        if attr_temperature is not None:
+            emit_t = np.full((n_emitted,), 20.0, dtype=np.float32)
+            new_temperature = np.concatenate([new_temperature, emit_t],
+                                              axis=0)
+    return new_pos, new_vel, n_emitted, n_to_cull, new_color, new_temperature
 
 
 # =============================================================================

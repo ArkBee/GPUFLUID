@@ -29,6 +29,15 @@ class InflowBox:
     rate_per_sec: float = 5000.0   # particles per second
     frame_start: int = 0
     frame_end: int = 10_000
+    # Round-46: per-inflow colour + temperature. Pre-round-46
+    # `InflowBox` had no such fields, so FLIP scenes with
+    # `[[inflow]] color = [r,g,b]` in the TOML silently dropped
+    # the user value — emitted particles got the zero-padding
+    # default (black) at solver3d.py prepare_frame's emit-extend
+    # path. MPM's seed_inflow_particles always honoured per-source
+    # colour; mirror-drift §9.6 caught by round-45 reviewer.
+    color: Optional[Tuple[float, float, float]] = None
+    temperature: Optional[float] = None
 
     def emit(self, frame_idx: int, frame_dt: float, rng: np.random.Generator) -> Optional[np.ndarray]:
         """Return (N,3) positions or None if not emitting this frame."""
@@ -56,7 +65,10 @@ class InflowBox:
             return
         vel = np.broadcast_to(np.asarray(self.velocity, dtype=np.float32),
                               (len(pos), 3)).copy()
-        queue.push_emit(FluidEmitEvent(positions=pos, velocities=vel))
+        queue.push_emit(FluidEmitEvent(
+            positions=pos, velocities=vel,
+            color=self.color, temperature=self.temperature,
+        ))
 
 
 # [BLK D4.7]
@@ -67,6 +79,21 @@ class OutflowBox:
     hi: Tuple[float, float, float]
     frame_start: int = 0
     frame_end: int = 10_000
+
+    def __post_init__(self):
+        # Round-44: mirror of round-33 MPM-inflow-keyframe `lo > hi`
+        # fix. Pre-round-44 a reversed AABB silently produced a
+        # zero-volume box → `apply_outflows` containment test failed
+        # for every particle → outflow became silent no-op. User saw
+        # particles accumulating where they expected drain. Now: loud
+        # raise upfront with the offending axis named.
+        for axis, (lo_v, hi_v) in enumerate(zip(self.lo, self.hi)):
+            if hi_v < lo_v:
+                axis_name = "xyz"[axis]
+                raise ValueError(
+                    f"OutflowBox: hi[{axis_name}]={hi_v} < lo[{axis_name}]"
+                    f"={lo_v}. Outflow box AABB must have hi >= lo on "
+                    f"every axis (got lo={self.lo}, hi={self.hi}).")
 
     def publish_for_frame(self, queue, frame_idx: int) -> None:
         """F3.6.C1 dual-path: push a FluidOutflowEvent describing the

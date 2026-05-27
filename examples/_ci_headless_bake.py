@@ -32,6 +32,20 @@ from pathlib import Path
 _args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 CACHE_DIR = Path(_args[0]) if _args else Path(tempfile.gettempdir()) / "gpufluid_ci_test"
 
+# Round-24: WIPE the cache dir before bake. Pre-round-24 a stale dir
+# from a previous successful run could satisfy the `n_mesh >= 6` /
+# `n_png >= 6` count checks even if the current bake/render produced
+# 0 new files. CI-green-for-wrong-reason (lesson 9.2). The
+# `FINISHED` op-result guards most cases, but a Blender that aborts
+# mid-bake without raising would still slip through.
+import shutil
+if CACHE_DIR.exists():
+    try:
+        shutil.rmtree(CACHE_DIR)
+    except OSError as _e:
+        print(f"[CI-WARN] could not wipe {CACHE_DIR}: {_e}", file=sys.stderr)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _fail(step: str, msg: str) -> None:
     print(f"[CI-FAIL] {step}: {msg}", file=sys.stderr)

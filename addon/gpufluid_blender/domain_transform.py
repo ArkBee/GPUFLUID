@@ -93,11 +93,20 @@ class DomainTransform:
         dom_size = (world_hi[0] - world_lo[0],
                     world_hi[1] - world_lo[1],
                     world_hi[2] - world_lo[2])
-        nmax_w = max(dom_size[0], dom_size[1], dom_size[2])
-        if nmax_w <= 0:
+        # Round-32: pre-round-32 only checked `max(dom_size) <= 0`.
+        # A Domain Empty with mixed-sign extent (e.g. mirrored on one
+        # axis: world_lo[1] > world_hi[1]) had dom_size = (2, -1, 1):
+        # nmax=2 passed, inv_size[1] = -1, to_sim() returned negative
+        # normalised coords → particles seeded outside [0,1]³ → MPM
+        # wall pushback / FLIP marker clamp silently mangled geometry.
+        # Now: check EVERY axis is strictly positive.
+        if min(dom_size) <= 0:
             raise ValueError(
                 f"DomainTransform: degenerate world AABB {world_lo} → "
-                f"{world_hi} (extent {dom_size})")
+                f"{world_hi}: all three extents must be > 0, got "
+                f"{dom_size} (any negative means world_lo > world_hi "
+                f"on that axis — check Empty scale / orientation).")
+        nmax_w = max(dom_size[0], dom_size[1], dom_size[2])
         if resolution < 1:
             raise ValueError(
                 f"DomainTransform: resolution must be ≥ 1, got {resolution}")

@@ -119,6 +119,7 @@ class ModalSubprocessRunner:
         log_prefix: str,
         on_complete: Optional[Callable[[], None]] = None,
         logger=None,
+        friendly_error_for_rc: Optional[Callable[[int], Optional[str]]] = None,
     ) -> set[str]:
         """Synchronous run: spawn + drain on bg thread + wait(timeout).
         Returns operator-result set ({'FINISHED'} or {'CANCELLED'}).
@@ -163,14 +164,51 @@ class ModalSubprocessRunner:
                     f"could not spawn {self.label} subprocess: {e}")
                 return {"CANCELLED"}
 
-            drain_thread = threading.Thread(
-                target=_drain_lines, args=(self._proc, drained), daemon=True)
-            drain_thread.start()
+            # Round-23: mirror the orphan-Popen-kill guard the modal
+            # path got in round-9 (`_spawn_and_drain`). If Thread()
+            # construction or start() fails (rare: resource exhaustion),
+            # the subprocess we just spawned runs without a drainer
+            # and its handle leaks. Same defence applied here so the
+            # sync/modal paths stay symmetric (lesson 9.6 — mirror-
+            # operator drift inside a single class).
+            try:
+                drain_thread = threading.Thread(
+                    target=_drain_lines, args=(self._proc, drained),
+                    daemon=True)
+                drain_thread.start()
+            except Exception as e:
+                if self._proc is not None and self._proc.poll() is None:
+                    try:
+                        self._proc.kill(); self._proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                operator.report(
+                    {"ERROR"},
+                    f"could not start {self.label} drainer thread: {e}")
+                return {"CANCELLED"}
             try:
                 rc = self._proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.wait(timeout=5.0)
+                # Round-38: flush whatever the drain thread captured
+                # BEFORE returning. Pre-round-38 the kill path bailed
+                # without joining drain_thread or writing `drained`
+                # lines to the logger — so the user saw "subprocess
+                # killed" with zero diagnostics about WHAT was on
+                # stdout when the hang started. Now: best-effort join
+                # + log dump.
+                try:
+                    drain_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+                if logger is not None and drained:
+                    logger.warning(
+                        "%s: last %d stdout lines before timeout-kill:",
+                        log_prefix, len(drained))
+                    for line in drained:
+                        logger.warning("%s: %s", log_prefix,
+                                       line.rstrip())
                 operator.report(
                     {"ERROR"},
                     f"gpufluid {self.label} (sync) hit timeout after "
@@ -181,8 +219,19 @@ class ModalSubprocessRunner:
                 for line in drained:
                     logger.info("%s: %s", log_prefix, line.rstrip())
             if rc != 0:
+                # Round-20: callers (notably OT_bake for MPM) may translate
+                # specific non-zero rcs into actionable error messages by
+                # reading sidecars like cache.json. Falls through to the
+                # generic "rc=N" wording when callback returns None or absent.
+                friendly = None
+                if friendly_error_for_rc is not None:
+                    try:
+                        friendly = friendly_error_for_rc(rc)
+                    except Exception:
+                        friendly = None
                 operator.report(
                     {"ERROR"},
+                    friendly or
                     f"gpufluid {self.label} (sync) failed with rc={rc}")
                 return {"CANCELLED"}
             if on_complete is not None:
@@ -243,6 +292,7 @@ class ModalSubprocessRunner:
         on_progress: Optional[Callable[[int, int], None]] = None,
         logger=None,
         log_prefix: Optional[str] = None,
+        friendly_error_for_rc: Optional[Callable[[int], Optional[str]]] = None,
     ) -> Optional[set[str]]:
         """Called from operator.modal(). Handles ESC + TIMER + drain.
 
@@ -278,7 +328,32 @@ class ModalSubprocessRunner:
                     logger.info("%s: %s", log_prefix, line.rstrip())
         if rc is None:
             return None  # caller returns {"PASS_THROUGH"}
-        return self._finish(operator, context, ok=(rc == 0))
+        # Round-40: subprocess exited — drain remaining queued lines
+        # BEFORE _finish() clears state. Pre-round-40 the per-tick
+        # 50-line cap above could leave the OS-pipe tail unread (MPM
+        # divergence dumps full stack in last ~30ms; FLIP timeouts
+        # similar) — user saw "failed rc=N" with zero diagnostics
+        # past the cap. Best-effort: join drain thread (1s) so its
+        # `None` sentinel reaches the queue, then drain until empty.
+        # Mirrors the round-38 sync-path timeout-drain fix.
+        if self._stdout_thread is not None:
+            try:
+                self._stdout_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        if self._stdout_q is not None:
+            while True:
+                try:
+                    line = self._stdout_q.get_nowait()
+                except queue.Empty:
+                    break
+                if line is None:
+                    break
+                if logger is not None and log_prefix is not None:
+                    logger.info("%s: %s", log_prefix, line.rstrip())
+        return self._finish(operator, context, ok=(rc == 0),
+                            rc=rc,
+                            friendly_error_for_rc=friendly_error_for_rc)
 
     def abort(self, operator, context, reason: str) -> set[str]:
         """Terminate(timeout=3) → kill(timeout=2). Idempotent — safe to
@@ -311,10 +386,22 @@ class ModalSubprocessRunner:
 
     # ── _finish helper (used by tick_modal end-of-subprocess) ───────
 
-    def _finish(self, operator, context, ok: bool) -> set[str]:
+    def _finish(
+        self,
+        operator,
+        context,
+        ok: bool,
+        rc: Optional[int] = None,
+        friendly_error_for_rc: Optional[Callable[[int], Optional[str]]] = None,
+    ) -> set[str]:
         """End-of-modal cleanup. `on_done` (auto-attach) called by the
         operator AFTER this if needed — runner doesn't know operator-
-        specific success behaviour. Returns {'FINISHED'} or {'CANCELLED'}."""
+        specific success behaviour. Returns {'FINISHED'} or {'CANCELLED'}.
+
+        Round-20: ``friendly_error_for_rc`` (optional) lets the operator
+        translate a specific non-zero rc into an actionable message
+        (e.g. OT_bake reads ``cache.json`` to surface MPM divergence
+        frame on rc=2). Returns None → generic fallback wording."""
         op_class = operator.__class__
         op_class._is_running = False
         if self._timer is not None:
@@ -322,8 +409,15 @@ class ModalSubprocessRunner:
         context.workspace.status_text_set(None)
         self._clear_instance_state()
         if not ok:
+            friendly = None
+            if rc is not None and friendly_error_for_rc is not None:
+                try:
+                    friendly = friendly_error_for_rc(rc)
+                except Exception:
+                    friendly = None
             operator.report(
                 {"ERROR"},
+                friendly or
                 f"gpufluid {self.label} failed — see system console")
             return {"CANCELLED"}
         # Caller is responsible for INFO report + any auto-attach.

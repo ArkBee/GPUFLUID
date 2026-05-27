@@ -66,7 +66,30 @@ def main():
     rest = _argv_after_doubledash()
     if not rest:
         raise SystemExit("[A8.12] no JSON payload supplied after `--`")
-    payload = json.loads(rest[0])
+    # Round-25: pre-round-25 a malformed JSON payload raised
+    # `json.JSONDecodeError` as a bare Python traceback, and any
+    # missing required key (`payload["cache"]`) raised `KeyError`
+    # the same way. Both bubbled up to Blender, which exited rc=1
+    # indistinguishable from a real render failure — cmd_render in
+    # the CLI (commands.py) just returns the rc with no context.
+    # Catch + reformat both into a single-line SystemExit so the
+    # parent process gets a useful one-line message.
+    try:
+        payload = json.loads(rest[0])
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"[A8.12] malformed JSON payload: {exc}; "
+            f"first 80 chars: {rest[0][:80]!r}")
+    # Round-28: include EVERY key build_renderer_argv unconditionally
+    # indexes. Pre-round-28 only cache/scene/out were checked, and a
+    # caller (hand-built JSON or future drift) missing `label` /
+    # `color` / `fps` got a bare KeyError traceback through Blender
+    # — exactly the failure mode round-25 set out to eliminate.
+    for required in ("cache", "scene", "out", "label", "color", "fps"):
+        if required not in payload:
+            raise SystemExit(
+                f"[A8.12] payload missing required key '{required}'; "
+                f"got keys: {sorted(payload.keys())}")
 
     # Hand off to the example renderer's main entry — synthesise its argv.
     import render_fluid_on_cube_eevee as renderer  # type: ignore[import-not-found]

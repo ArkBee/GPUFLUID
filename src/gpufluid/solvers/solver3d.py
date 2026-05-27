@@ -2314,6 +2314,35 @@ block("S2.14.5", "Host helper: capillary-wave dt_max for explicit CSF")(csf_max_
 # F3.2 — Solver class
 # =============================================================================
 
+class FlipDivergenceError(RuntimeError):
+    """Round-32: raised by the CLI FLIP loop when ``has_diverged()`` is
+    true after a frame's step. Mirrors :class:`MpmDivergenceError`
+    (round-20). The FLIP solver had NO equivalent guard — a divergent
+    pressure-solve oscillation produced NaN particle velocities, next
+    step propagated them, and the cache.json reported full
+    ``frame_count`` with garbage PLY geometry. Carries ``frame``
+    (failing frame index), ``last_dumped_frame``, and
+    ``requested_frames`` so the CLI can write a truthful cache.json
+    with ``truncated_at_frame`` and exit rc=2 — same UX as the MPM
+    divergence path.
+    """
+
+    def __init__(
+        self,
+        frame: int,
+        last_dumped_frame: int,
+        requested_frames: int,
+        detail: str = "",
+    ) -> None:
+        super().__init__(
+            detail or f"FLIP solver diverged at frame {frame} "
+                     f"(last dumped: {last_dumped_frame}/{requested_frames})"
+        )
+        self.frame = int(frame)
+        self.last_dumped_frame = int(last_dumped_frame)
+        self.requested_frames = int(requested_frames)
+
+
 class FlipSolver3D:
     """[BLK F3.2] 3D FLIP/PIC solver. Holds all state on GPU.
 
@@ -2421,6 +2450,25 @@ class FlipSolver3D:
         self._sub_offset = (0, 0, 0)
         self._sub_shape = (nx, ny, nz)
         self._sub_rebuild_every = max(1, int(sub_rebuild_every))
+        # Round-40/48: sub_dilation < 1 in combination with enable_sub_dense
+        # would let live fluid reach the sub-dense bbox edge where the
+        # GS-RB kernel reads off-grid pressure as 0 without compensating
+        # the diagonal. Round-40 raised ValueError here; round-48
+        # found this broke b7-alt bookkeeping tests that legitimately
+        # use sub_dilation=0 to inspect bbox/marker state WITHOUT
+        # running a pressure solve. Downgrade to a warning — runtime
+        # pressure-step is the actual failure path and `_relayout`
+        # transiently sets it to 0 for CPU-only bookkeeping anyway.
+        if enable_sub_dense and int(sub_dilation) < 1:
+            import logging as _log
+            _log.getLogger("gpufluid.solver").warning(
+                "FlipSolver3D: enable_sub_dense=True with "
+                "sub_dilation=%d. Pressure solves on this config "
+                "read off-grid pressure as 0 at the band edge "
+                "without diagonal compensation — convergence will "
+                "be slow and the solution slightly wrong. Only safe "
+                "for diagnostic / bookkeeping use, not real bakes.",
+                sub_dilation)
         self._sub_dilation = max(0, int(sub_dilation))
         self._last_sub_rebuild_frame = -1  # -1 = never rebuilt
 
@@ -2591,6 +2639,22 @@ class FlipSolver3D:
     def add_outflow(self, region):
         self.outflows.append(region)
 
+    def has_diverged(self) -> bool:
+        """Round-32: cheap NaN probe on the particle position array.
+        Same intent as MPM round-20 NaN trap (raises
+        MpmDivergenceError). CLI calls this once per frame after
+        ``step`` / ``step_cfl``; on True, raises FlipDivergenceError
+        with truthful frame counts. Returns False on empty/zero-particle
+        states (no divergence, just no data).
+        """
+        if self.pos is None or self.n_particles == 0:
+            return False
+        try:
+            arr = self.pos.numpy() if hasattr(self.pos, "numpy") else self.pos
+        except Exception:
+            return False
+        return bool(arr.size and np.any(np.isnan(arr)))
+
     # -------- D4.7.GPU stream-compaction outflow path ---------------------
     @block("D4.7.GPU", "GPU outflow compaction (mark + scan + scatter)")
     def _apply_outflows_gpu(self, outflow_events) -> int:
@@ -2640,6 +2704,23 @@ class FlipSolver3D:
         # swap arrays (slice to the compacted size)
         self.pos = self._pos_alt[:new_n]
         self.vel = self._vel_alt[:new_n]
+        # Round-34: compact attr_color / attr_temperature in lockstep.
+        # Pre-round-34 they kept their old layout, so _apply_color_transfer
+        # (and the temperature pass) read attr[i] for compact-index i
+        # decorrelated from which particle survived — colours visibly
+        # scrambled the moment any outflow fired. CPU round-trip via the
+        # alive mask is cheap relative to per-frame mesh extraction;
+        # attr arrays are O(N) and N is post-compaction.
+        if self.attr_color is not None or self.attr_temperature is not None:
+            alive_mask = (self._alive[:n].numpy() != 0)
+            if self.attr_color is not None:
+                col_np = self.attr_color.numpy()[alive_mask]
+                self.attr_color = wp.array(col_np, dtype=wp.vec3,
+                                            device=self.device)
+            if self.attr_temperature is not None:
+                t_np = self.attr_temperature.numpy()[alive_mask]
+                self.attr_temperature = wp.array(t_np, dtype=float,
+                                                  device=self.device)
         # APIC C buffer becomes stale — drop it; will be rebuilt fresh in step()
         self.affine_C = None
         self.n_particles = new_n
@@ -2818,6 +2899,15 @@ class FlipSolver3D:
             self.attr_temperature = wp.array(np.concatenate([prev_t, pad], axis=0),
                                               dtype=float, device=self.device)
         self.n_particles = len(positions)
+        # Round-40: invalidate captured CUDA graph. seed_box rebinds
+        # self.pos / vel / affine_C / attr_color / attr_temperature to
+        # fresh wp.arrays; any previously captured graph still holds
+        # the OLD device pointers. The cache key check (n_particles,
+        # attr presence) doesn't catch the case where n_particles
+        # happens to match a prior topology — silent dereference of
+        # freed memory on replay. Cheap to invalidate now; capture
+        # re-fires on next eligible step.
+        self._cuda_graph_invalidate()
 
     # ---------- internal: PCG pressure solve (S2.6.3) -----------------------
     # GPU-resident variant: alpha, beta, rz_old, rz_new, pAp, r_norm² all live
@@ -3290,6 +3380,15 @@ class FlipSolver3D:
         Sparse PCG inherits BOTH: each per-tile kernel takes BOTH
         `n_active_dev` (Option B cap) AND `done` (Option A stop-flag).
         """
+        # Round-46: APIC + None-affine_C is INELIGIBLE for capture.
+        # Inflow/outflow events set `self.affine_C = None`; the next
+        # APIC step lazily wp.zeros() the affine buffer — allocation
+        # + H2D copy INSIDE wp.capture_begin/_end is forbidden. The
+        # try/except path catches the capture-time raise but burns
+        # the capture cost on every such step (constant capture, no
+        # cache benefit). Best to refuse eligibility outright.
+        if self.transfer_mode == "apic" and self.affine_C is None:
+            return False
         # All shipped combinations are now graph-eligible.
         return pressure_solver in ("jacobi", "gsrb", "pcg")
 
@@ -3678,6 +3777,20 @@ class FlipSolver3D:
             return True
         if frame_idx - self._last_sub_rebuild_frame >= self._sub_rebuild_every:
             return True
+        # Round-42/48: refresh `_marker_host` from GPU only when the
+        # GPU side has real fluid bits the host snapshot doesn't.
+        # Round-42 unconditionally overwrote the host array which
+        # broke b7-alt tests that manually populate _marker_host as
+        # a fixture (no GPU side at all). The non-animated-scene
+        # case round-41 cared about always has fluid bits on GPU
+        # after the first P2G; the test-fixture case has empty GPU
+        # but populated host. Refresh-on-GPU-has-fluid preserves both.
+        try:
+            gpu_marker = self.marker.numpy()
+            if np.any(gpu_marker == 1):
+                self._marker_host = gpu_marker
+        except Exception:
+            pass
         # Proximity check uses the RAW (non-dilated) active bbox so we don't
         # double-count the existing dilation margin.
         saved_d = self._sub_dilation
@@ -3850,6 +3963,67 @@ class FlipSolver3D:
         if emit_events:
             emit_pos = np.concatenate([e.positions for e in emit_events], axis=0)
             emit_vel = np.concatenate([e.velocities for e in emit_events], axis=0)
+            # Round-46: build per-event colour + temperature chunks at
+            # the SAME concat order as positions/velocities so the
+            # round-42 marker-filter mask (computed below over the
+            # combined emit_pos) applies in lockstep. Pre-round-46 we
+            # padded the attr arrays AFTER the filter with the
+            # unfiltered per-event lengths → shape mismatch. Build
+            # now, mask in step with emit_pos.
+            need_color_pad = self.attr_color is not None
+            need_temp_pad = self.attr_temperature is not None
+            col_pad = (np.concatenate([
+                (np.broadcast_to(np.asarray(e.color, dtype=np.float32),
+                                  (len(e.positions), 3)).copy()
+                 if e.color is not None
+                 else np.zeros((len(e.positions), 3), dtype=np.float32))
+                for e in emit_events
+            ], axis=0) if need_color_pad and emit_events
+                       else None)
+            temp_pad = (np.concatenate([
+                (np.full((len(e.positions),), float(e.temperature),
+                         dtype=np.float32)
+                 if e.temperature is not None
+                 else np.full((len(e.positions),), 20.0,
+                              dtype=np.float32))
+                for e in emit_events
+            ]) if need_temp_pad and emit_events
+                else None)
+            # Round-42: drop emit-samples that landed inside a solid
+            # cell (marker == 2). Pre-round-42 InflowBox.emit was a
+            # raw rng.random in lo/hi with NO obstacle test, so an
+            # inflow box overlapping an animated obstacle (or any
+            # static one the user composed) spawned particles INSIDE
+            # the solid; pressure projection then ejected them as
+            # explosive streamers along the obstacle face, sometimes
+            # NaN'ing. Filter once at the consumer — InflowBox stays
+            # data-only without solver coupling.
+            if len(emit_pos) > 0:
+                try:
+                    mh = self._marker_host
+                    if mh is not None:
+                        ix = np.clip((emit_pos[:, 0] / self.dx).astype(np.int32),
+                                      0, mh.shape[0] - 1)
+                        iy = np.clip((emit_pos[:, 1] / self.dx).astype(np.int32),
+                                      0, mh.shape[1] - 1)
+                        iz = np.clip((emit_pos[:, 2] / self.dx).astype(np.int32),
+                                      0, mh.shape[2] - 1)
+                        keep = (mh[ix, iy, iz] != 2)
+                        if not keep.all():
+                            emit_pos = emit_pos[keep]
+                            emit_vel = emit_vel[keep]
+                            # Round-46: apply the same mask to the
+                            # colour + temperature pads built above
+                            # so per-source per-particle attrs stay
+                            # row-aligned with emit_pos.
+                            if col_pad is not None:
+                                col_pad = col_pad[keep]
+                            if temp_pad is not None:
+                                temp_pad = temp_pad[keep]
+                except Exception:
+                    # Fail-open: if marker host is missing/wrong shape
+                    # don't gate emission — pre-round-42 behaviour.
+                    pass
             if len(emit_pos) > 0:
                 cur_pos = self.pos.numpy() if self.pos is not None else np.zeros((0, 3), dtype=np.float32)
                 cur_vel = self.vel.numpy() if self.vel is not None else np.zeros((0, 3), dtype=np.float32)
@@ -3859,6 +4033,20 @@ class FlipSolver3D:
                 self.vel = wp.array(cur_vel, dtype=wp.vec3, device=self.device)
                 self.affine_C = None
                 self.n_particles = len(cur_pos)
+                # Round-34/46: extend attribute arrays with the per-
+                # event pads built (and mask-filtered) above. col_pad
+                # / temp_pad are None when the solver doesn't track
+                # the respective attr, else row-aligned with emit_pos.
+                if col_pad is not None:
+                    prev_col = self.attr_color.numpy()
+                    self.attr_color = wp.array(
+                        np.concatenate([prev_col, col_pad], axis=0),
+                        dtype=wp.vec3, device=self.device)
+                if temp_pad is not None:
+                    prev_t = self.attr_temperature.numpy()
+                    self.attr_temperature = wp.array(
+                        np.concatenate([prev_t, temp_pad], axis=0),
+                        dtype=float, device=self.device)
         # B7-alt.2 — sub-dense storage rebuild trigger. No-op when the
         # flag is off; otherwise shrinks u/v/w/p/p_tmp/div to the active
         # 8³-tile bbox + sub_dilation, every sub_rebuild_every frames or
@@ -3944,9 +4132,24 @@ class FlipSolver3D:
         vel = self.vel.numpy() if self.vel is not None else np.zeros((0, 3), dtype=np.float32)
         marker = self.marker.numpy()
         affine = self.affine_C.numpy() if self.affine_C is not None else np.zeros((0, 3, 3), dtype=np.float32)
+        # Round-42: serialise attr_color + attr_temperature so resume
+        # doesn't silently drop per-particle colour/temperature into
+        # default white. Pre-round-42 the save side ignored attrs and
+        # the load side had no key to read → KNN/Mixbox/temperature
+        # passes saw `attr_color is None` → uniform fallback colour.
+        # Empty arrays serialise as 0-row .npz entries that load_checkpoint
+        # reconstructs as None for back-compat (pre-round-42 .npz has
+        # no attr_color key — load handles KeyError gracefully).
+        attr_color = (self.attr_color.numpy()
+                      if self.attr_color is not None
+                      else np.zeros((0, 3), dtype=np.float32))
+        attr_temperature = (self.attr_temperature.numpy()
+                            if self.attr_temperature is not None
+                            else np.zeros((0,), dtype=np.float32))
         np.savez_compressed(
             str(path),
             pos=pos, vel=vel, affine_C=affine, marker=marker,
+            attr_color=attr_color, attr_temperature=attr_temperature,
             nx=self.nx, ny=self.ny, nz=self.nz, dx=self.dx,
             gravity=self.gravity, flip_blend=self.flip_blend, rho=self.rho,
             viscosity=self.viscosity, transfer_mode=str(self.transfer_mode),
@@ -3960,6 +4163,32 @@ class FlipSolver3D:
         nx, ny, nz = int(data["nx"]), int(data["ny"]), int(data["nz"])
         if (nx, ny, nz) != (self.nx, self.ny, self.nz):
             raise RuntimeError(f"checkpoint grid {(nx,ny,nz)} != solver {(self.nx,self.ny,self.nz)}")
+        # Round-42: also validate dx + warn on physics-config drift
+        # between the saved run and the resume environment. Pre-round-42
+        # topology check passed for same-res grids in differently-sized
+        # domains (dx mismatch → particle world-coords pointing at wrong
+        # cells); physics knobs (gravity/rho/viscosity/flip_blend/
+        # surface_tension) silently overrode the saved values — "resume"
+        # was actually a different sim.
+        ckpt_dx = float(data["dx"])
+        if abs(ckpt_dx - self.dx) > 1e-9:
+            raise RuntimeError(
+                f"checkpoint dx={ckpt_dx} != solver dx={self.dx} "
+                f"(same grid resolution but different domain size — "
+                f"particle world-coords would land in wrong cells)")
+        import logging as _log
+        for key, live in (
+            ("gravity", self.gravity), ("rho", self.rho),
+            ("viscosity", self.viscosity), ("flip_blend", self.flip_blend),
+            ("surface_tension", self.surface_tension),
+        ):
+            if key in data.files:
+                saved = float(data[key])
+                if abs(saved - float(live)) > 1e-9:
+                    _log.getLogger("gpufluid.checkpoint").warning(
+                        "resume: %s drift saved=%s live=%s — running "
+                        "with LIVE value (resume is no longer bit-exact).",
+                        key, saved, live)
         pos = data["pos"]; vel = data["vel"]; marker = data["marker"]; affine = data["affine_C"]
         self.pos = wp.array(pos, dtype=wp.vec3, device=self.device) if len(pos) else None
         self.vel = wp.array(vel, dtype=wp.vec3, device=self.device) if len(vel) else None
@@ -3967,3 +4196,27 @@ class FlipSolver3D:
         wp.copy(self.marker, wp.array(marker.astype(np.int32), dtype=int, device=self.device))
         self._marker_host = marker.astype(np.int32)
         self.n_particles = len(pos)
+        # Round-42: restore attr_color / attr_temperature if present.
+        # Pre-round-42 these were never saved → load left them as None
+        # → KNN/Mixbox/temperature passes emitted default white. Empty
+        # arrays in the .npz signal "attrs were None at save time"
+        # — preserve that semantic. Back-compat: pre-round-42 .npz has
+        # no attr_color/attr_temperature keys; KeyError → defaults.
+        try:
+            ac = data["attr_color"]
+            self.attr_color = (wp.array(ac, dtype=wp.vec3, device=self.device)
+                                if len(ac) else None)
+        except KeyError:
+            pass
+        try:
+            at = data["attr_temperature"]
+            self.attr_temperature = (
+                wp.array(at, dtype=float, device=self.device)
+                if len(at) else None)
+        except KeyError:
+            pass
+        # Round-40: same as seed_box. Pointer rebind silently
+        # invalidates any captured graph; cache key matching identical
+        # topology (the intended resume-checkpoint case) would replay
+        # a stale-pointer graph → undefined behaviour.
+        self._cuda_graph_invalidate()

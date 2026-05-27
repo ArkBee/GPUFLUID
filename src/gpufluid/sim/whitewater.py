@@ -162,9 +162,17 @@ class WhitewaterSystem:
             idx = self.rng.choice(idx, size=cap, replace=False)
         new_pos = fluid_pos[idx].copy()
         if self.cfg.spawn_offset != 0.0:
-            new_pos[:, 1] += self.cfg.spawn_offset
+            # Round-23: was index 1 (Y) — entire project is Z-up
+            # (MpmDomainWalls.floor_z, scene.simulation.gravity → Z,
+            # FLIP solver Z-up). Pre-round-23 every whitewater particle
+            # spawned offset on the WRONG axis, then advected with
+            # gravity also on the wrong axis, then exit-tested against
+            # the wrong dom face — bubbles "rose" horizontally and never
+            # reached the surface, spray fell sideways.
+            new_pos[:, 2] += self.cfg.spawn_offset
         kick = self.rng.standard_normal(new_pos.shape).astype(np.float32) * 0.2
-        kick[:, 1] = np.abs(kick[:, 1]) * 0.5
+        # Round-23: upward kick component must hit Z (vertical), not Y.
+        kick[:, 2] = np.abs(kick[:, 2]) * 0.5
         new_vel = fluid_vel[idx].copy() + kick
         new_age = np.zeros(len(idx), dtype=np.float32)
         new_kind = self.classify_kinds(new_pos, density,
@@ -212,7 +220,11 @@ class WhitewaterSystem:
         # exponential drag per-axis (uniform per particle)
         damp = np.maximum(0.0, 1.0 - drag * dt)[:, None]
         self.vel *= damp
-        self.vel[:, 1] += grav * dt
+        # Round-23: gravity acts on Z (vertical), not Y. See spawn-offset
+        # rationale above. This is THE bug that made the entire whitewater
+        # system look broken: bubbles couldn't rise to the surface to pop,
+        # spray flew sideways, foam drifted in a horizontal "river".
+        self.vel[:, 2] += grav * dt
         self.pos += self.vel * dt
         self.age += dt
         # Domain clamp / kill

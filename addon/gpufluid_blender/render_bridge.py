@@ -51,9 +51,25 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
         rendered as a flat uniform colour (live-found 2026-05-25).
     """
     me = obj.data
-    me.clear_geometry()
     n_v = len(verts)
     n_f = len(faces)
+    # Round-28: mirror cache_loader._rebuild_mesh's bounds check on
+    # face indices (mirror-operator drift caught by round-27). A
+    # corrupt PLY with a degenerate MC triangle (vertex index >= n_v
+    # or < 0) crashed Blender's polygon validator on foreach_set —
+    # the headless render path hit it hard because no fixture
+    # exercises malformed PLYs and the crash bubbled up as a Blender
+    # rc=1 with no actionable message.
+    faces_np = np.asarray(faces, dtype=np.int32)
+    if faces_np.size and n_v > 0:
+        mask = ((faces_np[:, 0] < n_v) & (faces_np[:, 1] < n_v)
+                & (faces_np[:, 2] < n_v)
+                & (faces_np[:, 0] >= 0) & (faces_np[:, 1] >= 0)
+                & (faces_np[:, 2] >= 0))
+        if not mask.all():
+            faces_np = np.ascontiguousarray(faces_np[mask])
+            n_f = faces_np.shape[0]
+    me.clear_geometry()
     if n_v == 0 or n_f == 0:
         return
     me.vertices.add(n_v)
@@ -66,7 +82,22 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
     me.polygons.foreach_set(
         "loop_total", np.full(n_f, 3, dtype=np.int32))
     me.polygons.foreach_set(
-        "vertices", np.asarray(faces, dtype=np.int32).ravel())
+        "vertices", faces_np.ravel())
+    if colors is not None and len(colors) != n_v:
+        # Round-22: previously this branch was a silent `pass` — a writer
+        # producing a mismatched colour block (third-party PLY drift,
+        # future writer bug, partial-write corruption) would drop the
+        # whole Col attribute and the user would see uniform fluid
+        # without knowing why. Log the mismatch loudly so the failure
+        # mode is visible without leaving stale Col data attached.
+        try:
+            import logging
+            logging.getLogger("gpufluid.addon").warning(
+                "gpufluid.render_bridge: colour count %d != vertex count %d "
+                "for mesh; dropping Col attribute. Bake/writer drift?",
+                len(colors), n_v)
+        except Exception:
+            pass
     if colors is not None and len(colors) == n_v:
         # PLY ships uint8 0..255; FLOAT_COLOR wants 0..1. Build (N,4)
         # by appending alpha=1, write via foreach_set on the attribute.
@@ -116,7 +147,12 @@ class FrameMeshLoader:
         # Defer the heavy import so this module loads outside Blender.
         from gpufluid.io.ply import read_ply
         f = scene.frame_current
-        idx = f - 1
+        # Round-22: clamp f-1 at 0. Blender lets the user scrub to
+        # frame 0 (or negative frames in some setups); pre-round-22
+        # we computed idx=-1, the path `frame_-001.ply` never existed
+        # so the loader silently no-op'd and the sim-time text read
+        # "-0.017 s". Treat frame ≤ 1 as the bake's first dump.
+        idx = max(0, f - 1)
         if self.sim_time_text is not None:
             t = idx / float(self.fps)
             self.sim_time_text.data.body = f"sim time: {t:6.3f} s"
@@ -148,6 +184,16 @@ def apply_eevee_preset(scene: Any, samples: int = 16) -> dict:
     so tests can verify across Blender version differences.
     """
     log: dict[str, Any] = {}
+    # Round-44: skip if scene's render engine is not Eevee. Pre-
+    # round-44 the function mutated scene.eevee unconditionally;
+    # under engine='CYCLES' / 'BLENDER_WORKBENCH' the Cycles render
+    # ignores the changes but the hidden Eevee state was silently
+    # corrupted. If the user later switched back to Eevee they got
+    # the headless preset (no bloom/SSR/GTAO) without asking.
+    engine = getattr(getattr(scene, "render", None), "engine", None)
+    if engine and engine not in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+        log["skipped_engine"] = engine
+        return log
     ee = getattr(scene, "eevee", None)
     if ee is None:
         return log

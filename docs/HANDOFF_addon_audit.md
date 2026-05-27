@@ -1,4 +1,4 @@
-# Addon-audit branch — session handoff (last updated 2026-05-26, round-19)
+# Addon-audit branch — session handoff (last updated 2026-05-27, round-26)
 
 > **Read this file first** if you're continuing work on the addon
 > audit / refactor sprint. Self-contained — does NOT depend on the
@@ -484,3 +484,279 @@ The branch represents a complete production-hardening sprint of the
 addon. If you're picking up after merge, the addon should behave
 exactly as documented in `docs/QUICKSTART.md` and any deviation is a
 regression worth investigating with the cert harness first.
+
+---
+
+## 2026-05-27 update: rounds 20-26 on `feat/mpm-stability`
+
+After merging `fix/addon-audit-fixes` to main, a new sprint focused
+on MPM solver stability + remaining whitewater bugs landed on a
+fresh branch `feat/mpm-stability`. 7 commits, 3 reviewer rounds
+(21/23/25/27) each independent, each found new real bugs.
+
+**What shipped:**
+
+- **Round-20** — `MpmDivergenceError`: solver raises typed exception
+  on NaN (per-step check; was silent `print + break`); CLI writes
+  truthful `cache.json` with `truncated_at_frame`, exits rc=2; addon
+  `OT_bake` reads cache.json on rc=2 → friendly recovery message.
+- **Round-21** — fixed CRITICAL `cmd_render` duplicate that left
+  `cmd_bench` unregistered + HIGH mesh-pass sidecar index desync
+  (gap in PLY sequence offset colours by N frames).
+- **Round-22** — 4 MEDIUMs: render_bridge frame 0 → idx −1 (silent
+  no-op + negative sim-time text), colour-count mismatch silent
+  drop (now WARNING logged), `MpmSolver.__del__` `TypeError` at
+  interpreter shutdown, hardcoded `default_rng(42)` → `cfg.seed`.
+- **Round-23** — CRITICAL whitewater Z-up: entire feature applied
+  gravity / spawn_offset / kick to Y while project is Z-up; tests
+  were written to match the bug (best example of lesson §9.2).
+  Plus HIGH: `scene.simulation.gravity` was dropped into legacy
+  cfg fields the new step() doesn't read; HIGH:
+  `whitewater_trapped_air_weight` missing from addon emit; LOW:
+  start_sync's Thread() construction missing orphan-Popen-kill
+  guard (mirror drift INSIDE one class — lesson §9.6).
+- **Round-24** — closed deferred items: CI script wipes CACHE_DIR
+  before run (was: stale files satisfied count gates, lesson §9.2),
+  per-frame sidecar de-dup (write once at frame 0, mesher falls
+  back), whitewater attach shape-mismatch guard.
+- **Round-25** — HIGH: MPM inflow gate used `==` not `>=` — any
+  particle with `spawn_step = 0` (rounded from `frame_floats < 1/
+  dump_every`) stayed pinned forever, silently dropped from PLY.
+  Plus MEDIUMs: `_rebuild_mesh` cleared geometry before validating
+  (corrupt mid-sequence PLY blanked screen); `_headless_render`
+  malformed-JSON traceback (now one-line SystemExit); LOW: ASCII
+  PLY silently misparsed in addon's parallel reader; LOW:
+  `seed_inflow_particles` reversed range now raises early.
+- **Round-26 (self-review)** — zero-gravity scene bug I introduced
+  in round-23: the ratio guard `if g_scene != 0.0 else 1.0` was
+  meant for div-by-zero (no such risk) but inverted user intent —
+  setting gravity=0 snapped per-class gravities back to defaults.
+  Dropped guard, added source-grep regression test.
+
+**State of test suite:** 82 unit tests green (rounds 20-26 added 26
+new across `test_mpm_divergence`, `test_round22_fixes`,
+`test_round23_fixes`, `test_round24_fixes`, `test_round25_fixes`).
+Three source-grep contract tests (whitewater gravity ratio form,
+MPM inflow gate form, cmd_render duplicate guard).
+
+**Branch state:** `feat/mpm-stability` is 7 commits beyond `main`.
+Ready for review/merge; cert harness needs re-run on this branch.
+
+**Open follow-ups:**
+- LOW: pushback `_post_step` doesn't re-gate held particles; only
+  bookkeeping, no user-visible artefact.
+- LOW: `MpmConfig.fps`/`device` defaults written to public dataclass
+  but per-bake overrides in scene config — minor documentation gap.
+
+Lessons added (to be added to `~/.claude/CLAUDE.md §9` on next
+update):
+
+- **§9.11 (candidate)**: when introducing a guard, explicitly state
+  what it's for IN A COMMENT. Round-26 caught the round-23 guard
+  inverting user intent because there was no comment to tell future-
+  me what the guard was supposed to dodge.
+- **§9.12 (candidate)**: source-grep contract tests are cheap regression
+  insurance for "must / must not" patterns the actual test can't
+  exercise (e.g. kernels needing CUDA, removed forms with no test
+  representation). Round-21 cmd_render dup + round-25 inflow gate
+  + round-26 gravity ratio all use this pattern.
+
+---
+
+## 2026-05-27 update: rounds 27-32 on `feat/mpm-stability`
+
+Continuation of the MPM-stability sprint. 7 more commits, 3 more
+independent reviewer rounds (27/29/31). The round-31 sweep ran as
+a parallel orchestrator (3 background workers, non-overlapping
+ownership) — first use of the orchestrator-rules ownership-map
+discipline during this sprint.
+
+**What shipped:**
+
+- **Round-27** (independent reviewer, 7 issues) — 2 HIGH
+  (`PreloadCache.pop` silent leak, `_headless_render` incomplete
+  required-keys list); 3 MEDIUM (`blocks` dedup silent — the root
+  cause that let round-21 cmd_render slip in unnoticed,
+  `render_bridge` no face bounds-check, `_on_load_post` false
+  warning on non-MESH `Empty`); 2 LOW (bake auto_attach race after
+  `_is_running` cleared, `_on_load_post` no LRU-overflow warning).
+- **Round-28** — shipped fixes for all 7 round-27 findings.
+  Headline: `blocks/__init__.py` now LOGS WARNING on duplicate
+  qualname registration (was silent — exactly the root cause of
+  the round-21 cmd_render duplicate). `render_bridge` had
+  mirror-drifted from `cache_loader`; bounds-check copied across.
+  10 new tests in `test_round28_fixes.py` incl. a meta-test
+  asserting the dedup warning fires.
+- **Round-29** (independent reviewer) — 1 CRITICAL + 1 MEDIUM + 1
+  LOW. CRITICAL: `mpm_initial_velocity` was DOUBLE-SCALED with the
+  WRONG axis — addon scaled by `inv_size[1]` (Y), CLI then
+  re-scaled by `inv_dom_z` (Z); on a 2:1 Y:Z aspect domain the
+  user-specified velocity was 4× off. Every other MPM velocity
+  knob ships unscaled — classic mirror-drift (§9.6). MEDIUM:
+  `whitewater_potentials` no `v_max`/`radius`/`dx` validation.
+  LOW: `cubic_ref` missing empty/NaN guard.
+- **Round-30** — shipped all 3 round-29 fixes; added
+  `@block("M5.11.5")` to mixbox; added `[BLK ...]` source-grep
+  test refs for S2.17.7, M5.11.4, M5.11.4.H, M5.11.5. Also fixed
+  a self-introduced round-28 test-isolation bug: popping
+  `gpufluid.blocks` from `sys.modules` created a fresh
+  `BlockError` class instance which broke `pytest.raises` matching
+  in downstream tests.
+- **Round-31 (parallel sprint)** — orchestrator ran 3 background
+  workers concurrently on non-overlapping ownership:
+  `bug-hunter-round31` (READ-ONLY on `src/` + `addon/`),
+  `docs-syncer-lessons` (`~/.claude/CLAUDE.md` — out-of-repo),
+  cert harness (`certification_report.md`). All three landed
+  cleanly. Reviewer found 2 HIGH + 3 MEDIUM + 1 LOW. Cert returned
+  6/6 PASS confirming branch still shippable.
+- **Round-32** — shipped all 6 round-31 fixes. The big one: FLIP
+  solver had NO NaN-divergence trap — exact symmetric oversight
+  with the MPM round-20 fix. Now ships `FlipDivergenceError` +
+  `has_diverged()` + CLI per-frame check + cache.json
+  `truncated_at_frame` + rc=2 — mirrors MPM pattern bit-for-bit.
+  Also added `solver` / `truncated_at_frame` / `truncation_reason`
+  fields to the `CacheManifest` dataclass to close the
+  schema-drift gap reviewer flagged (the typed reader had been
+  silently dropping the fields MPM-side raw-JSON writers were
+  injecting). Other fixes: PLY non-triangle face rejection,
+  `DomainTransform` per-axis degeneracy guard, `OT_clear_cache`
+  selective preload invalidate (was clearing ALL domains'
+  preloads), pushback `snap_eps` now `dx*0.1` capped at 1e-4.
+  8 new tests in `test_round32_fixes.py`.
+
+**Lessons shipped to `~/.claude/CLAUDE.md` §9.11 + §9.12** (by
+`docs-syncer-lessons` during the round-31 parallel sprint —
+previously listed as candidates above, now live in global rules):
+
+- **§9.11 — Guard comments mandatory**: every defensive guard
+  requires an inline `# dodge: <scenario>` comment so future-you
+  can spot when the guard inverts intent. Real example: round-23
+  added `if g_scene != 0.0 else 1.0` "for div-by-zero" but there
+  was no division → guard inverted zero-G scene intent → caught
+  only on round-26 self-review.
+- **§9.12 — Source-grep contract tests**: cheap regression
+  insurance for code paths that can't be unit-tested (Warp
+  kernels, removed forms, stacked decorators). Read source as
+  text, strip comments, assert pattern (not) present. Three real
+  examples now shipped: inflow gate `==` form, gravity ratio
+  inversion, `mpm_initial_velocity` pre-scale.
+
+**State of test suite:** 107 unit tests green (8 new in
+`test_round32_fixes` on top of the round-20-26 26 new tests).
+Source-grep contract tests still in place + extended.
+
+- **Round-33** (independent reviewer, parallel sprint) — 2 CRITICAL
+  + 2 MEDIUM on the FLIP attribute pipeline. CRITICAL:
+  `_apply_outflows_gpu` didn't compact `attr_color`/`attr_temperature`
+  alongside `pos`/`vel` → colour scrambling on every outflow event;
+  `prepare_frame` emit-append path didn't grow attr arrays → OOB
+  reads on inflow + base-coloured fluid where coloured was expected.
+  MEDIUM: MPM SDF box collider top-friction damped the FULL velocity
+  vector instead of tangential post-projection; MPM inflow keyframes
+  silently mis-interpolated on non-monotone frame lists or `lo > hi`
+  AABBs.
+- **Round-34** — shipped all 4 round-33 fixes. Both CRITICALs guarded
+  by source-grep contract tests (§9.12) since the actual codepath
+  needs CUDA + a FLIP scene with attrs + outflow, no fixture
+  exercises that today. 6 new tests in `test_round34_fixes.py`.
+  Bonus cleanup: added `@block("M5.11.5")` + literal `[BLK ...]`
+  test refs (block-registry hygiene); fixed `MpmDivergenceError`
+  export from `sim.mpm` package `__init__`.
+- **Round-35** (independent reviewer, parallel sprint with cert
+  harness) — 1 HIGH + 2 MEDIUM + 2 LOW. HIGH: CPU reseed path
+  silently dropped `attr_color`/`attr_temperature` — classic §9.6
+  mirror-drift, round-34 fixed the GPU sibling but forgot the CPU
+  <100k path. MEDIUM: MPM sidecar shim shape-stuck — verified
+  FALSE ALARM after re-reading round-24 per-frame indexing logic;
+  MeshExtractor.extract had no empty-pos guard, frame ghost-froze
+  when all particles exited. LOW: `array_scan` sync hot-path,
+  `__init__.py` warp import-error masking — both deferred.
+- **Round-36** — shipped HIGH CPU-reseed attr-drift fix (variant
+  return on `reseed_particles`: 4-tuple back-compat when no attrs,
+  6-tuple with `new_color`/`new_temperature` when any passed —
+  preserves the ~10 existing test callsites); MEDIUM
+  MeshExtractor empty-pos guard returns `(None, None)`. 5 new tests
+  in `test_round36_fixes.py` including a source-grep guard for the
+  CLI reseed branch. Round-35 sidecar-shim flagged as false alarm
+  in commit message. 2 LOW deferred. Cert harness verified 6/6 PASS
+  after round-34.
+- **Round-37** (parallel sprint with cert + docs) — 3 MEDIUM + 3 LOW.
+  Animated-inflow keyframe loop blew up at default
+  `frame_end=10000` (10–60s collect hang); `_patches.py`
+  `write_text` crashed on read-only install; `start_sync`
+  `TimeoutExpired` didn't flush drained stdout; `_export_obj`
+  fan-triangulated n-gons (degenerate fans on concave quads);
+  obstacle name `obstacle_{name}.obj` allowed Windows-illegal
+  chars.
+- **Round-38** — shipped 5 of 6 round-37 fixes (1 LOW deferred:
+  dev-only `_consolidate_demos` hardcoded path). 6 new tests.
+- **Round-39** (parallel sprint) — 1 HIGH + 2 MEDIUM + 1 LOW.
+  HIGH: modal tick dropped queued stdout on subprocess exit
+  (mirror-drift to the round-38 sync-path fix — classic §9.6).
+  MEDIUM: `seed_box` + `load_checkpoint` didn't invalidate the
+  captured CUDA graph; `enable_sub_dense` + `sub_dilation<1` hit
+  GS-RB band-edge bug. LOW: `load_post` didn't surface
+  `truncated_at_frame` warning.
+- **Round-40** — shipped all 4. 7 new tests.
+- **Round-41** (parallel sprint) — 1 CRITICAL + 2 HIGH + 2 MEDIUM
+  + 1 LOW. CRITICAL: `load_checkpoint` silently dropped attrs +
+  ignored `dx`/physics drift. HIGH: sub-dense proximity check
+  used stale `marker_host` for non-animated scenes; inflow box
+  overlapping obstacle spawned particles inside solid →
+  explosive ejection. MEDIUM: `mesh_marker` no 0-tri guard;
+  `--resume` seam double-emit. LOW: `mix_rgb` no clamp.
+- **Round-42** — shipped CRITICAL + 2 HIGH + 1 MEDIUM + 1 LOW
+  (10 new tests). Deferred 1 MEDIUM (`--resume` seam double-emit)
+  as documented follow-up — needs inflow-event-state persisted
+  across checkpoint, broader-scope than this sprint.
+- **Round-43** (parallel sprint) — 2 MEDIUM + 2 LOW.
+  Diminishing-returns visible. Pushback kernels ignored
+  `particle_selection` (wasted F-resets on held particles);
+  `OutflowBox` no `lo <= hi` validation (mirror gap of the
+  round-33 MPM-inflow keyframe fix); `apply_eevee_preset`
+  corrupted Eevee state under `engine=CYCLES`.
+- **Round-44** — shipped all 4. 8 new tests.
+- **Round-45** (parallel sprint, asked reviewer for explicit
+  "0 bugs" stop-signal) — 1 CRITICAL + 1 MEDIUM. Sprint NOT
+  done yet. CRITICAL: FLIP inflow path dropped per-source
+  `color` + `temperature` silently (`InflowBox` had no field —
+  classic §9.6 mirror-drift with MPM, which had it). MEDIUM:
+  APIC + CUDA graph capture allocated mid-capture when
+  `affine_C` was `None` after inflow event.
+- **Round-46** — shipped both. Plumbed `color`/`temperature`
+  through 4 files (`InflowBox` + `FluidEmitEvent` +
+  `publish_for_frame` + `prepare_frame` `col_pad` with
+  mask-lockstep + CLI). 10 new tests.
+- **Round-47 (FINAL)** — reviewer reported **"0 substantive
+  bugs after 8 files in ~30 min"**. Explicit STOP-the-sprint
+  signal: *"The curve is flat. Three reviewer rounds at 0/0/0
+  weren't a fluke; round-47 confirms it."* Cosmetic-only notes
+  (asymmetric `keep_ref` pattern, `MpmConfig.seed` without TOML
+  surface) flagged as future-considerations, not bugs.
+
+---
+
+## SPRINT COMPLETE
+
+- **Sprint duration:** rounds 20–47 (**28 rounds**, ~73 real
+  bugs across 14 reviewer rounds + 1 self-review).
+- **Branch state:** `feat/mpm-stability` is **22 commits**
+  beyond `main`.
+- **Test suite:** **183 unit tests green** in the `test_round*`
+  + ancillary suite.
+- **Cert harness:** 6/6 PASS verified after rounds 32, 34, 36,
+  38, 40, 42, 44, 46.
+- **Lessons §9.11 + §9.12 shipped** to `~/.claude/CLAUDE.md`.
+- **Open follow-ups:**
+  - 1 MEDIUM (round-41 `--resume` seam double-emit; needs
+    inflow event-state persistence — broader scope than this
+    sprint).
+  - 2 LOW (round-35 `array_scan` hot-path sync;
+    `__init__.py` warp-error masking — both cosmetic).
+  - 2 cosmetic future-considerations from round-47
+    (`vel` buffer `keep_ref` symmetry, `MpmConfig.seed` TOML
+    exposure).
+- **No CRITICAL / HIGH currently open.**
+- **Recommendation:** **ready for merge**. Pre-existing flakies
+  (A8.* registry sync — addon-only, walker scans `src/`;
+  `sparse_jacobi` timing test) remain out-of-scope.

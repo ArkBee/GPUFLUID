@@ -40,9 +40,15 @@ def _rebuild_mesh(obj, verts, faces, origin):
     n_v = len(verts)
     n_f = len(faces)
     me = obj.data
-    me.clear_geometry()
+    # Round-25: validate BEFORE clearing geometry. Pre-round-25 a
+    # corrupt/truncated/zero-data PLY mid-sequence (e.g. network
+    # share dropout during live-bake attach) wiped the visible mesh
+    # to nothing and returned. Now: keep the previous frame's last-
+    # good geometry on screen so the user sees a hold instead of a
+    # pop-to-empty-then-back glitch.
     if n_v == 0 or n_f == 0:
         return
+    me.clear_geometry()
     # Strip out-of-range face indices (MC degenerate triangles)
     if faces.size:
         mask = ((faces[:, 0] < n_v) & (faces[:, 1] < n_v) & (faces[:, 2] < n_v)
@@ -193,9 +199,21 @@ class PreloadCache:
     def values(self): return self._tables.values()
     def get(self, k: str, default=None): return self._tables.get(k, default)
     def pop(self, k: str, default=None):
-        if default is None and k not in self._tables:
-            return None
-        return self._tables.pop(k, default)
+        # Round-28: pre-round-28 this returned the popped table
+        # without calling `_free_table_static` — every pop() leaked
+        # N `_seq_NNNN` mesh datablocks into bpy.data.meshes. Only
+        # the explicit `invalidate()` path freed correctly, but
+        # callers using dict-shim `pop()` (e.g. Alembic-attach in
+        # `_ops.py`) silently piled up orphans on every re-attach.
+        # Mirror the invalidate behaviour: free the table on pop.
+        if k not in self._tables:
+            return default
+        tbl = self._tables.pop(k)
+        try:
+            PreloadCache._free_table_static(tbl)
+        except Exception:
+            pass
+        return tbl
     def clear(self) -> None: self._tables.clear()
 
     # ── Public API (the only surface NEW code should use) ──────────
@@ -392,9 +410,27 @@ def _preload_sequence(obj, cache_dir, pattern, origin, max_frames=None,
         try:
             import json
             with open(cache_json_path, "r", encoding="utf-8") as fh:
-                fc = int(json.load(fh).get("frame_count", max_frames))
+                manifest = json.load(fh)
+            fc = int(manifest.get("frame_count", max_frames))
             if fc > 0:
                 max_frames = min(max_frames, fc)
+            # Round-40: cache.json may carry truncated_at_frame +
+            # truncation_reason (round-20 MPM, round-32 FLIP). On
+            # scene reopen the loader previously honoured frame_count
+            # silently — user saw a clean preview that ended abruptly
+            # with no indication the bake had diverged. Now: surface
+            # a one-line WARNING per domain so the system console
+            # shows what happened, with the recovery hint embedded in
+            # the truncation_reason value.
+            t_at = manifest.get("truncated_at_frame")
+            t_reason = manifest.get("truncation_reason")
+            if t_at is not None:
+                _addon_logger.warning(
+                    "cache: '%s' loaded from a TRUNCATED bake "
+                    "(reason=%s, last valid frame=%s of %s requested). "
+                    "Preview will play but ends early; re-bake with "
+                    "softer params to recover.",
+                    obj.name, t_reason or "unknown", t_at, fc)
         except Exception as exc:  # noqa: BLE001
             _addon_logger.warning(
                 "cache: cache.json read failed (%s) — falling back to dir scan",
@@ -550,6 +586,23 @@ def _frame_change_handler(scene, depsgraph=None):
                         pos = np.load(pos_path).astype(np.float32)
                         kinds = (np.load(kind_path).astype(np.int32)
                                  if os.path.exists(kind_path) else None)
+                        # Round-24: bake killed between writing pos.npy
+                        # and kinds.npy → shape mismatch. Pre-round-24
+                        # _rebuild_ww_points would `keep &= kinds != 0`
+                        # against a wrong-shape kinds array — either
+                        # ValueError (caught here as generic warning,
+                        # no actionable info) or worse, NumPy broadcast
+                        # silently doing the wrong thing on edge sizes.
+                        # Now: explicit shape check, kinds dropped if
+                        # mismatched, frame still renders without
+                        # class-based visibility filter.
+                        if kinds is not None and kinds.shape[0] != pos.shape[0]:
+                            _addon_logger.warning(
+                                "ww: pos/kinds shape mismatch at frame %d "
+                                "for '%s' (pos=%d, kinds=%d) — bake "
+                                "interrupted mid-frame? dropping kinds.",
+                                f, obj.name, pos.shape[0], kinds.shape[0])
+                            kinds = None
                         _rebuild_ww_points(obj, pos, kinds, origin, visible_kinds)
                     except Exception as exc:  # noqa: BLE001
                         _addon_logger.warning(
@@ -579,7 +632,38 @@ def _on_load_post(_dummy):
     # before clearing.
     _PRELOAD.free_all()
     from .. import cache_binding as _cb
+    # Round-28: count candidate domains BEFORE iterating and warn
+    # the user if their LRU cap is smaller than the count — pre-
+    # round-28 the silent LRU eviction during initial load meant
+    # one randomly-chosen sim showed up empty in viewport without
+    # any visible signal.
+    _candidates = [
+        o for o in bpy.data.objects
+        if getattr(o, "type", None) == "MESH"
+        and _cb.get_cache_dir(o)
+        and os.path.isdir(str(_cb.get_cache_dir(o)))
+    ]
+    _cap = _preload_cap()
+    if len(_candidates) > _cap:
+        _addon_logger.warning(
+            "cache_loader: %d cache-bound domains in file but "
+            "preload_cap=%d — %d will be evicted during initial "
+            "load (LRU). Raise the cap in Addon Preferences to "
+            "keep all sims hot-loaded.",
+            len(_candidates), _cap, len(_candidates) - _cap)
     for obj in bpy.data.objects:
+        # Round-28: skip non-MESH objects upfront. The Domain Empty
+        # carries `KEY_BAKE_TRACE_CACHE_DIR` which shares the literal
+        # string "gpufluid_cache_dir" with `KEY_CACHE_DIR` (cache
+        # surface) — round-19's centralised-keys refactor missed the
+        # name collision in the load_post path. Pre-round-28 every
+        # Domain Empty emitted a false warning ("has cache_dir but
+        # no saved origin/dom_size") on every file load because Empty
+        # has BAKE_TRACE props (`gpufluid_origin`), not CACHE props
+        # (`gpufluid_cache_origin`). The frame_change handler already
+        # skips non-MESH; mirror that here.
+        if getattr(obj, "type", None) != "MESH":
+            continue
         cache_dir = _cb.get_cache_dir(obj)
         if not cache_dir or not os.path.isdir(str(cache_dir)):
             continue
