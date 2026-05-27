@@ -24,66 +24,74 @@ from ._warp_mpm_imports import MPMStateStruct
 
 
 @block("S2.17.2",
-       "Particle pushback inside cube body: snap to nearest face, "
-       "zero inward normal velocity, reset F/F_trial/C")
+       "Particle pushback inside (oriented) cube body: snap to nearest "
+       "face in local frame, zero inward normal velocity, reset "
+       "F/F_trial/C. Round-57: accepts a rotation matrix R whose "
+       "columns are world-space box-local axes — identity for AABB.")
 @wp.kernel
 def k_cube_pushback(
     state: MPMStateStruct,
     cx: float, cy: float, cz: float,
     hx: float, hy: float, hz: float,
     snap_eps: float,
+    R: wp.mat33,  # columns = world-space box-local +X/+Y/+Z axes
 ):
     p = wp.tid()
-    # Round-44: skip held inflow particles (selection == 1). Pre-
-    # round-44 the kernel still ran on them — wasting F/F_trial/C
-    # resets every step and, when a held particle's hold_pos
-    # overlapped this cube, rewriting position before next _pre_step's
-    # gate could re-bind. The gate kernel re-clobbers state on the
-    # next step so the visible artefact was masked in the common
-    # case, but the F-reset + grid-write cost is real.
+    # Round-44: skip held inflow particles (selection == 1).
     if state.particle_selection[p] == 1:
         return
     pos = state.particle_x[p]
-    rx = pos[0] - cx
-    ry = pos[1] - cy
-    rz = pos[2] - cz
-    if not (wp.abs(rx) < hx and wp.abs(ry) < hy and wp.abs(rz) < hz):
+    rel_world = wp.vec3(pos[0] - cx, pos[1] - cy, pos[2] - cz)
+    # World→local: R is orthonormal so R^T = R^-1.
+    Rt = wp.transpose(R)
+    rl = Rt * rel_world  # rel in box-local frame
+    if not (wp.abs(rl[0]) < hx and wp.abs(rl[1]) < hy
+            and wp.abs(rl[2]) < hz):
         return
-    # Inside cube body — pick nearest face (smallest "depth to face")
-    qx = hx - wp.abs(rx)
-    qy = hy - wp.abs(ry)
-    qz = hz - wp.abs(rz)
-    new_pos = pos
-    new_v = state.particle_v[p]
+    # Inside cube body (local frame) — pick nearest face.
+    qx = hx - wp.abs(rl[0])
+    qy = hy - wp.abs(rl[1])
+    qz = hz - wp.abs(rl[2])
+    new_rl = rl
+    v = state.particle_v[p]
+    vl = Rt * v  # local-frame velocity
+    new_vl = vl
     if qz <= qx and qz <= qy:
-        if rz > 0.0:
-            new_pos = wp.vec3(pos[0], pos[1], cz + hz + snap_eps)
-            if new_v[2] < 0.0:
-                new_v = wp.vec3(new_v[0], new_v[1], 0.0)
+        if rl[2] > 0.0:
+            new_rl = wp.vec3(rl[0], rl[1], hz + snap_eps)
+            if vl[2] < 0.0:
+                new_vl = wp.vec3(vl[0], vl[1], 0.0)
         else:
-            new_pos = wp.vec3(pos[0], pos[1], cz - hz - snap_eps)
-            if new_v[2] > 0.0:
-                new_v = wp.vec3(new_v[0], new_v[1], 0.0)
+            new_rl = wp.vec3(rl[0], rl[1], -hz - snap_eps)
+            if vl[2] > 0.0:
+                new_vl = wp.vec3(vl[0], vl[1], 0.0)
     elif qx <= qy:
-        if rx > 0.0:
-            new_pos = wp.vec3(cx + hx + snap_eps, pos[1], pos[2])
-            if new_v[0] < 0.0:
-                new_v = wp.vec3(0.0, new_v[1], new_v[2])
+        if rl[0] > 0.0:
+            new_rl = wp.vec3(hx + snap_eps, rl[1], rl[2])
+            if vl[0] < 0.0:
+                new_vl = wp.vec3(0.0, vl[1], vl[2])
         else:
-            new_pos = wp.vec3(cx - hx - snap_eps, pos[1], pos[2])
-            if new_v[0] > 0.0:
-                new_v = wp.vec3(0.0, new_v[1], new_v[2])
+            new_rl = wp.vec3(-hx - snap_eps, rl[1], rl[2])
+            if vl[0] > 0.0:
+                new_vl = wp.vec3(0.0, vl[1], vl[2])
     else:
-        if ry > 0.0:
-            new_pos = wp.vec3(pos[0], cy + hy + snap_eps, pos[2])
-            if new_v[1] < 0.0:
-                new_v = wp.vec3(new_v[0], 0.0, new_v[2])
+        if rl[1] > 0.0:
+            new_rl = wp.vec3(rl[0], hy + snap_eps, rl[2])
+            if vl[1] < 0.0:
+                new_vl = wp.vec3(vl[0], 0.0, vl[2])
         else:
-            new_pos = wp.vec3(pos[0], cy - hy - snap_eps, pos[2])
-            if new_v[1] > 0.0:
-                new_v = wp.vec3(new_v[0], 0.0, new_v[2])
-    state.particle_x[p] = new_pos
-    state.particle_v[p] = new_v
+            new_rl = wp.vec3(rl[0], -hy - snap_eps, rl[2])
+            if vl[1] > 0.0:
+                new_vl = wp.vec3(vl[0], 0.0, vl[2])
+    # Local → world, then add centre back.
+    new_rel_world = R * new_rl
+    new_v_world = R * new_vl
+    state.particle_x[p] = wp.vec3(
+        cx + new_rel_world[0],
+        cy + new_rel_world[1],
+        cz + new_rel_world[2],
+    )
+    state.particle_v[p] = new_v_world
     # F/C reset — accumulated deformation at rigid contact is artifact
     I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     Z = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)

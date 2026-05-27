@@ -29,6 +29,10 @@ _ADDON_DIR = _REPO / "addon"
 
 
 def test_mpm_skips_auto_promote_warns_about_limitation():
+    """R57 supersedes R56: MPM now has a real OBB collider, so the
+    "limitation" warning of R56 is gone and rotated boxes are handled
+    natively. We just verify the solver-aware branching is still there
+    (now to route MPM through OBB vs FLIP through SDF-mesh)."""
     src = (_ADDON_DIR / "gpufluid_blender" / "operators"
            / "bake.py").read_text()
     code = "\n".join(
@@ -40,13 +44,9 @@ def test_mpm_skips_auto_promote_warns_about_limitation():
     body = code[bbox_pos:next_branch]
     # Solver-aware branching must exist.
     assert 'dprops.solver == "mpm"' in body, (
-        "round-56 regressed: BBOX branch must check solver type "
-        "before auto-promote (MPM doesn't support type=mesh)")
-    assert "is_mpm" in body or "MPM currently supports" in body, (
-        "round-56 regressed: MPM-rotation warning must mention the "
-        "limitation explicitly")
-    # The MPM-rotated path must fall BACK to type=box (not crash, not
-    # silently drop) so the bake still gets an obstacle.
+        "round-56 regressed: BBOX branch must check solver type")
+    assert "is_mpm" in body, (
+        "round-56 regressed: solver routing flag missing")
+    # Both branches end up emitting a usable obstacle.
     assert '"type": "box"' in body, (
-        "round-56: MPM-rotated obstacle must fall back to axis-aligned "
-        "box so the solver at least sees something")
+        "BBOX branch must still produce type=box entries")

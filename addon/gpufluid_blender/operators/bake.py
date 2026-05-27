@@ -152,35 +152,96 @@ def collect_scene(context, domain_obj):
                 except Exception:
                     pass
 
-            # Round-56: MPM CLI only handles ObstacleBoxCfg (AABB).
-            # `type=mesh` obstacles are silently dropped in the MPM
-            # path → solver sees NO obstacles → fluid falls free past
-            # rotated geometry. Live-test caught: visible "cube
-            # interaction" was just the obstacle meshes rendered on
-            # top, no actual collision. Auto-promote is correct for
-            # FLIP (D4.3.GPU.BVH SDF mesh-marker handles rotated meshes),
-            # WRONG for MPM (the type=mesh emit is dead-letter). For
-            # MPM + rotated obstacle, emit a DIFFERENT warning so the
-            # user knows the limitation and can switch to FLIP if they
-            # need tilted geometry, or accept the bbox approximation.
+            # Round-57: MPM now has a native OBB collider — for
+            # rotated cubes we emit `type=box` + `rotation` matrix and
+            # the MPM kernel handles tilt correctly. The pre-round-57
+            # auto-promote-to-MESH path stays for FLIP (which uses the
+            # SDF mesh-marker D4.3.GPU.BVH path) AND for non-cube tilted
+            # meshes on MPM (where bbox + rotation isn't a faithful
+            # representation of the geometry).
             is_mpm = (dprops.solver == "mpm")
-            if is_mpm and (rotation_nonzero or non_axis_aligned) and o.type == "MESH":
-                why = ("rotation" if rotation_nonzero
-                       else "non-axis-aligned mesh data")
-                warnings.append(
-                    f"obstacle '{o.name}' has {why} but solver=MPM. "
-                    f"MPM currently supports only axis-aligned box "
-                    f"colliders — the rotated shape will be treated as "
-                    f"its (bigger) axis-aligned bounding box and the "
-                    f"orientation will be LOST. Workarounds: (1) switch "
-                    f"solver to FLIP which has full SDF mesh-marker "
-                    f"obstacle support; (2) keep MPM and live with the "
-                    f"bbox approximation; (3) keep MPM and rebuild the "
-                    f"obstacle as a stack of axis-aligned primitives.")
+            # MPM-OBB is faithful only when the source object is a
+            # roughly cube-shaped mesh — for arbitrary tilted geometry
+            # (a bunny, a torus) we still fall back to FLIP's mesh path.
+            # Heuristic: trust BBOX when the user explicitly chose
+            # obstacle_type=BBOX (this branch); they're telling us
+            # "treat me as a box". So MPM always gets the OBB box here.
+            if is_mpm and o.type == "MESH":
+                # Build OBB: decompose matrix_world to separate the
+                # rotation (orthonormal R) from scale; half_size is the
+                # OBJECT-LOCAL bbox half-extent times effective scale.
+                # This is what makes the rotated cube the SAME SIZE as
+                # the visible mesh (not the world-AABB-of-rotated which
+                # is bigger and was the round-52 silent-fail symptom).
+                _, rot_q, scl = o.matrix_world.decompose()
+                R3 = rot_q.to_matrix()
+                # local bbox in object-local coords (already includes
+                # mesh-data scale — that's what's drawn on screen).
+                local_corners = [mathutils.Vector(c) for c in o.bound_box]
+                lo_l = mathutils.Vector((
+                    min(v.x for v in local_corners),
+                    min(v.y for v in local_corners),
+                    min(v.z for v in local_corners),
+                ))
+                hi_l = mathutils.Vector((
+                    max(v.x for v in local_corners),
+                    max(v.y for v in local_corners),
+                    max(v.z for v in local_corners),
+                ))
+                centre_l = (lo_l + hi_l) * 0.5
+                half_l = (hi_l - lo_l) * 0.5
+                # Effective world-frame half-extent (post object scale).
+                hx_obb = abs(half_l.x * scl.x)
+                hy_obb = abs(half_l.y * scl.y)
+                hz_obb = abs(half_l.z * scl.z)
+                # World-space centre = matrix_world @ local_centre.
+                centre_obb_world = o.matrix_world @ centre_l
+                # Convert to sim space.
+                cw_sim = to_sim((centre_obb_world.x,
+                                 centre_obb_world.y,
+                                 centre_obb_world.z))
+                # Half-extents into sim space: divide by per-axis
+                # domain size. Assumes ~cubic domain — for severely
+                # anisotropic domains the rotation in sim coords
+                # would no longer be orthogonal; warn in that case.
+                inv_avg = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
+                hx_sim = hx_obb * inv_avg
+                hy_sim = hy_obb * inv_avg
+                hz_sim = hz_obb * inv_avg
+                if (rotation_nonzero or non_axis_aligned) and (
+                    max(inv_size) / min(inv_size) > 1.05
+                ):
+                    warnings.append(
+                        f"obstacle '{o.name}' is rotated and the "
+                        f"domain is non-cubic — OBB collider assumes "
+                        f"isotropic domain, the tilt may render at "
+                        f"the wrong angle. Workaround: make domain "
+                        f"cubic, or rebuild obstacle as a stack of "
+                        f"axis-aligned primitives.")
+                # Apply-Rotation case: mesh data was rotated, then
+                # Ctrl+A → R zeroed rotation_euler. We cannot recover
+                # the original orientation — the mesh bound_box is now
+                # an axis-aligned bbox of the tilted geometry (bigger
+                # than the visible shape). Warn the user that for OBB
+                # to work they need to NOT apply rotation.
+                if non_axis_aligned and not rotation_nonzero:
+                    warnings.append(
+                        f"obstacle '{o.name}' has Apply'd rotation — "
+                        f"the original orientation is lost in mesh "
+                        f"data, OBB collider falls back to AABB of "
+                        f"tilted vertices (bigger than the visible "
+                        f"shape). To get faithful tilt: undo the "
+                        f"Apply (Object → Apply, with rotation NOT "
+                        f"checked) and rotate via the R hotkey only.")
+                # R as nested rows (matrix_world @ local axes).
+                rot_rows = tuple(
+                    (R3[i][0], R3[i][1], R3[i][2]) for i in range(3)
+                )
                 obstacles.append({
                     "type": "box",
-                    "center": to_sim(centre_w),
-                    "half_size": (hx, hy, hz),
+                    "center": cw_sim,
+                    "half_size": (hx_sim, hy_sim, hz_sim),
+                    "rotation": rot_rows,
                 })
             elif (rotation_nonzero or non_axis_aligned) and o.type == "MESH":
                 if rotation_nonzero:

@@ -91,10 +91,25 @@ class MpmFluidParams:
 
 @dataclass
 class MpmCubeCollider:
-    """A single axis-aligned-box rigid obstacle."""
+    """A single rigid box obstacle.
+
+    Round-57: optional ``rotation`` makes this an oriented bounding box
+    (OBB). The rotation is the world-space orientation expressed as a
+    3×3 matrix whose **columns** are the box-local axes (+X, +Y, +Z) in
+    world coordinates. ``None`` ⇒ identity (axis-aligned, pre-round-57
+    behaviour). Must be orthonormal (no scale folded in); use the
+    addon-side ``matrix_world.decompose()`` rotation quaternion to build
+    it. half_size is in box-local frame.
+    """
     centre: tuple[float, float, float]
     half_size: tuple[float, float, float]
     tangential_friction: float = 0.6  # keep-fraction on top face; 1.0 = slip
+    # 3×3 with columns = world-space box-local +X/+Y/+Z axes.
+    rotation: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ] | None = None
 
 
 @dataclass
@@ -361,10 +376,31 @@ class MpmSolver:
         )
         # Cube colliders — register our SDF box kernel + a Dirichlet_collider
         # struct per cube to carry the box geometry into the kernel.
+        # Round-57: optional OBB. The 3 basis-vector fields x_unit /
+        # y_unit / direction of Dirichlet_collider carry the box-local
+        # axes in world coordinates. For AABB we fill with identity so
+        # the kernel reduces to pre-round-57 behaviour bit-exactly.
         for cube in cfg.cubes:
             param = Dirichlet_collider()
             param.point = wp.vec3(*cube.centre)
             param.size = wp.vec3(*cube.half_size)
+            if cube.rotation is None:
+                ex_c = (1.0, 0.0, 0.0)
+                ey_c = (0.0, 1.0, 0.0)
+                ez_c = (0.0, 0.0, 1.0)
+            else:
+                # rotation is row-major: rotation[i] is the i-th ROW.
+                # Columns = box-local axes in world (cube.rotation
+                # contract). Extract columns by indexing each row.
+                ex_c = (cube.rotation[0][0], cube.rotation[1][0],
+                        cube.rotation[2][0])
+                ey_c = (cube.rotation[0][1], cube.rotation[1][1],
+                        cube.rotation[2][1])
+                ez_c = (cube.rotation[0][2], cube.rotation[1][2],
+                        cube.rotation[2][2])
+            param.x_unit = wp.vec3(*ex_c)
+            param.y_unit = wp.vec3(*ey_c)
+            param.direction = wp.vec3(*ez_c)
             # surface_type=1 is our convention for "slip with top friction"
             param.surface_type = 1
             param.friction = cube.tangential_friction
@@ -381,14 +417,28 @@ class MpmSolver:
         # pre-round-32 0.0001 so default-resolution behaviour is bit-
         # exact with prior bakes.
         _snap_eps = min(1e-4, cfg.dx() * 0.1)
-        self._cube_params = [
-            (
+        # Round-57: pushback kernel now takes a mat33 rotation as the
+        # last arg (identity for axis-aligned cubes). Build it from
+        # cube.rotation (row-major) or default to identity.
+        self._cube_params = []
+        for cube in cfg.cubes:
+            if cube.rotation is None:
+                R = wp.mat33(1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.0, 0.0, 1.0)
+            else:
+                r = cube.rotation
+                R = wp.mat33(
+                    r[0][0], r[0][1], r[0][2],
+                    r[1][0], r[1][1], r[1][2],
+                    r[2][0], r[2][1], r[2][2],
+                )
+            self._cube_params.append((
                 cube.centre[0], cube.centre[1], cube.centre[2],
                 cube.half_size[0], cube.half_size[1], cube.half_size[2],
                 _snap_eps,
-            )
-            for cube in cfg.cubes
-        ]
+                R,
+            ))
         self._wall_lo = cfg.walls.lo
         self._wall_hi = cfg.walls.hi
 

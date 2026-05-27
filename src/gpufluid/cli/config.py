@@ -103,6 +103,14 @@ class ObstacleBoxCfg:
     type: Literal["box"]
     center: Tuple[float, float, float]
     half_size: Tuple[float, float, float]
+    # Round-57: optional OBB rotation. 3×3 matrix as nested tuple, rows
+    # in row-major. Columns are world-space box-local +X/+Y/+Z axes
+    # (orthonormal — no scale folded in). None ⇒ axis-aligned.
+    rotation: Optional[Tuple[
+        Tuple[float, float, float],
+        Tuple[float, float, float],
+        Tuple[float, float, float],
+    ]] = None
 
 
 @dataclass
@@ -351,10 +359,24 @@ def _parse_obstacle(d: dict) -> ObstacleCfg:
             radius=float(d["radius"]),
         )
     if t == "box":
+        # Round-57: optional `rotation` as a 3×3 nested list. Each row
+        # is parsed independently; absence ⇒ axis-aligned (rotation=None).
+        rot_raw = d.get("rotation")
+        rotation = None
+        if rot_raw is not None:
+            if len(rot_raw) != 3:
+                raise BlockError("C7.1",
+                    "obstacle.rotation must be a 3×3 matrix (got "
+                    f"{len(rot_raw)} rows)")
+            rotation = tuple(
+                _tuple(row, 3, f"obstacle.rotation[{i}]")
+                for i, row in enumerate(rot_raw)
+            )
         return ObstacleBoxCfg(
             type="box",
             center=_tuple(d["center"], 3, "obstacle.center"),
             half_size=_tuple(d["half_size"], 3, "obstacle.half_size"),
+            rotation=rotation,
         )
     if t == "cylinder_y":
         return ObstacleCylinderYCfg(

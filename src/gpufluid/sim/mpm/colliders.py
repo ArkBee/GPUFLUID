@@ -49,17 +49,32 @@ def k_sdf_box_collide(
     semantics — what we use for cube-top accumulation), or none if
     ``param.surface_type == 2`` (pure slip everywhere).
     """
+    # Round-57: oriented bounding box. Box-local axes (world coords)
+    # are stored in `param.x_unit`, `param.y_unit`, `param.direction`.
+    # For axis-aligned obstacles solver.py loads identity columns
+    # (1,0,0)/(0,1,0)/(0,0,1) so the math reduces to the pre-round-57
+    # AABB form bit-exactly.
     gx, gy, gz = wp.tid()
-    px = float(gx) * model.dx - param.point[0]
-    py = float(gy) * model.dx - param.point[1]
-    pz = float(gz) * model.dx - param.point[2]
+    rel = wp.vec3(
+        float(gx) * model.dx - param.point[0],
+        float(gy) * model.dx - param.point[1],
+        float(gz) * model.dx - param.point[2],
+    )
+    ex = param.x_unit
+    ey = param.y_unit
+    ez = param.direction
+    # World→local: dot with each basis vector.
+    plx = wp.dot(rel, ex)
+    ply = wp.dot(rel, ey)
+    plz = wp.dot(rel, ez)
     halfx = param.size[0]
     halfy = param.size[1]
     halfz = param.size[2]
-    qx = wp.abs(px) - halfx
-    qy = wp.abs(py) - halfy
-    qz = wp.abs(pz) - halfz
-    # SDF: positive outside, negative inside
+    qx = wp.abs(plx) - halfx
+    qy = wp.abs(ply) - halfy
+    qz = wp.abs(plz) - halfz
+    # SDF: positive outside, negative inside (in local frame; for OBB
+    # the SDF is identical in local — rotation preserves distance).
     d_out = wp.sqrt(wp.max(qx, 0.0) * wp.max(qx, 0.0)
                   + wp.max(qy, 0.0) * wp.max(qy, 0.0)
                   + wp.max(qz, 0.0) * wp.max(qz, 0.0))
@@ -67,39 +82,35 @@ def k_sdf_box_collide(
     d = d_out + d_in
     if d >= model.dx:
         return  # outside influence shell
-    # Pick outward normal from largest q component
-    nx = 0.0
-    ny = 0.0
-    nz = 0.0
+    # Outward normal in box-LOCAL frame, then rotate to world.
+    nlx = float(0.0)
+    nly = float(0.0)
+    nlz = float(0.0)
     if qx >= qy and qx >= qz:
-        if px > 0.0: nx = 1.0
-        else:        nx = -1.0
+        if plx > 0.0: nlx = 1.0
+        else:         nlx = -1.0
     elif qy >= qz:
-        if py > 0.0: ny = 1.0
-        else:        ny = -1.0
+        if ply > 0.0: nly = 1.0
+        else:         nly = -1.0
     else:
-        if pz > 0.0: nz = 1.0
-        else:        nz = -1.0
+        if plz > 0.0: nlz = 1.0
+        else:         nlz = -1.0
     if d < -1.5 * model.dx:
         # Deep inside — zero completely
         state.grid_v_out[gx, gy, gz] = wp.vec3(0.0, 0.0, 0.0)
         return
-    # Boundary shell — project inward-normal component
+    # Local normal → world normal: n_w = nlx*ex + nly*ey + nlz*ez
+    n = nlx * ex + nly * ey + nlz * ez
+    # Boundary shell — project inward-normal component (world frame).
     v = state.grid_v_out[gx, gy, gz]
-    n = wp.vec3(nx, ny, nz)
     vn = wp.dot(v, n)
     if vn < 0.0:
         v = v - vn * n
-    # Top-face friction (surface_type == 1 means "slip with top friction"):
-    # damp tangential v on +Z face when configured.
-    # Round-34: pre-round-34 we did `v = v * param.friction` AFTER the
-    # inward-normal projection — that also damped the NORMAL component
-    # (the outward-flowing remainder), making particles just-detached
-    # from the surface decelerate vertically too. Correct: separate
-    # tangential vs normal AFTER projection, scale ONLY tangential.
-    if param.surface_type == 1 and nz > 0.99:
-        # Re-decompose v post-projection: vn is outward-only (vn >= 0
-        # after the if vn<0 clip above); tangential = v - vn*n.
+    # Top-face friction: "top" = box-local +Z (so for tilted obstacles
+    # friction follows the tilt — fluid pooling on the tilted top face,
+    # which is what users expect). nlz > 0.99 selects the +Z LOCAL face.
+    # Round-34: tangential-only damp post-projection — see history.
+    if param.surface_type == 1 and nlz > 0.99:
         vn_post = wp.dot(v, n)
         v_normal = vn_post * n
         v_tangent = v - v_normal

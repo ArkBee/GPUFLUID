@@ -176,10 +176,12 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     cubes = []
     for ob in scene.obstacle:
         if isinstance(ob, ObstacleBoxCfg):
+            # Round-57: forward optional OBB rotation (None ⇒ AABB).
             cubes.append(MpmCubeCollider(
                 centre=tuple(ob.center),
                 half_size=tuple(ob.half_size),
                 tangential_friction=sim.mpm_cube_friction,
+                rotation=ob.rotation,
             ))
     # Place tap zone just above the highest cube top; if no cube, above floor
     if cubes:

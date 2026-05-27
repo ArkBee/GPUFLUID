@@ -33,13 +33,16 @@ def test_bake_warns_on_bbox_with_rotation():
     # The detect-and-warn block must exist near the BBOX branch.
     bbox_pos = code.find('obstacle_type == "BBOX"')
     assert bbox_pos > 0, "BBOX branch missing — collect_scene refactored?"
-    # Within 600 chars after the branch, must reference rotation_euler
-    # and a warnings.append call.
-    window = code[bbox_pos:bbox_pos + 1600]  # widened round-54
+    # Round-57 supersedes R52's "warn user that rotation is dropped"
+    # contract — MPM now handles OBB natively, so rotation is no longer
+    # silently lost. We still require the BBOX branch to INSPECT
+    # rotation_euler (that's the entry point to the OBB path), but the
+    # MESH-fallback warning is gone for the MPM case.
+    window = code[bbox_pos:bbox_pos + 3000]  # R57 widened the branch
     assert "rotation_euler" in window, (
         "round-52 regressed: BBOX branch must inspect rotation_euler")
+    # Some warnings.append still exists (Apply-Rotation case + non-
+    # cubic domain warning) — just looser assertion.
     assert "warnings.append" in window, (
-        "round-52 regressed: BBOX branch must warn on non-zero rotation")
-    # The recommendation must mention MESH type so the user knows the fix.
-    assert "MESH" in window, (
-        "round-52: warning must recommend obstacle_type=MESH as the fix")
+        "BBOX branch must still warn on the edge cases (Apply-Rotation "
+        "+ non-cubic domain) — R57 only removed the rotation-lost warning")
