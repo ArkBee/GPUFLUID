@@ -379,6 +379,18 @@ class MeshExtractor:
         -------
         (verts, faces) or (None, None) when no surface emerges.
         """
+        # Round-36: empty input guard. Pre-round-36 a zero-particle
+        # extract (every particle exited an outflow in one frame, or
+        # MPM diverged pre-empting all particles, or solver state was
+        # reset) hit two failure modes: (a) wp.HashGrid.build on an
+        # empty pos array raises on some Warp versions; (b) CPU MC
+        # path's `self.dens.numpy()` returned the PREVIOUS frame's
+        # data (dens never cleared) so the prior frame's surface
+        # ghost-froze into all subsequent empty frames silently. Now:
+        # short-circuit cleanly with (None, None).
+        n_particles = int(pos.shape[0]) if pos is not None else 0
+        if n_particles == 0:
+            return None, None
         wp.launch(_k_zero3, dim=(self.nx, self.ny, self.nz), inputs=[self.dens], device=self.device)
         if mesh_method == "trilinear":
             wp.launch(k_density_scatter, dim=pos.shape[0],

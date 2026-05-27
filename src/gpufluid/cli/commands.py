@@ -652,11 +652,34 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 # Refresh marker host snapshot — the per-step P2G marker is only
                 # live on GPU, so without this the reseed sees only walls/obstacles.
                 current_marker = solver.marker.numpy()
-                new_pos, new_vel, n_emit, n_cull = reseed_particles(
-                    cur_pos, cur_vel, current_marker, solver.dx, reseed_cfg, rng_reseed)
+                # Round-36: pass attrs through CPU reseed so they stay
+                # row-aligned with pos/vel (round-35 reviewer caught
+                # exact §9.6 mirror-drift — GPU path got attr handling
+                # in round-34, CPU sibling forgotten). Variant return:
+                # 6-tuple when any attr is non-None, else 4-tuple.
+                cur_col = (solver.attr_color.numpy()
+                           if solver.attr_color is not None else None)
+                cur_temp = (solver.attr_temperature.numpy()
+                            if solver.attr_temperature is not None else None)
+                has_attrs = cur_col is not None or cur_temp is not None
+                out = reseed_particles(
+                    cur_pos, cur_vel, current_marker, solver.dx, reseed_cfg,
+                    rng_reseed,
+                    attr_color=cur_col, attr_temperature=cur_temp)
+                if has_attrs:
+                    new_pos, new_vel, n_emit, n_cull, new_col, new_temp = out
+                else:
+                    new_pos, new_vel, n_emit, n_cull = out
+                    new_col, new_temp = None, None
                 if n_emit > 0 or n_cull > 0:
                     solver.pos = wp.array(new_pos, dtype=wp.vec3, device=solver.device)
                     solver.vel = wp.array(new_vel, dtype=wp.vec3, device=solver.device)
+                    if new_col is not None:
+                        solver.attr_color = wp.array(
+                            new_col, dtype=wp.vec3, device=solver.device)
+                    if new_temp is not None:
+                        solver.attr_temperature = wp.array(
+                            new_temp, dtype=float, device=solver.device)
                     solver.affine_C = None
                     solver.n_particles = len(new_pos)
         ts = time.time()
