@@ -957,11 +957,21 @@ def cmd_bench(args: argparse.Namespace) -> int:
     for n, ppc, iters, n_steps in cfgs:
         s = FlipSolver3D(nx=n, ny=n, nz=n, dx=1.0 / n)
         s.seed_box(lo=(0.05, 0.05, 0.05), hi=(0.40, 0.70, 0.40), ppc=ppc)
+        # Round-50: pre-round-50 the warmup loop AND the timed loop ran
+        # without `wp.synchronize()` — `FlipSolver3D.step()` enqueues
+        # Warp kernels asynchronously and time.time() bracketed only
+        # the Python-side dispatch latency. Reported steps/s was
+        # inflated 5-50× (often by orders of magnitude); anyone
+        # comparing perf branches with `gpufluid bench` steered on
+        # noise. Fix: sync before start_time AND after the loop so
+        # the bracket covers actual GPU work.
         for _ in range(3):
             s.step(0.005, pressure_iters=iters)
+        wp.synchronize()       # warmup queue drained
         t = time.time()
         for _ in range(n_steps):
             s.step(0.005, pressure_iters=iters)
+        wp.synchronize()       # timed queue drained before clock-stop
         dt = time.time() - t
         print(f"  {n:>4}^3      {s.n_particles:>10} {iters:>5} {n_steps/dt:>10.1f} {1000*dt/n_steps:>9.2f}ms")
     return 0
