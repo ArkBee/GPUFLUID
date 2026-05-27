@@ -51,9 +51,25 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
         rendered as a flat uniform colour (live-found 2026-05-25).
     """
     me = obj.data
-    me.clear_geometry()
     n_v = len(verts)
     n_f = len(faces)
+    # Round-28: mirror cache_loader._rebuild_mesh's bounds check on
+    # face indices (mirror-operator drift caught by round-27). A
+    # corrupt PLY with a degenerate MC triangle (vertex index >= n_v
+    # or < 0) crashed Blender's polygon validator on foreach_set —
+    # the headless render path hit it hard because no fixture
+    # exercises malformed PLYs and the crash bubbled up as a Blender
+    # rc=1 with no actionable message.
+    faces_np = np.asarray(faces, dtype=np.int32)
+    if faces_np.size and n_v > 0:
+        mask = ((faces_np[:, 0] < n_v) & (faces_np[:, 1] < n_v)
+                & (faces_np[:, 2] < n_v)
+                & (faces_np[:, 0] >= 0) & (faces_np[:, 1] >= 0)
+                & (faces_np[:, 2] >= 0))
+        if not mask.all():
+            faces_np = np.ascontiguousarray(faces_np[mask])
+            n_f = faces_np.shape[0]
+    me.clear_geometry()
     if n_v == 0 or n_f == 0:
         return
     me.vertices.add(n_v)
@@ -66,7 +82,7 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
     me.polygons.foreach_set(
         "loop_total", np.full(n_f, 3, dtype=np.int32))
     me.polygons.foreach_set(
-        "vertices", np.asarray(faces, dtype=np.int32).ravel())
+        "vertices", faces_np.ravel())
     if colors is not None and len(colors) != n_v:
         # Round-22: previously this branch was a silent `pass` — a writer
         # producing a mismatched colour block (third-party PLY drift,

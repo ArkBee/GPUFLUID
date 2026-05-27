@@ -72,7 +72,28 @@ def block(block_id: str, description: str = "") -> Callable:
             source_line=src_line,
         )
         bucket = _REGISTRY.setdefault(block_id, [])
-        if not any(b.qualname == info.qualname for b in bucket):
+        # Round-28: pre-round-28 a duplicate qualname under the same
+        # block_id was DROPPED SILENTLY — the second @block decorator
+        # body was registered nowhere, while the FIRST body in the
+        # file kept the block_id. Round-21 caught the cmd_render
+        # duplicate by accident (registry pointed at wrong callable);
+        # the underlying detection was the silent-dedup logic here.
+        # Now: log a WARNING via stdlib logging so future re-occurrences
+        # are immediately visible (and any test that inits the registry
+        # under caplog can assert against it).
+        if any(b.qualname == info.qualname for b in bucket):
+            import logging as _log
+            _log.getLogger("gpufluid.blocks").warning(
+                "blocks: duplicate qualname '%s' under block_id '%s' "
+                "(prior at %s:%d, new at %s:%d) — second registration "
+                "DROPPED. If both bodies are intentional, give them "
+                "different block_ids; if one is a stale copy/paste, "
+                "delete it.",
+                info.qualname, block_id,
+                next(b.source_file for b in bucket if b.qualname == info.qualname),
+                next(b.source_line for b in bucket if b.qualname == info.qualname),
+                info.source_file, info.source_line)
+        else:
             bucket.append(info)
         fn.__block_id__ = block_id
         return fn

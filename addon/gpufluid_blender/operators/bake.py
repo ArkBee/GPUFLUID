@@ -492,9 +492,21 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         if result is None:
             return {"PASS_THROUGH"}
         if "FINISHED" in result:
-            # Modal-success: do auto-attach, then INFO report.
-            self._auto_attach_post_bake()
-            self.report({"INFO"}, "gpufluid bake complete")
+            # Round-28: re-arm the class-level reentrance mutex around
+            # the auto-attach call. tick_modal._finish() cleared
+            # `_is_running=False` before returning FINISHED, opening a
+            # single-tick race window where the user clicking Bake
+            # again here would spawn a fresh subprocess while
+            # `_auto_attach_post_bake` is mid-mutation of `_PRELOAD`
+            # (live-found by round-27 reviewer). Hold the mutex for
+            # the attach call too; clear after.
+            cls = self.__class__
+            try:
+                cls._is_running = True
+                self._auto_attach_post_bake()
+                self.report({"INFO"}, "gpufluid bake complete")
+            finally:
+                cls._is_running = False
         return result
 
     def cancel(self, context):

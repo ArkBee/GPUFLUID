@@ -80,7 +80,12 @@ def main():
         raise SystemExit(
             f"[A8.12] malformed JSON payload: {exc}; "
             f"first 80 chars: {rest[0][:80]!r}")
-    for required in ("cache", "scene", "out"):
+    # Round-28: include EVERY key build_renderer_argv unconditionally
+    # indexes. Pre-round-28 only cache/scene/out were checked, and a
+    # caller (hand-built JSON or future drift) missing `label` /
+    # `color` / `fps` got a bare KeyError traceback through Blender
+    # — exactly the failure mode round-25 set out to eliminate.
+    for required in ("cache", "scene", "out", "label", "color", "fps"):
         if required not in payload:
             raise SystemExit(
                 f"[A8.12] payload missing required key '{required}'; "

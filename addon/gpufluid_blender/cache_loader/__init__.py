@@ -199,9 +199,21 @@ class PreloadCache:
     def values(self): return self._tables.values()
     def get(self, k: str, default=None): return self._tables.get(k, default)
     def pop(self, k: str, default=None):
-        if default is None and k not in self._tables:
-            return None
-        return self._tables.pop(k, default)
+        # Round-28: pre-round-28 this returned the popped table
+        # without calling `_free_table_static` — every pop() leaked
+        # N `_seq_NNNN` mesh datablocks into bpy.data.meshes. Only
+        # the explicit `invalidate()` path freed correctly, but
+        # callers using dict-shim `pop()` (e.g. Alembic-attach in
+        # `_ops.py`) silently piled up orphans on every re-attach.
+        # Mirror the invalidate behaviour: free the table on pop.
+        if k not in self._tables:
+            return default
+        tbl = self._tables.pop(k)
+        try:
+            PreloadCache._free_table_static(tbl)
+        except Exception:
+            pass
+        return tbl
     def clear(self) -> None: self._tables.clear()
 
     # ── Public API (the only surface NEW code should use) ──────────
@@ -602,7 +614,38 @@ def _on_load_post(_dummy):
     # before clearing.
     _PRELOAD.free_all()
     from .. import cache_binding as _cb
+    # Round-28: count candidate domains BEFORE iterating and warn
+    # the user if their LRU cap is smaller than the count — pre-
+    # round-28 the silent LRU eviction during initial load meant
+    # one randomly-chosen sim showed up empty in viewport without
+    # any visible signal.
+    _candidates = [
+        o for o in bpy.data.objects
+        if getattr(o, "type", None) == "MESH"
+        and _cb.get_cache_dir(o)
+        and os.path.isdir(str(_cb.get_cache_dir(o)))
+    ]
+    _cap = _preload_cap()
+    if len(_candidates) > _cap:
+        _addon_logger.warning(
+            "cache_loader: %d cache-bound domains in file but "
+            "preload_cap=%d — %d will be evicted during initial "
+            "load (LRU). Raise the cap in Addon Preferences to "
+            "keep all sims hot-loaded.",
+            len(_candidates), _cap, len(_candidates) - _cap)
     for obj in bpy.data.objects:
+        # Round-28: skip non-MESH objects upfront. The Domain Empty
+        # carries `KEY_BAKE_TRACE_CACHE_DIR` which shares the literal
+        # string "gpufluid_cache_dir" with `KEY_CACHE_DIR` (cache
+        # surface) — round-19's centralised-keys refactor missed the
+        # name collision in the load_post path. Pre-round-28 every
+        # Domain Empty emitted a false warning ("has cache_dir but
+        # no saved origin/dom_size") on every file load because Empty
+        # has BAKE_TRACE props (`gpufluid_origin`), not CACHE props
+        # (`gpufluid_cache_origin`). The frame_change handler already
+        # skips non-MESH; mirror that here.
+        if getattr(obj, "type", None) != "MESH":
+            continue
         cache_dir = _cb.get_cache_dir(obj)
         if not cache_dir or not os.path.isdir(str(cache_dir)):
             continue
