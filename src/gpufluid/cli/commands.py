@@ -355,14 +355,22 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             # the regular colour sidecar.
             vc_u8 = None
             cols_np = None  # (P, 3) float32 in [0,1] for whichever source
+            # Round-24: sidecars now de-duplicated — frame 0 written
+            # once; subsequent frames only get their own .npy when the
+            # particle count drifts (mid-bake spawn/death). Fall back
+            # to frame_0000.npy whenever the per-frame file is absent.
             if use_temp_color and v.shape[0] > 0:
                 temp_path = temps_dir / f"frame_{frame_idx:04d}.npy"
+                if not temp_path.exists():
+                    temp_path = temps_dir / "frame_0000.npy"
                 if temp_path.exists():
                     temps_np = np.load(temp_path).astype(np.float32)
                     if temps_np.shape[0] == pts.shape[0]:
                         cols_np = cmap_fn(temps_np, t_min_cfg, t_max_cfg)
             if cols_np is None and has_color_path and v.shape[0] > 0:
                 col_path = colors_dir / f"frame_{frame_idx:04d}.npy"
+                if not col_path.exists():
+                    col_path = colors_dir / "frame_0000.npy"
                 if col_path.exists():
                     loaded = np.load(col_path).astype(np.float32)
                     if loaded.shape[0] == pts.shape[0]:

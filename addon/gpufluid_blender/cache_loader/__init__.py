@@ -550,6 +550,23 @@ def _frame_change_handler(scene, depsgraph=None):
                         pos = np.load(pos_path).astype(np.float32)
                         kinds = (np.load(kind_path).astype(np.int32)
                                  if os.path.exists(kind_path) else None)
+                        # Round-24: bake killed between writing pos.npy
+                        # and kinds.npy → shape mismatch. Pre-round-24
+                        # _rebuild_ww_points would `keep &= kinds != 0`
+                        # against a wrong-shape kinds array — either
+                        # ValueError (caught here as generic warning,
+                        # no actionable info) or worse, NumPy broadcast
+                        # silently doing the wrong thing on edge sizes.
+                        # Now: explicit shape check, kinds dropped if
+                        # mismatched, frame still renders without
+                        # class-based visibility filter.
+                        if kinds is not None and kinds.shape[0] != pos.shape[0]:
+                            _addon_logger.warning(
+                                "ww: pos/kinds shape mismatch at frame %d "
+                                "for '%s' (pos=%d, kinds=%d) — bake "
+                                "interrupted mid-frame? dropping kinds.",
+                                f, obj.name, pos.shape[0], kinds.shape[0])
+                            kinds = None
                         _rebuild_ww_points(obj, pos, kinds, origin, visible_kinds)
                     except Exception as exc:  # noqa: BLE001
                         _addon_logger.warning(

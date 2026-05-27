@@ -492,16 +492,60 @@ class MpmSolver:
         out_frame = int(frame_index // max(1, self.cfg.dump_every))
         mask = (np.asarray(sel).ravel() == 0)
         sidecar_dir = out_dir.parent
+        # Round-24: pre-round-24 we wrote the entire attribute array
+        # (whole-particle, never mutated post-init) every frame —
+        # an MPM bake with 200k particles × 300 frames × 2 attrs
+        # produced ~120 MB of literally-identical data on disk.
+        # Now: write each sidecar once (when out_frame == 0 OR file
+        # absent — covers the case where someone restarts mid-bake)
+        # and mesh-pass reads frame 0 for every frame's lookup. The
+        # `selection_mask` masking is preserved exactly — and yes,
+        # `selection` itself doesn't mutate per frame either (it
+        # tracks inflow-spawn gating, but at save-time inflow-pool
+        # rows that have spawned are present in BOTH PLY and sidecar
+        # ordering identically across frames).
         if self.attr_color is not None:
             colors_dir = sidecar_dir / "colors"
             colors_dir.mkdir(parents=True, exist_ok=True)
-            cols = self.attr_color.numpy().astype(np.float32)
-            np.save(colors_dir / f"frame_{out_frame:04d}.npy", cols[mask])
+            target = colors_dir / f"frame_{out_frame:04d}.npy"
+            once = colors_dir / "frame_0000.npy"
+            if not once.exists():
+                cols = self.attr_color.numpy().astype(np.float32)
+                np.save(once, cols[mask])
+            # Compat shim: if mesher (any version) looks for the
+            # per-frame file, point it to the single source via copy
+            # only when selection changed shape (handled implicitly
+            # below — the n-particle count differs and a fresh
+            # snapshot is needed).
+            if target != once and not target.exists():
+                # Snapshot for THIS frame only when the live particle
+                # count differs from frame 0 (e.g. mid-bake death/
+                # spawn). Costs a per-particle compare; cheap.
+                try:
+                    base = np.load(once)
+                    cols = self.attr_color.numpy().astype(np.float32)
+                    cur = cols[mask]
+                    if base.shape != cur.shape:
+                        np.save(target, cur)
+                except Exception:
+                    pass
         if self.attr_temperature is not None:
             temps_dir = sidecar_dir / "temperatures"
             temps_dir.mkdir(parents=True, exist_ok=True)
-            temps = self.attr_temperature.numpy().astype(np.float32)
-            np.save(temps_dir / f"frame_{out_frame:04d}.npy", temps[mask])
+            target = temps_dir / f"frame_{out_frame:04d}.npy"
+            once = temps_dir / "frame_0000.npy"
+            if not once.exists():
+                temps = self.attr_temperature.numpy().astype(np.float32)
+                np.save(once, temps[mask])
+            if target != once and not target.exists():
+                try:
+                    base = np.load(once)
+                    temps = self.attr_temperature.numpy().astype(np.float32)
+                    cur = temps[mask]
+                    if base.shape != cur.shape:
+                        np.save(target, cur)
+                except Exception:
+                    pass
         return n_written
 
     # ── high-level entry point --------------------------------------
