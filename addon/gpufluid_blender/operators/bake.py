@@ -95,6 +95,11 @@ def collect_scene(context, domain_obj):
 
     # obstacles
     obstacles = []
+    # Round-53: hoist cache_dir once — both the MESH branch and the new
+    # round-53 BBOX→MESH auto-promote need it before any obstacle is
+    # written. Idempotent makedirs.
+    cache_dir = bpy.path.abspath(dprops.cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
     for o in scene.objects:
         if not o.gpufluid_obstacle.is_obstacle or o is domain_obj:
             continue
@@ -115,30 +120,45 @@ def collect_scene(context, domain_obj):
         # the unit cube even when the domain is anisotropic.
         avg_inv = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
         if oprops.obstacle_type == "BBOX":
-            # Round-52: detect non-identity rotation on a BBOX obstacle.
-            # The world-space AABB collapses the rotation into an
+            # Round-52/53: detect non-identity rotation on a BBOX
+            # obstacle. The world-space AABB collapses rotation into an
             # axis-aligned box that is BIGGER than the original mesh
-            # (corners stick out further on diagonals) AND silently
-            # drops the orientation — MPM has no idea the cube is
-            # tilted. Live-test caught this when fluid did not slide
-            # off "tilted" cubes as expected. Recommend MESH type.
+            # AND silently drops the orientation — MPM has no idea the
+            # cube is tilted. Round-52 emitted only a warning; round-53
+            # AUTO-PROMOTES to MESH type (which exports world-space
+            # vertices via _export_obj — rotation baked in — and routes
+            # through D4.3.GPU.BVH SDF mesh-marker which IS orientation-
+            # aware). User still gets a one-line INFO so they know the
+            # promotion happened.
             rx, ry, rz = (float(c) for c in o.rotation_euler)
-            if abs(rx) + abs(ry) + abs(rz) > 1e-4:
+            if abs(rx) + abs(ry) + abs(rz) > 1e-4 and o.type == "MESH":
                 deg = (f"({rx*57.2958:+.1f}°, {ry*57.2958:+.1f}°, "
                        f"{rz*57.2958:+.1f}°)")
                 warnings.append(
-                    f"obstacle '{o.name}' has BBOX type but non-zero "
-                    f"rotation {deg} — the solver will see an axis-"
-                    f"aligned bbox of the rotated corners (bigger than "
-                    f"the original) and lose the tilt. Switch to "
-                    f"obstacle_type=MESH for orientation-aware "
-                    f"collision (mesh OBJ is exported with rotation "
-                    f"baked into world-space vertices).")
-            obstacles.append({
-                "type": "box",
-                "center": to_sim(centre_w),
-                "half_size": (hx, hy, hz),
-            })
+                    f"obstacle '{o.name}' BBOX type + rotation {deg} → "
+                    f"auto-promoted to MESH so the solver sees the tilt "
+                    f"(was: axis-aligned bbox of rotated corners, bigger "
+                    f"than the mesh + tilt lost). To opt out, zero the "
+                    f"rotation and bake the rotation into the mesh data "
+                    f"via Apply Rotation (Ctrl+A).")
+                # Inline the MESH branch instead of jumping with goto-
+                # like control flow.
+                mesh_path = os.path.join(
+                    cache_dir,
+                    f"obstacle_{_safe_obj_name(o.name)}.obj")
+                _export_obj(o, mesh_path)
+                obstacles.append({
+                    "type": "mesh",
+                    "obj_path": mesh_path,
+                    "center": to_sim(centre_w),
+                    "half_size": (hx, hy, hz),  # bbox-equiv for legacy
+                })
+            else:
+                obstacles.append({
+                    "type": "box",
+                    "center": to_sim(centre_w),
+                    "half_size": (hx, hy, hz),
+                })
         elif oprops.obstacle_type == "PLANE":
             # object's local Z axis (world-space) = plane normal
             mw = o.matrix_world.to_3x3()
@@ -158,9 +178,8 @@ def collect_scene(context, domain_obj):
             obstacles.append({"type": "cylinder_y", "center": to_sim(centre_w),
                               "radius": r, "half_height": hy})
         elif oprops.obstacle_type == "MESH":
-            # export object's mesh as OBJ next to scene.toml
-            cache_dir = bpy.path.abspath(dprops.cache_dir)
-            os.makedirs(cache_dir, exist_ok=True)
+            # export object's mesh as OBJ next to scene.toml.
+            # cache_dir hoisted in round-53 — no need to re-resolve.
             # Round-38: sanitise the object name for filesystem use.
             # Blender allows `/ \ : * ? < > | "` in obj.name; Windows
             # `open()` raises OSError on any of them.
