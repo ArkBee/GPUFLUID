@@ -24,7 +24,9 @@ import mathutils
 
 from .. import logger
 from ..config_builder import build_toml
+from ..domain_transform import DomainTransform
 from ..preferences import get_prefs
+from ..scene_validator import out_of_domain_warning
 from ._animation import _bbox_world, _bbox_world_at_frame, _is_animated
 from ._collect import _export_obj, _output_dict
 from .helpers import subprocess_drain
@@ -41,36 +43,19 @@ def collect_scene(context, domain_obj):
     """
     scene = context.scene
     dom_lo_w, dom_hi_w = _bbox_world(domain_obj)
-    origin = mathutils.Vector(dom_lo_w)
-    dom_size = mathutils.Vector((dom_hi_w[0] - dom_lo_w[0],
-                                  dom_hi_w[1] - dom_lo_w[1],
-                                  dom_hi_w[2] - dom_lo_w[2]))
-    # uniform dx from longest axis & resolution; non-cubic domains get equal dx in all axes
     dprops = domain_obj.gpufluid_domain
-    # Resolution along each axis (proportional to world extent).
-    nmax_w = max(dom_size.x, dom_size.y, dom_size.z)
-    res = (max(8, int(round(dom_size.x / nmax_w * dprops.resolution))),
-           max(8, int(round(dom_size.y / nmax_w * dprops.resolution))),
-           max(8, int(round(dom_size.z / nmax_w * dprops.resolution))))
-    # Geometry is normalised to [0,1]³ (see to_sim() below), so dx must be in
-    # the same unit-cube basis. FLIP uses dx for kernel sizes; MPM ignores it.
-    dx = 1.0 / float(max(res))
 
-    # The MPM solver runs in a fixed [0,1]³ unit cube (see MpmDomainWalls in
-    # src/gpufluid/sim/mpm/solver.py — hardcoded lo=0.05, hi=0.95). The mesher
-    # likewise outputs vertices in normalized [0,1]³. So all positions the
-    # solver receives must be normalized: world coord → translate by domain's
-    # world-origin → divide by domain size. When the addon attaches the cache
-    # it scales the cache object by `dom_size` and translates it by `origin`,
-    # so the inverse transform makes mesh world coords match emitter world
-    # coords exactly. Domains scaled to ≠ 1×1×1 used to silently desync —
-    # everything was in metres for the solver, in [0,1] for the mesh.
-    inv_size = (1.0 / float(dom_size.x), 1.0 / float(dom_size.y), 1.0 / float(dom_size.z))
-
-    def to_sim(v):
-        return (float((v[0] - origin.x) * inv_size[0]),
-                float((v[1] - origin.y) * inv_size[1]),
-                float((v[2] - origin.z) * inv_size[2]))
+    # Round-17: domain math extracted into a pure dataclass — unit-
+    # testable, single source of truth for the world↔unit-cube mapping.
+    # See addon/gpufluid_blender/domain_transform.py.
+    transform = DomainTransform.from_world_aabb(
+        tuple(dom_lo_w), tuple(dom_hi_w), int(dprops.resolution))
+    origin = mathutils.Vector(transform.origin)
+    dom_size = mathutils.Vector(transform.dom_size)
+    res = transform.resolution
+    dx = transform.dx
+    inv_size = transform.inv_size
+    to_sim = transform.to_sim
 
     # fluid sources — emit one entry per source so each can carry its own
     # ppc + color. Pre-B1.3 these were unioned into one bbox.
@@ -83,31 +68,14 @@ def collect_scene(context, domain_obj):
         )
     fluid_sources = []
     warnings: list[str] = []
-    # eps margin is in normalised units now (positions are too). Use a
-    # 1.5-cell margin so the seeded box sits one and a half cells inside
-    # the [0,1]³ unit cube the solver enforces.
-    eps_norm = 1.5 / float(dprops.resolution)
+    # Round-17: eps_norm now lives on DomainTransform; pure validation
+    # extracted to scene_validator.out_of_domain_warning.
+    eps_norm = transform.eps_norm
 
     def _out_of_domain(name, lo, hi, kind):
-        """Append a warning if a source's AABB lies (even partly) outside
-        the unit cube the solver simulates in. Without this, an emitter
-        above the domain ceiling silently produces fluid that materialises
-        at the wall after the solver clamps it."""
-        for axis, axis_name in enumerate("xyz"):
-            if hi[axis] < 0.0 or lo[axis] > 1.0:
-                warnings.append(
-                    f"{kind} '{name}' is fully outside the Domain on {axis_name} "
-                    f"(normalised range [{lo[axis]:.2f},{hi[axis]:.2f}] vs [0,1]); "
-                    "particles will be wall-clamped to the nearest face. "
-                    "Move it inside the Domain bounds.")
-                return
-            if lo[axis] < eps_norm or hi[axis] > 1.0 - eps_norm:
-                warnings.append(
-                    f"{kind} '{name}' touches/clips the Domain wall on "
-                    f"{axis_name} (normalised [{lo[axis]:.2f},{hi[axis]:.2f}]). "
-                    "Solver will wall-clamp those particles — move the source "
-                    "deeper inside to avoid visual artefacts.")
-                return
+        w = out_of_domain_warning(name, lo, hi, kind, eps_norm)
+        if w:
+            warnings.append(w)
 
     for fobj in fluid_objs:
         flow, fhiw = _bbox_world(fobj)
@@ -185,14 +153,11 @@ def collect_scene(context, domain_obj):
                               -origin.z * avg_inv),
             })
         # v0.5 — animated obstacle motion — velocity in m/s gets normalised
-        # the same way positions are.
+        # the same way positions are. Round-17: via DomainTransform.
         if oprops.motion_type == "LINEAR":
-            v = oprops.motion_velocity
             obstacles[-1]["motion"] = {
                 "kind": "linear",
-                "velocity": (float(v[0]) * inv_size[0],
-                             float(v[1]) * inv_size[1],
-                             float(v[2]) * inv_size[2]),
+                "velocity": transform.normalize_velocity(oprops.motion_velocity),
             }
 
     # v0.5 — inflow / outflow regions (region taken from object bbox).
@@ -214,12 +179,9 @@ def collect_scene(context, domain_obj):
             ilow, ihiw = _bbox_world_at_frame(o, fs)
             lo_sim = to_sim(ilow); hi_sim = to_sim(ihiw)
             _out_of_domain(o.name, list(lo_sim), list(hi_sim), "Inflow")
-            v = o.gpufluid_inflow.velocity
             entry = {
                 "lo": lo_sim, "hi": hi_sim,
-                "velocity": (float(v[0]) * inv_size[0],
-                             float(v[1]) * inv_size[1],
-                             float(v[2]) * inv_size[2]),
+                "velocity": transform.normalize_velocity(o.gpufluid_inflow.velocity),
                 "rate_per_sec": float(o.gpufluid_inflow.rate_per_sec),
                 "frame_start": fs, "frame_end": fe,
             }

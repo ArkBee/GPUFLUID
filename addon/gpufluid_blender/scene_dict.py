@@ -298,11 +298,15 @@ def validate_scene_dict(d: Any) -> None:
         # We don't REQUIRE them (test fixtures pre-round-15 use partial
         # dicts) but if a string/None sneaks in we want a clear key-path
         # error instead of a KeyError-style crash deep in build_toml.
+        # Round-17: exclude bool from numeric (isinstance(True, int)
+        # is True in Python — round-16 reviewer #9 flagged this hole).
         for fkey in ("dt", "fps", "gravity"):
-            if fkey in sim and not isinstance(sim[fkey], (int, float, bool)):
-                raise SceneDictError(
-                    f"'simulation.{fkey}' must be numeric, got "
-                    f"{type(sim[fkey]).__name__}")
+            if fkey in sim:
+                v = sim[fkey]
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    raise SceneDictError(
+                        f"'simulation.{fkey}' must be numeric, got "
+                        f"{type(v).__name__}")
 
     # Output — validate IF present
     if "output" in d:
@@ -314,6 +318,24 @@ def validate_scene_dict(d: Any) -> None:
             raise SceneDictError(
                 f"'output.cache_dir' must be str, got "
                 f"{type(d['output']['cache_dir']).__name__}")
+        # Round-17 reviewer #9: extend type-check to output.iso_level +
+        # smooth_passes (read without default in build_toml — wrong
+        # type silently breaks the TOML mesher section).
+        for fkey in ("iso_level", "decimate_ratio"):
+            if fkey in d["output"]:
+                v = d["output"][fkey]
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    raise SceneDictError(
+                        f"'output.{fkey}' must be numeric, got "
+                        f"{type(v).__name__}")
+        for fkey in ("smooth_passes", "mesh_smooth_passes",
+                     "wall_margin_cells"):
+            if fkey in d["output"]:
+                v = d["output"][fkey]
+                if isinstance(v, bool) or not isinstance(v, int):
+                    raise SceneDictError(
+                        f"'output.{fkey}' must be int, got "
+                        f"{type(v).__name__}")
 
     # Array-of-tables sections (optional, but if present must be list-of-dict).
     # PLURAL keys — round-16 reviewer caught the singular bug that made
