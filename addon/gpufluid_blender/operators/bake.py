@@ -175,7 +175,9 @@ def collect_scene(context, domain_obj):
                 _export_obj(o, mesh_path)
                 obstacles.append({
                     "type": "mesh",
-                    "obj_path": mesh_path,
+                    # round-55: key name must match the original MESH
+                    # branch + what config_builder reads (KeyError otherwise)
+                    "path": mesh_path,
                     "center": to_sim(centre_w),
                     "half_size": (hx, hy, hz),  # bbox-equiv for legacy
                 })
