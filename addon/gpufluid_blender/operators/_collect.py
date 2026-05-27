@@ -11,6 +11,8 @@ which have no dependency on the bake operator's own state:
 """
 from __future__ import annotations
 
+import re
+
 import bpy
 
 
@@ -45,20 +47,38 @@ def _output_dict(dprops):
     return out
 
 
+_OBJ_NAME_SAFE_RE = re.compile(r'[^A-Za-z0-9._-]')
+
+
+def _safe_obj_name(name: str) -> str:
+    """Round-38: sanitise an object name for use as a filesystem path
+    component. Blender does NOT forbid `/ \\ : * ? < > | "` in object
+    names, but Windows refuses to open() files containing them.
+    Pre-round-38 obstacles named with such characters crashed bake."""
+    return _OBJ_NAME_SAFE_RE.sub("_", name)
+
+
 def _export_obj(obj, path):
     """Quick OBJ export of a single object's evaluated mesh."""
     dg = bpy.context.evaluated_depsgraph_get()
     eval_obj = obj.evaluated_get(dg)
     mesh = eval_obj.to_mesh()
     try:
+        # Round-38: triangulate via loop_triangles. Pre-round-38 we
+        # wrote raw n-gon polygons (`f i1 i2 i3 i4 …`); trimesh
+        # fan-triangulated downstream from vertex 0, which is WRONG
+        # for concave n-gons (the fan crosses outside the polygon) —
+        # the resulting solid mask leaks fluid through bad cells.
+        # `calc_loop_triangles` populates a triangle-only view.
+        mesh.calc_loop_triangles()
         with open(path, "w") as f:
             f.write(f"# gpufluid obstacle export: {obj.name}\n")
             mw = obj.matrix_world
             for v in mesh.vertices:
                 wv = mw @ v.co
                 f.write(f"v {wv.x} {wv.y} {wv.z}\n")
-            for p in mesh.polygons:
-                idx = " ".join(str(i + 1) for i in p.vertices)
-                f.write(f"f {idx}\n")
+            for tri in mesh.loop_triangles:
+                v0, v1, v2 = tri.vertices
+                f.write(f"f {v0 + 1} {v1 + 1} {v2 + 1}\n")
     finally:
         eval_obj.to_mesh_clear()

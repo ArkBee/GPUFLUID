@@ -28,7 +28,7 @@ from ..domain_transform import DomainTransform
 from ..preferences import get_prefs
 from ..scene_validator import out_of_domain_warning
 from ._animation import _bbox_world, _bbox_world_at_frame, _is_animated
-from ._collect import _export_obj, _output_dict
+from ._collect import _export_obj, _output_dict, _safe_obj_name
 from .helpers import subprocess_drain
 from ._runner import ModalSubprocessRunner
 
@@ -142,7 +142,11 @@ def collect_scene(context, domain_obj):
             # export object's mesh as OBJ next to scene.toml
             cache_dir = bpy.path.abspath(dprops.cache_dir)
             os.makedirs(cache_dir, exist_ok=True)
-            mesh_path = os.path.join(cache_dir, f"obstacle_{o.name}.obj")
+            # Round-38: sanitise the object name for filesystem use.
+            # Blender allows `/ \ : * ? < > | "` in obj.name; Windows
+            # `open()` raises OSError on any of them.
+            mesh_path = os.path.join(
+                cache_dir, f"obstacle_{_safe_obj_name(o.name)}.obj")
             _export_obj(o, mesh_path)
             # OBJ verts are in world metres — scale to the unit cube so the
             # solver's [0,1]³ collision sampling lands on the mesh.
@@ -194,8 +198,20 @@ def collect_scene(context, domain_obj):
             if getattr(iprops, "use_temperature", False):
                 entry["temperature"] = float(iprops.temperature)
             if _is_animated(o, context) and fe > fs:
+                # Round-38: clamp the keyframe window to what the bake
+                # will actually advance through. Pre-round-38 we
+                # iterated `range(fs, fe+1)` blindly — at the default
+                # `frame_end=10000` (properties.py) any inflow whose
+                # PARENT chain has an fcurve (camera ancestor, common
+                # constraint helper) triggered 10001 calls to
+                # `_matrix_world_at_frame` (each walks parent chain ×
+                # fcurves × evaluate) → 10–60s "collect" hang + ~MB
+                # scene.toml bloat. Bake only ever advances through
+                # `dprops.frames` frames; the rest are dead-letter
+                # rows the solver never reaches.
+                fe_eff = min(fe, fs + int(dprops.frames))
                 kfs = []
-                for f in range(fs, fe + 1):
+                for f in range(fs, fe_eff + 1):
                     lf, hf = _bbox_world_at_frame(o, f)
                     ls = to_sim(lf); hs = to_sim(hf)
                     kfs.append([f, ls[0], ls[1], ls[2], hs[0], hs[1], hs[2]])

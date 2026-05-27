@@ -74,7 +74,21 @@ def _patch_slip(solver_path: Path) -> bool:
                 "S2.17.PATCH.SLIP: could not locate the slip-branch zero "
                 f"write in {solver_path}. warp-mpm version may have changed."
             )
-    solver_path.write_text(new_src, encoding="utf-8")
+    # Round-38: tolerate read-only install (system site-packages, pipx,
+    # Nix store, restricted CI worker). Pre-round-38 an OSError here
+    # propagated out of `apply_patches` → `_warp_mpm_imports.py:20` →
+    # entire MPM path crashed on import with an opaque OS error. Now:
+    # log + return False so the package keeps loading (the kernel patch
+    # is best-effort; the rest of MPM works without it).
+    try:
+        solver_path.write_text(new_src, encoding="utf-8")
+    except OSError as exc:
+        import logging as _log
+        _log.getLogger("gpufluid.mpm.patches").warning(
+            "S2.17.PATCH.SLIP: cannot write to %s (%s) — install is "
+            "read-only? Patch skipped; bake may show pre-patch slip "
+            "behaviour.", solver_path, exc)
+        return False
     return True
 
 
@@ -104,7 +118,16 @@ def _patch_eos(utils_path: Path) -> bool:
                 "S2.17.PATCH.EOS: could not locate kirchoff_stress_water "
                 f"pressure line in {utils_path}."
             )
-    utils_path.write_text(new_src, encoding="utf-8")
+    # Round-38: same read-only tolerance as the SLIP patch above.
+    try:
+        utils_path.write_text(new_src, encoding="utf-8")
+    except OSError as exc:
+        import logging as _log
+        _log.getLogger("gpufluid.mpm.patches").warning(
+            "S2.17.PATCH.EOS: cannot write to %s (%s) — install is "
+            "read-only? Patch skipped; bake may show pressure spikes "
+            "at rigid contact.", utils_path, exc)
+        return False
     return True
 
 

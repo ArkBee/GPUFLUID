@@ -191,6 +191,24 @@ class ModalSubprocessRunner:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.wait(timeout=5.0)
+                # Round-38: flush whatever the drain thread captured
+                # BEFORE returning. Pre-round-38 the kill path bailed
+                # without joining drain_thread or writing `drained`
+                # lines to the logger — so the user saw "subprocess
+                # killed" with zero diagnostics about WHAT was on
+                # stdout when the hang started. Now: best-effort join
+                # + log dump.
+                try:
+                    drain_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+                if logger is not None and drained:
+                    logger.warning(
+                        "%s: last %d stdout lines before timeout-kill:",
+                        log_prefix, len(drained))
+                    for line in drained:
+                        logger.warning("%s: %s", log_prefix,
+                                       line.rstrip())
                 operator.report(
                     {"ERROR"},
                     f"gpufluid {self.label} (sync) hit timeout after "
