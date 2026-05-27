@@ -645,11 +645,56 @@ previously listed as candidates above, now live in global rules):
 `test_round32_fixes` on top of the round-20-26 26 new tests).
 Source-grep contract tests still in place + extended.
 
-**Branch state:** `feat/mpm-stability` is **14 commits** beyond
-`main`. Cert harness 6/6 PASS (re-run during round-31 by parallel
-cert worker). Ready for merge.
+- **Round-33** (independent reviewer, parallel sprint) — 2 CRITICAL
+  + 2 MEDIUM on the FLIP attribute pipeline. CRITICAL:
+  `_apply_outflows_gpu` didn't compact `attr_color`/`attr_temperature`
+  alongside `pos`/`vel` → colour scrambling on every outflow event;
+  `prepare_frame` emit-append path didn't grow attr arrays → OOB
+  reads on inflow + base-coloured fluid where coloured was expected.
+  MEDIUM: MPM SDF box collider top-friction damped the FULL velocity
+  vector instead of tangential post-projection; MPM inflow keyframes
+  silently mis-interpolated on non-monotone frame lists or `lo > hi`
+  AABBs.
+- **Round-34** — shipped all 4 round-33 fixes. Both CRITICALs guarded
+  by source-grep contract tests (§9.12) since the actual codepath
+  needs CUDA + a FLIP scene with attrs + outflow, no fixture
+  exercises that today. 6 new tests in `test_round34_fixes.py`.
+  Bonus cleanup: added `@block("M5.11.5")` + literal `[BLK ...]`
+  test refs (block-registry hygiene); fixed `MpmDivergenceError`
+  export from `sim.mpm` package `__init__`.
+- **Round-35** (independent reviewer, parallel sprint with cert
+  harness) — 1 HIGH + 2 MEDIUM + 2 LOW. HIGH: CPU reseed path
+  silently dropped `attr_color`/`attr_temperature` — classic §9.6
+  mirror-drift, round-34 fixed the GPU sibling but forgot the CPU
+  <100k path. MEDIUM: MPM sidecar shim shape-stuck — verified
+  FALSE ALARM after re-reading round-24 per-frame indexing logic;
+  MeshExtractor.extract had no empty-pos guard, frame ghost-froze
+  when all particles exited. LOW: `array_scan` sync hot-path,
+  `__init__.py` warp import-error masking — both deferred.
+- **Round-36** — shipped HIGH CPU-reseed attr-drift fix (variant
+  return on `reseed_particles`: 4-tuple back-compat when no attrs,
+  6-tuple with `new_color`/`new_temperature` when any passed —
+  preserves the ~10 existing test callsites); MEDIUM
+  MeshExtractor empty-pos guard returns `(None, None)`. 5 new tests
+  in `test_round36_fixes.py` including a source-grep guard for the
+  CLI reseed branch. Round-35 sidecar-shim flagged as false alarm
+  in commit message. 2 LOW deferred. Cert harness verified 6/6 PASS
+  after round-34.
+- **Round-37 (in flight)** — parallel sprint with cert + docs-syncer
+  (this very note is the docs-syncer's deliverable).
 
-**Open follow-ups:** none from reviewers (round-31 was the most
-recent and round-32 addressed all 6). Pre-existing A8.* addon
-block-registry sync failures + flaky perf test
-`test_s2_16_sparse_jacobi` remain (both pre-date this sprint).
+**Branch state:** `feat/mpm-stability` is **17 commits** beyond
+`main`. Cert harness 6/6 PASS (re-verified after rounds 32, 34, 36).
+~50 real bugs closed across 16 reviewer rounds (rounds 20-37).
+142 unit tests green across `test_round22` … `test_round36` +
+reseed + ancillary suites. All §9.11 / §9.12 lessons shipped to
+`~/.claude/CLAUDE.md` (no longer "candidate"). Ready for merge.
+
+**Open follow-ups:**
+- 2 LOW from round-35 (deferred): `array_scan` sync hot-path;
+  `__init__.py` warp import-error masking.
+- No CRITICAL or HIGH currently open.
+- Pre-existing flakies still present: A8.* addon block-registry
+  sync drift (addon-only, registry walker only scans `src/`),
+  `test_s2_16_sparse_jacobi` (timing-sensitive perf test). Both
+  pre-date this sprint.
