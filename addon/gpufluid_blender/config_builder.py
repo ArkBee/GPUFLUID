@@ -276,8 +276,13 @@ def build_toml(scene_dict: SceneDict) -> str:
         lines.append(f'color_mix_mode = "{out["color_mix_mode"]}"')
     if out.get("whitewater"):
         lines.append("whitewater = true")
+        # Round-23: added `whitewater_trapped_air_weight`. It was in
+        # scene_dict + CLI config (commands.py:723 `alpha`) but missing
+        # from this emit loop — addon user could not tune trapped-air
+        # potential weight; CLI always defaulted to 1.0 silently.
         for k in ("whitewater_speed_threshold", "whitewater_lifetime_sec",
                   "whitewater_potential_radius", "whitewater_potential_v_max",
+                  "whitewater_trapped_air_weight",
                   "whitewater_wave_crest_weight"):
             if k in out:
                 lines.append(f"{k} = {float(out[k]):g}")

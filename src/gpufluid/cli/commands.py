@@ -557,12 +557,30 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     ww_dir = None
     if scene.output.whitewater:
         from ..sim.whitewater import WhitewaterSystem, WhitewaterConfig
+        # Round-23: pre-round-23 we set the legacy `gravity` +
+        # `lifetime_sec` fields and they were silently dropped — the
+        # actual step() reads only the per-class `gravity_foam/spray
+        # /bubble` and `lifetime_foam/spray/bubble` fields. User-set
+        # scene.simulation.gravity (low-G scene) or
+        # whitewater_lifetime_sec had ZERO effect. Round-23 fans them
+        # out: `gravity_spray` = scene gravity (full G), bubble/foam
+        # scaled relative to their defaults (-9.81); lifetime_sec
+        # applied uniformly to all three classes.
+        g_scene = float(scene.simulation.gravity)
+        ratio = g_scene / -9.81 if g_scene != 0.0 else 1.0
+        life = float(scene.output.whitewater_lifetime_sec)
         ww_cfg = WhitewaterConfig(
             speed_threshold=scene.output.whitewater_speed_threshold,
             emit_per_frame_max=scene.output.whitewater_emit_per_frame_max,
             total_cap=scene.output.whitewater_total_cap,
-            lifetime_sec=scene.output.whitewater_lifetime_sec,
-            gravity=scene.simulation.gravity,
+            lifetime_sec=life,
+            lifetime_foam=life,
+            lifetime_spray=life,
+            lifetime_bubble=life,
+            gravity=g_scene,
+            gravity_spray=-9.81 * ratio,   # full gravity (down)
+            gravity_foam=-0.5 * ratio,     # near-neutral
+            gravity_bubble=+3.0 * ratio,   # buoyant (sign preserved)
         )
         ww_sys = WhitewaterSystem(ww_cfg)
         ww_dir = cache_dir / "whitewater"; ww_dir.mkdir(exist_ok=True)

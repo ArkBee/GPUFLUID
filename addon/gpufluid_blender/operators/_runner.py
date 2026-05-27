@@ -164,9 +164,28 @@ class ModalSubprocessRunner:
                     f"could not spawn {self.label} subprocess: {e}")
                 return {"CANCELLED"}
 
-            drain_thread = threading.Thread(
-                target=_drain_lines, args=(self._proc, drained), daemon=True)
-            drain_thread.start()
+            # Round-23: mirror the orphan-Popen-kill guard the modal
+            # path got in round-9 (`_spawn_and_drain`). If Thread()
+            # construction or start() fails (rare: resource exhaustion),
+            # the subprocess we just spawned runs without a drainer
+            # and its handle leaks. Same defence applied here so the
+            # sync/modal paths stay symmetric (lesson 9.6 — mirror-
+            # operator drift inside a single class).
+            try:
+                drain_thread = threading.Thread(
+                    target=_drain_lines, args=(self._proc, drained),
+                    daemon=True)
+                drain_thread.start()
+            except Exception as e:
+                if self._proc is not None and self._proc.poll() is None:
+                    try:
+                        self._proc.kill(); self._proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                operator.report(
+                    {"ERROR"},
+                    f"could not start {self.label} drainer thread: {e}")
+                return {"CANCELLED"}
             try:
                 rc = self._proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:

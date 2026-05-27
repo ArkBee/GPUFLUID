@@ -21,13 +21,15 @@ from gpufluid.sim.whitewater import (
 
 
 def _synthetic_density_grid(N: int = 16):
-    """A 16³ grid where the lower half is fluid (density=1.0), upper half is
-    air (density=0.0), and there's a one-cell surface band at y=N/2."""
+    """A 16³ grid where the lower half is fluid (density=1.0), upper half
+    is air (density=0.0), and there's a one-cell surface band at z=N/2.
+
+    Round-23: was indexed on axis 1 (Y) to match the whitewater
+    Y-up bug; switched to axis 2 (Z) to match the Z-up project."""
     d = np.zeros((N, N, N), dtype=np.float32)
-    d[:, : N // 2, :] = 1.0
-    # smooth the interface slightly so the classifier sees a gradient
-    d[:, N // 2, :] = 0.5
-    d[:, N // 2 + 1, :] = 0.2
+    d[:, :, : N // 2] = 1.0
+    d[:, :, N // 2] = 0.5
+    d[:, :, N // 2 + 1] = 0.2
     return d
 
 
@@ -36,11 +38,12 @@ def test_emit_classifies_three_kinds():
     N = 16; dx = 1.0 / N
     d = _synthetic_density_grid(N)
     ws = WhitewaterSystem(WhitewaterConfig(speed_threshold=0.1))
-    # Three particles: deep (bubble), at surface (foam), above (spray)
+    # Three particles: deep (bubble), at surface (foam), above (spray).
+    # Round-23: Z-up — z=0.10 deep, z=0.50 surface, z=0.80 air.
     pos = np.array([
-        [0.5, 0.10, 0.5],   # y=0.10 → cell 1 → density 1.0 → bubble
-        [0.5, 0.50, 0.5],   # y=0.50 → cell 8 → density 0.5 → foam
-        [0.5, 0.80, 0.5],   # y=0.80 → cell 12 → density 0.0 → spray
+        [0.5, 0.5, 0.10],   # z=0.10 → cell 1  → density 1.0 → bubble
+        [0.5, 0.5, 0.50],   # z=0.50 → cell 8  → density 0.5 → foam
+        [0.5, 0.5, 0.80],   # z=0.80 → cell 12 → density 0.0 → spray
     ], dtype=np.float32)
     vel = np.ones_like(pos) * np.array([1.0, 0.0, 0.0])  # all moving fast
     ws.emit_from_fluid(pos, vel, density=d, dx=dx)
@@ -78,14 +81,21 @@ def test_per_class_dynamics_diverge():
     for _ in range(20):                      # 20 * 0.01 = 0.2 s
         ws.step(0.01, dom=(10.0, 10.0, 10.0))
     assert ws.n == 3, f"all three should survive the short window; have {ws.n}"
-    y_foam, y_spray, y_bubble = ws.pos[:, 1]
-    assert y_spray < y_foam, (
-        f"spray should fall faster than foam: y_spray={y_spray:.3f} "
-        f"y_foam={y_foam:.3f}"
+    # Round-23: gpufluid is Z-up project-wide. Pre-round-23 these
+    # assertions used `ws.pos[:, 1]` (Y) to match a bug where
+    # whitewater's `step()` accidentally applied gravity to Y instead
+    # of Z. Tests written against the bug were green by coincidence;
+    # any addon user running the live pipeline saw whitewater drifting
+    # sideways. See whitewater.py round-23 commentary for the full
+    # rationale.
+    z_foam, z_spray, z_bubble = ws.pos[:, 2]
+    assert z_spray < z_foam, (
+        f"spray should fall faster than foam: z_spray={z_spray:.3f} "
+        f"z_foam={z_foam:.3f}"
     )
-    assert y_bubble > y_foam, (
-        f"bubble should rise above foam: y_bubble={y_bubble:.3f} "
-        f"y_foam={y_foam:.3f}"
+    assert z_bubble > z_foam, (
+        f"bubble should rise above foam: z_bubble={z_bubble:.3f} "
+        f"z_foam={z_foam:.3f}"
     )
 
 
@@ -99,11 +109,12 @@ def test_bubble_pops_at_surface():
                             lifetime_bubble=10.0,  # long life so only pop kills it
                             pop_threshold=0.5)
     ws = WhitewaterSystem(cfg)
-    ws.pos = np.array([[0.5, 0.30, 0.5]], dtype=np.float32)
+    # Round-23: bubble starts deep on Z (was Y in pre-round-23 setup).
+    ws.pos = np.array([[0.5, 0.5, 0.30]], dtype=np.float32)
     ws.vel = np.zeros((1, 3), dtype=np.float32)
     ws.age = np.zeros(1, dtype=np.float32)
     ws.kind = np.array([KIND_BUBBLE], dtype=np.int32)
-    # Step until the bubble has risen above the surface (~y=0.5)
+    # Step until the bubble has risen above the surface (~z=0.5)
     for _ in range(30):
         ws.step(0.05, dom=(1.0, 1.0, 1.0), density=d, dx=dx)
         if ws.n == 0:
