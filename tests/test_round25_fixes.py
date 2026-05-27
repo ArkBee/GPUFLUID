@@ -152,6 +152,27 @@ def test_headless_render_missing_required_key(monkeypatch):
 
 # ─── inflow gate idempotent release (HIGH) ──────────────────────────────
 
+def test_whitewater_gravity_ratio_zero_scene_zeros_per_class():
+    """Round-26 self-review: pre-round-26 the CLI's whitewater
+    gravity fan-out had `ratio = g_scene/-9.81 if g!=0 else 1.0`
+    — meaning a user setting gravity=0 (zero-G scene) inverted
+    intent: ratio snapped to 1.0, per-class gravities kept their
+    full defaults. Verify the source has the correct (unguarded)
+    form."""
+    src = (Path(__file__).resolve().parents[1] / "src" / "gpufluid"
+           / "cli" / "commands.py").read_text()
+    code_lines = [
+        ln for ln in src.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    # The bug form had `g_scene != 0.0 else 1.0`. Make sure no live
+    # code line uses the inverted-intent guard.
+    assert "g_scene != 0.0 else 1.0" not in code, (
+        "round-26 regression: zero-gravity scene must zero out per-"
+        "class gravities, not snap back to defaults")
+
+
 def test_inflow_gate_uses_ge_not_eq_in_source():
     """Round-25: the wp.kernel can't run on the test machine without
     CUDA + a live State struct, so we verify the contract at the

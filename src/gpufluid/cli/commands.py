@@ -575,7 +575,13 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         # scaled relative to their defaults (-9.81); lifetime_sec
         # applied uniformly to all three classes.
         g_scene = float(scene.simulation.gravity)
-        ratio = g_scene / -9.81 if g_scene != 0.0 else 1.0
+        # Round-26 self-fix: pre-round-26 the guard was `if g_scene !=
+        # 0.0 else 1.0` — meant to dodge a non-existent div-by-zero,
+        # but it inverted user intent: setting gravity=0 (zero-G scene)
+        # snapped ratio back to 1.0 and per-class gravities to their
+        # full defaults. Now ratio is just `g_scene / -9.81`; zero
+        # gravity correctly zeros all three per-class gravities.
+        ratio = g_scene / -9.81
         life = float(scene.output.whitewater_lifetime_sec)
         ww_cfg = WhitewaterConfig(
             speed_threshold=scene.output.whitewater_speed_threshold,
