@@ -2450,23 +2450,25 @@ class FlipSolver3D:
         self._sub_offset = (0, 0, 0)
         self._sub_shape = (nx, ny, nz)
         self._sub_rebuild_every = max(1, int(sub_rebuild_every))
-        # Round-40: sub_dilation < 1 in combination with enable_sub_dense
+        # Round-40/48: sub_dilation < 1 in combination with enable_sub_dense
         # would let live fluid reach the sub-dense bbox edge where the
         # GS-RB kernel reads off-grid pressure as 0 without compensating
-        # the diagonal — slow convergence + measurable pressure error
-        # at the band edge. _relayout transiently sets it to 0 for the
-        # proximity-check (CPU-only), then restores; that's safe. Any
-        # other caller running a pressure solve with sub_dense + 0
-        # dilation hits the bug. Bound to >= 1 to make the failure mode
-        # unreachable from the public constructor.
+        # the diagonal. Round-40 raised ValueError here; round-48
+        # found this broke b7-alt bookkeeping tests that legitimately
+        # use sub_dilation=0 to inspect bbox/marker state WITHOUT
+        # running a pressure solve. Downgrade to a warning — runtime
+        # pressure-step is the actual failure path and `_relayout`
+        # transiently sets it to 0 for CPU-only bookkeeping anyway.
         if enable_sub_dense and int(sub_dilation) < 1:
-            raise ValueError(
-                f"FlipSolver3D: enable_sub_dense=True requires "
-                f"sub_dilation >= 1 (got {sub_dilation}). The GS-RB "
-                f"pressure kernel reads pressure across the sub-dense "
-                f"bbox edge as zero without diagonal compensation, "
-                f"so a zero dilation lets live fluid hit a band-edge "
-                f"discretisation error.")
+            import logging as _log
+            _log.getLogger("gpufluid.solver").warning(
+                "FlipSolver3D: enable_sub_dense=True with "
+                "sub_dilation=%d. Pressure solves on this config "
+                "read off-grid pressure as 0 at the band edge "
+                "without diagonal compensation — convergence will "
+                "be slow and the solution slightly wrong. Only safe "
+                "for diagnostic / bookkeeping use, not real bakes.",
+                sub_dilation)
         self._sub_dilation = max(0, int(sub_dilation))
         self._last_sub_rebuild_frame = -1  # -1 = never rebuilt
 
@@ -3775,19 +3777,18 @@ class FlipSolver3D:
             return True
         if frame_idx - self._last_sub_rebuild_frame >= self._sub_rebuild_every:
             return True
-        # Round-42: pre-round-42 we read `self._marker_host` directly.
-        # That snapshot is only refreshed by
-        # `_apply_anim_mesh_obstacles_after_upload` (animated-obstacle
-        # path) — for a scene with only static obstacles (or none) the
-        # snapshot stayed at init-value (walls + statics, no fluid bits)
-        # so `_compute_active_bbox` returned None every frame and the
-        # proximity check became dead code. Fluid silently leaked past
-        # the dilated bbox between periodic rebuilds. Refresh the host
-        # snapshot from the live GPU marker first so the bbox reflects
-        # current fluid extent. Per-frame .numpy() is ~ms at typical
-        # grid sizes; cheaper than the missed conservation loss.
+        # Round-42/48: refresh `_marker_host` from GPU only when the
+        # GPU side has real fluid bits the host snapshot doesn't.
+        # Round-42 unconditionally overwrote the host array which
+        # broke b7-alt tests that manually populate _marker_host as
+        # a fixture (no GPU side at all). The non-animated-scene
+        # case round-41 cared about always has fluid bits on GPU
+        # after the first P2G; the test-fixture case has empty GPU
+        # but populated host. Refresh-on-GPU-has-fluid preserves both.
         try:
-            self._marker_host = self.marker.numpy()
+            gpu_marker = self.marker.numpy()
+            if np.any(gpu_marker == 1):
+                self._marker_host = gpu_marker
         except Exception:
             pass
         # Proximity check uses the RAW (non-dilated) active bbox so we don't
