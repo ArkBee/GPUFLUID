@@ -2314,6 +2314,35 @@ block("S2.14.5", "Host helper: capillary-wave dt_max for explicit CSF")(csf_max_
 # F3.2 — Solver class
 # =============================================================================
 
+class FlipDivergenceError(RuntimeError):
+    """Round-32: raised by the CLI FLIP loop when ``has_diverged()`` is
+    true after a frame's step. Mirrors :class:`MpmDivergenceError`
+    (round-20). The FLIP solver had NO equivalent guard — a divergent
+    pressure-solve oscillation produced NaN particle velocities, next
+    step propagated them, and the cache.json reported full
+    ``frame_count`` with garbage PLY geometry. Carries ``frame``
+    (failing frame index), ``last_dumped_frame``, and
+    ``requested_frames`` so the CLI can write a truthful cache.json
+    with ``truncated_at_frame`` and exit rc=2 — same UX as the MPM
+    divergence path.
+    """
+
+    def __init__(
+        self,
+        frame: int,
+        last_dumped_frame: int,
+        requested_frames: int,
+        detail: str = "",
+    ) -> None:
+        super().__init__(
+            detail or f"FLIP solver diverged at frame {frame} "
+                     f"(last dumped: {last_dumped_frame}/{requested_frames})"
+        )
+        self.frame = int(frame)
+        self.last_dumped_frame = int(last_dumped_frame)
+        self.requested_frames = int(requested_frames)
+
+
 class FlipSolver3D:
     """[BLK F3.2] 3D FLIP/PIC solver. Holds all state on GPU.
 
@@ -2590,6 +2619,22 @@ class FlipSolver3D:
     @block("D4.7", "Register an outflow region (particle removal)")
     def add_outflow(self, region):
         self.outflows.append(region)
+
+    def has_diverged(self) -> bool:
+        """Round-32: cheap NaN probe on the particle position array.
+        Same intent as MPM round-20 NaN trap (raises
+        MpmDivergenceError). CLI calls this once per frame after
+        ``step`` / ``step_cfl``; on True, raises FlipDivergenceError
+        with truthful frame counts. Returns False on empty/zero-particle
+        states (no divergence, just no data).
+        """
+        if self.pos is None or self.n_particles == 0:
+            return False
+        try:
+            arr = self.pos.numpy() if hasattr(self.pos, "numpy") else self.pos
+        except Exception:
+            return False
+        return bool(arr.size and np.any(np.isnan(arr)))
 
     # -------- D4.7.GPU stream-compaction outflow path ---------------------
     @block("D4.7.GPU", "GPU outflow compaction (mark + scan + scatter)")

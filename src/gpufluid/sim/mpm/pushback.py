@@ -31,6 +31,7 @@ def k_cube_pushback(
     state: MPMStateStruct,
     cx: float, cy: float, cz: float,
     hx: float, hy: float, hz: float,
+    snap_eps: float,
 ):
     p = wp.tid()
     pos = state.particle_x[p]
@@ -47,29 +48,29 @@ def k_cube_pushback(
     new_v = state.particle_v[p]
     if qz <= qx and qz <= qy:
         if rz > 0.0:
-            new_pos = wp.vec3(pos[0], pos[1], cz + hz + 0.0001)
+            new_pos = wp.vec3(pos[0], pos[1], cz + hz + snap_eps)
             if new_v[2] < 0.0:
                 new_v = wp.vec3(new_v[0], new_v[1], 0.0)
         else:
-            new_pos = wp.vec3(pos[0], pos[1], cz - hz - 0.0001)
+            new_pos = wp.vec3(pos[0], pos[1], cz - hz - snap_eps)
             if new_v[2] > 0.0:
                 new_v = wp.vec3(new_v[0], new_v[1], 0.0)
     elif qx <= qy:
         if rx > 0.0:
-            new_pos = wp.vec3(cx + hx + 0.0001, pos[1], pos[2])
+            new_pos = wp.vec3(cx + hx + snap_eps, pos[1], pos[2])
             if new_v[0] < 0.0:
                 new_v = wp.vec3(0.0, new_v[1], new_v[2])
         else:
-            new_pos = wp.vec3(cx - hx - 0.0001, pos[1], pos[2])
+            new_pos = wp.vec3(cx - hx - snap_eps, pos[1], pos[2])
             if new_v[0] > 0.0:
                 new_v = wp.vec3(0.0, new_v[1], new_v[2])
     else:
         if ry > 0.0:
-            new_pos = wp.vec3(pos[0], cy + hy + 0.0001, pos[2])
+            new_pos = wp.vec3(pos[0], cy + hy + snap_eps, pos[2])
             if new_v[1] < 0.0:
                 new_v = wp.vec3(new_v[0], 0.0, new_v[2])
         else:
-            new_pos = wp.vec3(pos[0], cy - hy - 0.0001, pos[2])
+            new_pos = wp.vec3(pos[0], cy - hy - snap_eps, pos[2])
             if new_v[1] > 0.0:
                 new_v = wp.vec3(new_v[0], 0.0, new_v[2])
     state.particle_x[p] = new_pos

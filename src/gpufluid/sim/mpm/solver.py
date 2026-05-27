@@ -373,11 +373,19 @@ class MpmSolver:
             self.mpm.grid_postprocess.append(k_sdf_box_collide)
             self.mpm.collider_params.append(param)
             self.mpm.modify_bc.append(None)
-        # Cube geometry caches for pushback launches (avoid re-allocating)
+        # Cube geometry caches for pushback launches (avoid re-allocating).
+        # Round-32: snap_eps was hardcoded 0.0001 in the kernel; for
+        # sub-millimetre dx (high-res MPM in a small domain) this
+        # offset spanned multiple cells, causing visible particle
+        # popping near obstacle faces. Now: scale to dx, capped at the
+        # pre-round-32 0.0001 so default-resolution behaviour is bit-
+        # exact with prior bakes.
+        _snap_eps = min(1e-4, cfg.dx() * 0.1)
         self._cube_params = [
             (
                 cube.centre[0], cube.centre[1], cube.centre[2],
                 cube.half_size[0], cube.half_size[1], cube.half_size[2],
+                _snap_eps,
             )
             for cube in cfg.cubes
         ]

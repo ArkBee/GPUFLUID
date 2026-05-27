@@ -615,6 +615,12 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
     start_frame = int(getattr(args, "start_frame", 0))
     checkpoint_every = int(getattr(args, "checkpoint_every", 0))
+    # Round-32: FLIP divergence trap (mirror of MPM round-20).
+    # FlipSolver3D had NO NaN guard pre-round-32 — divergent pressure
+    # oscillation produced NaN particle velocities, propagated, and
+    # cache.json reported full frame_count with garbage PLYs.
+    from ..solvers.solver3d import FlipDivergenceError
+    flip_truncated_at: int | None = None
     for frame in range(start_frame, scene.simulation.frames):
         # v0.5 per-frame hook: anim obstacles + inflow/outflow
         solver.prepare_frame(frame, 1.0 / scene.simulation.fps)
@@ -670,6 +676,18 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                             pressure_iters=scene.simulation.pressure_iters,
                             pressure_solver=scene.simulation.pressure_solver)
         t_sim_total += time.time() - ts
+        # Round-32: NaN check once per frame. step+step_cfl don't raise
+        # on divergence — we sample positions and break out so the
+        # cache.json can be written with truncated_at_frame instead of
+        # the misleading full frame_count.
+        if solver.has_diverged():
+            flip_truncated_at = frame
+            print(
+                f"[flip] solver diverged at frame {frame} "
+                f"(last dumped: {frame}/{scene.simulation.frames}). "
+                f"Recovery: lower dt, raise pressure_iters, or shrink "
+                f"resolution.", file=sys.stderr)
+            break
 
         if extractor is not None:
             tm = time.time()
@@ -796,15 +814,28 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         write_usd_mesh_sequence(usd_path, usd_frames, fps=scene.simulation.fps)
         print(f"           wrote USD: {usd_path}")
 
+    # Round-32: if FLIP diverged, frame_count reports ACTUAL written
+    # frames (not the cfg target), and we inject truncation_reason
+    # via the manifest. The dataclass-typed manifest filters unknown
+    # keys (round-31 reviewer #3 schema-drift finding), so we have to
+    # write through raw JSON for the truncation marker. Done below.
+    flip_frame_count = (
+        flip_truncated_at + 1 if flip_truncated_at is not None
+        else scene.simulation.frames)
     manifest = CacheManifest(
         fps=scene.simulation.fps,
-        frame_count=scene.simulation.frames,
+        frame_count=flip_frame_count,
         mesh_pattern="mesh/frame_{:04d}.ply",
         particles_pattern="particles/frame_{:04d}.npy" if scene.output.particles else None,
         domain_size=list(scene.domain_size),
         resolution=list(scene.domain.resolution),
         dx=scene.dx,
         notes=f"sim={t_sim_total:.1f}s mesh={t_mesh_total:.1f}s",
+        solver="flip",
+        truncated_at_frame=(int(flip_truncated_at)
+                            if flip_truncated_at is not None else None),
+        truncation_reason=("flip_divergence"
+                           if flip_truncated_at is not None else None),
     )
     manifest_path = write_cache_manifest(cache_dir, manifest)
     print(f"[gpufluid] done. cache: {cache_dir}  manifest: {manifest_path.name}")
@@ -838,7 +869,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         else:
             print("[gpufluid] cuda-graph: not eligible for any step "
                   "(PCG and pressure_block_sparse=true still fall through)")
-    return 0
+    return 0 if flip_truncated_at is None else 2
 
 
 # ---------------------------------------------------------------------------

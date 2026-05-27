@@ -152,16 +152,22 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
                     m.cache_file = None
                     obj.modifiers.remove(m)
                     released += 1
-        # Also drop any pre-loaded PLY mesh tables — pointing at meshes about
-        # to be deleted would raise ReferenceError next frame. Phase 4 bonus
-        # fix: route each entry through ``_free_table`` so mesh datablocks
-        # with users==0 actually get removed instead of leaking in
-        # ``bpy.data.meshes`` after a bare ``_PRELOAD.clear()``.
+        # Round-32: pre-round-32 dropped the ENTIRE _PRELOAD — in a
+        # multi-domain scene, clearing one domain's cache silently
+        # blanked every OTHER domain's preloaded mesh sequence until
+        # re-attach (live-found by round-31 reviewer). Now: invalidate
+        # ONLY entries that point at this domain's cache (the mesh
+        # named after the domain itself, plus its `target_object` if
+        # set). Other domains' preloads stay live.
         try:
-            from ..cache_loader import _PRELOAD, _free_table
-            for _name, _table in list(_PRELOAD.items()):
-                _free_table(_table)
-            _PRELOAD.clear()
+            from ..cache_loader import _PRELOAD
+            keys_to_drop = {d.name}
+            tgt = getattr(d.gpufluid_domain, "target_object", None)
+            if tgt is not None:
+                keys_to_drop.add(tgt.name)
+            for _name in list(_PRELOAD.keys()):
+                if _name in keys_to_drop:
+                    _PRELOAD.invalidate(_name)
         except Exception as exc:  # noqa: BLE001
             # Round-7 reviewer flag: was bare `pass`. If cache_loader gets
             # renamed/refactored, OT_clear_cache silently becomes no-op

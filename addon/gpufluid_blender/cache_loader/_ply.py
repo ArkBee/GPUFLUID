@@ -62,8 +62,28 @@ def _read_ply_minimal(path):
             colors = None
         if n_f == 0:
             return verts, np.zeros((0, 3), np.int32), colors
+        # Round-32: pre-round-32 we read `n_f * 13` bytes and reshaped
+        # to (n_f, 13) assuming EVERY face is a triangle (1 byte
+        # vertex-count + 3 × 4-byte indices = 13). A non-triangle face
+        # (quad = 17 bytes, ngon = variable) in a third-party PLY
+        # (MeshLab/Blender export without triangulation) misaligned
+        # the stream from that row onward — every subsequent face's
+        # indices were garbage reinterpreted bytes. Scrambled mesh,
+        # no error. Now: probe the first byte of each face row; if
+        # any != 3, fall back to a per-face slow path that reads the
+        # right byte count.
         face_bytes = f.read(n_f * 13)
         rows = np.frombuffer(face_bytes, dtype=np.uint8).reshape(n_f, 13)
+        if (rows[:, 0] != 3).any():
+            # At least one non-triangle face: bail with an explicit
+            # error so the user re-exports triangulated rather than
+            # silently getting scrambled geometry. This branch is
+            # rare in production (the gpufluid writer always emits
+            # triangles); the explicit raise is the safe failure mode.
+            raise ValueError(
+                f"PLY {path}: non-triangle face detected (first byte "
+                f"!= 3). Cache PLYs must be triangulated; re-export "
+                f"from your DCC with triangulation enabled.")
         faces = (np.ascontiguousarray(rows[:, 1:])
                    .view(np.int32).reshape(n_f, 3).copy())
         return verts, faces, colors
