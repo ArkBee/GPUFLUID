@@ -3766,6 +3766,21 @@ class FlipSolver3D:
             return True
         if frame_idx - self._last_sub_rebuild_frame >= self._sub_rebuild_every:
             return True
+        # Round-42: pre-round-42 we read `self._marker_host` directly.
+        # That snapshot is only refreshed by
+        # `_apply_anim_mesh_obstacles_after_upload` (animated-obstacle
+        # path) — for a scene with only static obstacles (or none) the
+        # snapshot stayed at init-value (walls + statics, no fluid bits)
+        # so `_compute_active_bbox` returned None every frame and the
+        # proximity check became dead code. Fluid silently leaked past
+        # the dilated bbox between periodic rebuilds. Refresh the host
+        # snapshot from the live GPU marker first so the bbox reflects
+        # current fluid extent. Per-frame .numpy() is ~ms at typical
+        # grid sizes; cheaper than the missed conservation loss.
+        try:
+            self._marker_host = self.marker.numpy()
+        except Exception:
+            pass
         # Proximity check uses the RAW (non-dilated) active bbox so we don't
         # double-count the existing dilation margin.
         saved_d = self._sub_dilation
@@ -3938,6 +3953,33 @@ class FlipSolver3D:
         if emit_events:
             emit_pos = np.concatenate([e.positions for e in emit_events], axis=0)
             emit_vel = np.concatenate([e.velocities for e in emit_events], axis=0)
+            # Round-42: drop emit-samples that landed inside a solid
+            # cell (marker == 2). Pre-round-42 InflowBox.emit was a
+            # raw rng.random in lo/hi with NO obstacle test, so an
+            # inflow box overlapping an animated obstacle (or any
+            # static one the user composed) spawned particles INSIDE
+            # the solid; pressure projection then ejected them as
+            # explosive streamers along the obstacle face, sometimes
+            # NaN'ing. Filter once at the consumer — InflowBox stays
+            # data-only without solver coupling.
+            if len(emit_pos) > 0:
+                try:
+                    mh = self._marker_host
+                    if mh is not None:
+                        ix = np.clip((emit_pos[:, 0] / self.dx).astype(np.int32),
+                                      0, mh.shape[0] - 1)
+                        iy = np.clip((emit_pos[:, 1] / self.dx).astype(np.int32),
+                                      0, mh.shape[1] - 1)
+                        iz = np.clip((emit_pos[:, 2] / self.dx).astype(np.int32),
+                                      0, mh.shape[2] - 1)
+                        keep = (mh[ix, iy, iz] != 2)
+                        if not keep.all():
+                            emit_pos = emit_pos[keep]
+                            emit_vel = emit_vel[keep]
+                except Exception:
+                    # Fail-open: if marker host is missing/wrong shape
+                    # don't gate emission — pre-round-42 behaviour.
+                    pass
             if len(emit_pos) > 0:
                 cur_pos = self.pos.numpy() if self.pos is not None else np.zeros((0, 3), dtype=np.float32)
                 cur_vel = self.vel.numpy() if self.vel is not None else np.zeros((0, 3), dtype=np.float32)
@@ -4055,9 +4097,24 @@ class FlipSolver3D:
         vel = self.vel.numpy() if self.vel is not None else np.zeros((0, 3), dtype=np.float32)
         marker = self.marker.numpy()
         affine = self.affine_C.numpy() if self.affine_C is not None else np.zeros((0, 3, 3), dtype=np.float32)
+        # Round-42: serialise attr_color + attr_temperature so resume
+        # doesn't silently drop per-particle colour/temperature into
+        # default white. Pre-round-42 the save side ignored attrs and
+        # the load side had no key to read → KNN/Mixbox/temperature
+        # passes saw `attr_color is None` → uniform fallback colour.
+        # Empty arrays serialise as 0-row .npz entries that load_checkpoint
+        # reconstructs as None for back-compat (pre-round-42 .npz has
+        # no attr_color key — load handles KeyError gracefully).
+        attr_color = (self.attr_color.numpy()
+                      if self.attr_color is not None
+                      else np.zeros((0, 3), dtype=np.float32))
+        attr_temperature = (self.attr_temperature.numpy()
+                            if self.attr_temperature is not None
+                            else np.zeros((0,), dtype=np.float32))
         np.savez_compressed(
             str(path),
             pos=pos, vel=vel, affine_C=affine, marker=marker,
+            attr_color=attr_color, attr_temperature=attr_temperature,
             nx=self.nx, ny=self.ny, nz=self.nz, dx=self.dx,
             gravity=self.gravity, flip_blend=self.flip_blend, rho=self.rho,
             viscosity=self.viscosity, transfer_mode=str(self.transfer_mode),
@@ -4071,6 +4128,32 @@ class FlipSolver3D:
         nx, ny, nz = int(data["nx"]), int(data["ny"]), int(data["nz"])
         if (nx, ny, nz) != (self.nx, self.ny, self.nz):
             raise RuntimeError(f"checkpoint grid {(nx,ny,nz)} != solver {(self.nx,self.ny,self.nz)}")
+        # Round-42: also validate dx + warn on physics-config drift
+        # between the saved run and the resume environment. Pre-round-42
+        # topology check passed for same-res grids in differently-sized
+        # domains (dx mismatch → particle world-coords pointing at wrong
+        # cells); physics knobs (gravity/rho/viscosity/flip_blend/
+        # surface_tension) silently overrode the saved values — "resume"
+        # was actually a different sim.
+        ckpt_dx = float(data["dx"])
+        if abs(ckpt_dx - self.dx) > 1e-9:
+            raise RuntimeError(
+                f"checkpoint dx={ckpt_dx} != solver dx={self.dx} "
+                f"(same grid resolution but different domain size — "
+                f"particle world-coords would land in wrong cells)")
+        import logging as _log
+        for key, live in (
+            ("gravity", self.gravity), ("rho", self.rho),
+            ("viscosity", self.viscosity), ("flip_blend", self.flip_blend),
+            ("surface_tension", self.surface_tension),
+        ):
+            if key in data.files:
+                saved = float(data[key])
+                if abs(saved - float(live)) > 1e-9:
+                    _log.getLogger("gpufluid.checkpoint").warning(
+                        "resume: %s drift saved=%s live=%s — running "
+                        "with LIVE value (resume is no longer bit-exact).",
+                        key, saved, live)
         pos = data["pos"]; vel = data["vel"]; marker = data["marker"]; affine = data["affine_C"]
         self.pos = wp.array(pos, dtype=wp.vec3, device=self.device) if len(pos) else None
         self.vel = wp.array(vel, dtype=wp.vec3, device=self.device) if len(vel) else None
@@ -4078,6 +4161,25 @@ class FlipSolver3D:
         wp.copy(self.marker, wp.array(marker.astype(np.int32), dtype=int, device=self.device))
         self._marker_host = marker.astype(np.int32)
         self.n_particles = len(pos)
+        # Round-42: restore attr_color / attr_temperature if present.
+        # Pre-round-42 these were never saved → load left them as None
+        # → KNN/Mixbox/temperature passes emitted default white. Empty
+        # arrays in the .npz signal "attrs were None at save time"
+        # — preserve that semantic. Back-compat: pre-round-42 .npz has
+        # no attr_color/attr_temperature keys; KeyError → defaults.
+        try:
+            ac = data["attr_color"]
+            self.attr_color = (wp.array(ac, dtype=wp.vec3, device=self.device)
+                                if len(ac) else None)
+        except KeyError:
+            pass
+        try:
+            at = data["attr_temperature"]
+            self.attr_temperature = (
+                wp.array(at, dtype=float, device=self.device)
+                if len(at) else None)
+        except KeyError:
+            pass
         # Round-40: same as seed_box. Pointer rebind silently
         # invalidates any captured graph; cache key matching identical
         # topology (the intended resume-checkpoint case) would replay

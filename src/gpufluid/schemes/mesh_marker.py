@@ -125,6 +125,19 @@ class _MeshCache:
     def get_or_build(self, triangles_np: np.ndarray, device: str,
                     cache_key: object | None = None) -> "wp.Mesh":
         n_tris = triangles_np.shape[0]
+        # Round-42: refuse to build a 0-tri Warp mesh. Some Warp
+        # versions raise inside `wp.Mesh(points=<empty>, ...)`; others
+        # construct an invalid BVH whose `refit()` later asserts. An
+        # animated obstacle whose evaluator yields zero triangles on a
+        # frame (modifier-culled, unconfigured Empty proxy) used to
+        # poison the cache entry with `n_tris=0` and crash on the next
+        # rebuild. Raise with an actionable diagnostic instead.
+        if n_tris == 0:
+            raise ValueError(
+                "MeshCache.get_or_build: cannot build BVH for "
+                "zero-triangle mesh. Check that the evaluated mesh "
+                "has geometry on this frame (modifier may cull all "
+                "triangles, or the object may be an unconfigured proxy).")
         verts = triangles_np.reshape(-1, 3).astype(np.float32)  # (3*n_tris, 3)
         indices = np.arange(verts.shape[0], dtype=np.int32)
 

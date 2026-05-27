@@ -71,13 +71,22 @@ def mix_rgb(
     >>> g > r and g > b  # greener than red/blue
     True
     """
+    # Round-42: clamp inputs + outputs to [0, 1]. Pre-round-42 an
+    # HDR-linear caller (e.g. value 1.2) hit `int(round(1.2*255))=306`
+    # which is out of pymixbox's expected uint8 range — behaviour was
+    # undefined. The fallback branch could also return values >1.
+    def _clip3(c):
+        return (max(0.0, min(1.0, float(c[0]))),
+                max(0.0, min(1.0, float(c[1]))),
+                max(0.0, min(1.0, float(c[2]))))
+    c1 = _clip3(c1); c2 = _clip3(c2)
+    t = max(0.0, min(1.0, float(t)))
     if HAVE_MIXBOX:
         a = tuple(int(round(x * 255.0)) for x in c1)
         b = tuple(int(round(x * 255.0)) for x in c2)
-        r, g, bl = mixbox.lerp(a, b, float(t))
+        r, g, bl = mixbox.lerp(a, b, t)
         return (r / 255.0, g / 255.0, bl / 255.0)
     _warn_once_no_mixbox()
-    t = float(t)
     return (
         c1[0] * (1 - t) + c2[0] * t,
         c1[1] * (1 - t) + c2[1] * t,
