@@ -2,6 +2,7 @@
 
 Public API:
     MpmSolver — F3.7 shell-out adapter around third_party/warp-mpm
+    MpmDivergenceError — raised on NaN-divergence mid-bake (round-20)
     apply_patches() — apply S2.17.PATCH.SLIP + S2.17.PATCH.EOS at import time
 
 Sub-modules:
@@ -15,7 +16,7 @@ See DESIGN.md §5.3 (S2.17.*) and §6.7 (F3.7) for block specs.
 """
 from __future__ import annotations
 
-from .solver import MpmSolver
+from .solver import MpmSolver, MpmDivergenceError
 from ._patches import apply_patches
 
-__all__ = ["MpmSolver", "apply_patches"]
+__all__ = ["MpmSolver", "MpmDivergenceError", "apply_patches"]
