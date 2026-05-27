@@ -152,7 +152,37 @@ def collect_scene(context, domain_obj):
                 except Exception:
                     pass
 
-            if (rotation_nonzero or non_axis_aligned) and o.type == "MESH":
+            # Round-56: MPM CLI only handles ObstacleBoxCfg (AABB).
+            # `type=mesh` obstacles are silently dropped in the MPM
+            # path → solver sees NO obstacles → fluid falls free past
+            # rotated geometry. Live-test caught: visible "cube
+            # interaction" was just the obstacle meshes rendered on
+            # top, no actual collision. Auto-promote is correct for
+            # FLIP (D4.3.GPU.BVH SDF mesh-marker handles rotated meshes),
+            # WRONG for MPM (the type=mesh emit is dead-letter). For
+            # MPM + rotated obstacle, emit a DIFFERENT warning so the
+            # user knows the limitation and can switch to FLIP if they
+            # need tilted geometry, or accept the bbox approximation.
+            is_mpm = (dprops.solver == "mpm")
+            if is_mpm and (rotation_nonzero or non_axis_aligned) and o.type == "MESH":
+                why = ("rotation" if rotation_nonzero
+                       else "non-axis-aligned mesh data")
+                warnings.append(
+                    f"obstacle '{o.name}' has {why} but solver=MPM. "
+                    f"MPM currently supports only axis-aligned box "
+                    f"colliders — the rotated shape will be treated as "
+                    f"its (bigger) axis-aligned bounding box and the "
+                    f"orientation will be LOST. Workarounds: (1) switch "
+                    f"solver to FLIP which has full SDF mesh-marker "
+                    f"obstacle support; (2) keep MPM and live with the "
+                    f"bbox approximation; (3) keep MPM and rebuild the "
+                    f"obstacle as a stack of axis-aligned primitives.")
+                obstacles.append({
+                    "type": "box",
+                    "center": to_sim(centre_w),
+                    "half_size": (hx, hy, hz),
+                })
+            elif (rotation_nonzero or non_axis_aligned) and o.type == "MESH":
                 if rotation_nonzero:
                     deg = (f"({rx*57.2958:+.1f}°, {ry*57.2958:+.1f}°, "
                            f"{rz*57.2958:+.1f}°)")
