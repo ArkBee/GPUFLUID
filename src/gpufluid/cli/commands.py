@@ -317,17 +317,24 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             from ..meshing.colormap import get_colormap
             cmap_fn = get_colormap(cmap_name)
         use_temp_color = bool(cmap_fn) and has_temp_path
-        frame_idx = 0
+        # Round-21: index sidecars by `step // dump_every`, not by a
+        # local counter. The solver writes sidecar
+        # `colors/frame_NNNN.npy` with NNNN = step // dump_every
+        # (solver.py save_frame_ply); a local counter that only
+        # increments on success would mis-align by every missing PLY,
+        # silently swapping colour data between frames.
+        frames_written = 0
         for step in range(0, cfg.n_frames + 1, cfg.dump_every):
             ply = particles_dir / f"sim_{step:010d}.ply"
             if not ply.exists():
                 continue
+            frame_idx = step // max(1, cfg.dump_every)
             pts = read_points_ply(ply)
             if pts.shape[0] == 0:
                 write_ply(mesh_dir / f"frame_{frame_idx:04d}.ply",
                           np.zeros((0, 3), np.float32),
                           np.zeros((0, 3), np.int32))
-                frame_idx += 1
+                frames_written += 1
                 continue
             pos_wp = wp.array(pts, dtype=wp.vec3, device=mesher.device)
             v, fc = mesher.extract(
@@ -381,8 +388,8 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                     )
             write_ply(mesh_dir / f"frame_{frame_idx:04d}.ply", v, fc,
                       vertex_colors=vc_u8)
-            frame_idx += 1
-        frame_count = frame_idx
+            frames_written += 1
+        frame_count = frames_written
         if use_temp_color:
             cmode = f" (vertex colour from temperature: {cmap_name})"
         elif has_color_path:
