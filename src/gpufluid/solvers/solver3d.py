@@ -3378,6 +3378,15 @@ class FlipSolver3D:
         Sparse PCG inherits BOTH: each per-tile kernel takes BOTH
         `n_active_dev` (Option B cap) AND `done` (Option A stop-flag).
         """
+        # Round-46: APIC + None-affine_C is INELIGIBLE for capture.
+        # Inflow/outflow events set `self.affine_C = None`; the next
+        # APIC step lazily wp.zeros() the affine buffer — allocation
+        # + H2D copy INSIDE wp.capture_begin/_end is forbidden. The
+        # try/except path catches the capture-time raise but burns
+        # the capture cost on every such step (constant capture, no
+        # cache benefit). Best to refuse eligibility outright.
+        if self.transfer_mode == "apic" and self.affine_C is None:
+            return False
         # All shipped combinations are now graph-eligible.
         return pressure_solver in ("jacobi", "gsrb", "pcg")
 
@@ -3953,6 +3962,32 @@ class FlipSolver3D:
         if emit_events:
             emit_pos = np.concatenate([e.positions for e in emit_events], axis=0)
             emit_vel = np.concatenate([e.velocities for e in emit_events], axis=0)
+            # Round-46: build per-event colour + temperature chunks at
+            # the SAME concat order as positions/velocities so the
+            # round-42 marker-filter mask (computed below over the
+            # combined emit_pos) applies in lockstep. Pre-round-46 we
+            # padded the attr arrays AFTER the filter with the
+            # unfiltered per-event lengths → shape mismatch. Build
+            # now, mask in step with emit_pos.
+            need_color_pad = self.attr_color is not None
+            need_temp_pad = self.attr_temperature is not None
+            col_pad = (np.concatenate([
+                (np.broadcast_to(np.asarray(e.color, dtype=np.float32),
+                                  (len(e.positions), 3)).copy()
+                 if e.color is not None
+                 else np.zeros((len(e.positions), 3), dtype=np.float32))
+                for e in emit_events
+            ], axis=0) if need_color_pad and emit_events
+                       else None)
+            temp_pad = (np.concatenate([
+                (np.full((len(e.positions),), float(e.temperature),
+                         dtype=np.float32)
+                 if e.temperature is not None
+                 else np.full((len(e.positions),), 20.0,
+                              dtype=np.float32))
+                for e in emit_events
+            ]) if need_temp_pad and emit_events
+                else None)
             # Round-42: drop emit-samples that landed inside a solid
             # cell (marker == 2). Pre-round-42 InflowBox.emit was a
             # raw rng.random in lo/hi with NO obstacle test, so an
@@ -3976,6 +4011,14 @@ class FlipSolver3D:
                         if not keep.all():
                             emit_pos = emit_pos[keep]
                             emit_vel = emit_vel[keep]
+                            # Round-46: apply the same mask to the
+                            # colour + temperature pads built above
+                            # so per-source per-particle attrs stay
+                            # row-aligned with emit_pos.
+                            if col_pad is not None:
+                                col_pad = col_pad[keep]
+                            if temp_pad is not None:
+                                temp_pad = temp_pad[keep]
                 except Exception:
                     # Fail-open: if marker host is missing/wrong shape
                     # don't gate emission — pre-round-42 behaviour.
@@ -3989,28 +4032,19 @@ class FlipSolver3D:
                 self.vel = wp.array(cur_vel, dtype=wp.vec3, device=self.device)
                 self.affine_C = None
                 self.n_particles = len(cur_pos)
-                # Round-34: extend attribute arrays to match the new
-                # particle count. Pre-round-34 they kept their old
-                # length → `_apply_color_transfer` launched with
-                # dim=new_n_particles indexed attr_color[i] for
-                # i >= old_len = OOB read (Warp may not check, returning
-                # arbitrary bytes). Trigger: any base-fluid that has a
-                # colour set + any inflow active. Use per-emit-event
-                # carry if FluidInflowEvent ever exposes attr; for now,
-                # extend with sensible defaults (zero colour, 20°C
-                # temperature) so the bake stays well-defined.
-                n_added = len(emit_pos)
-                if self.attr_color is not None:
+                # Round-34/46: extend attribute arrays with the per-
+                # event pads built (and mask-filtered) above. col_pad
+                # / temp_pad are None when the solver doesn't track
+                # the respective attr, else row-aligned with emit_pos.
+                if col_pad is not None:
                     prev_col = self.attr_color.numpy()
-                    pad = np.zeros((n_added, 3), dtype=np.float32)
                     self.attr_color = wp.array(
-                        np.concatenate([prev_col, pad], axis=0),
+                        np.concatenate([prev_col, col_pad], axis=0),
                         dtype=wp.vec3, device=self.device)
-                if self.attr_temperature is not None:
+                if temp_pad is not None:
                     prev_t = self.attr_temperature.numpy()
-                    pad = np.full((n_added,), 20.0, dtype=np.float32)
                     self.attr_temperature = wp.array(
-                        np.concatenate([prev_t, pad], axis=0),
+                        np.concatenate([prev_t, temp_pad], axis=0),
                         dtype=float, device=self.device)
         # B7-alt.2 — sub-dense storage rebuild trigger. No-op when the
         # flag is off; otherwise shrinks u/v/w/p/p_tmp/div to the active

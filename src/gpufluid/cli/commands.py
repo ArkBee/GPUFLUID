@@ -511,10 +511,16 @@ def cmd_simulate(args: argparse.Namespace) -> int:
                 raise BlockError("C7.2", f"motion not supported on obstacle: {type(ob).__name__}")
     # v0.5 — register inflows / outflows
     for inf in scene.inflow:
+        # Round-46: forward per-inflow color + temperature. Pre-round-46
+        # the construction dropped both even though `InflowCfg` exposed
+        # them (round-45 reviewer caught: MPM path forwarded, FLIP
+        # didn't → mirror drift §9.6, particles spawned default-black).
         solver.add_inflow(InflowBox(
             lo=inf.lo, hi=inf.hi, velocity=inf.velocity,
             rate_per_sec=inf.rate_per_sec,
             frame_start=inf.frame_start, frame_end=inf.frame_end,
+            color=getattr(inf, "color", None),
+            temperature=getattr(inf, "temperature", None),
         ))
     for out in scene.outflow:
         solver.add_outflow(OutflowBox(

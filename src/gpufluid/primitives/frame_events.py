@@ -41,7 +41,7 @@ need additional plumbing to enforce that.
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -54,9 +54,20 @@ class FluidEmitEvent:
 
     Arrays are host-side numpy (the existing `apply_inflows` contract).
     The solver uploads them to Warp on drain.
+
+    Round-46: ``color`` + ``temperature`` are optional per-inflow
+    attributes carried by the emit. Default None means "use the
+    solver's default attr fill (zero colour, 20°C temperature)" —
+    matching pre-round-46 behaviour for emits that don't set them.
+    Solver's prepare_frame emit-drain reads these into attr arrays
+    on append, closing the MPM↔FLIP mirror-drift gap (round-45
+    reviewer: MPM inflow paths carried per-source colour, FLIP
+    dropped it because `InflowBox` had no field).
     """
     positions: np.ndarray   # (N, 3) float32, sim-space coordinates
     velocities: np.ndarray  # (N, 3) float32, world velocity per particle
+    color: Optional[Tuple[float, float, float]] = None
+    temperature: Optional[float] = None
 
 
 block("G1.17", "FluidEmitEvent — per-frame inflow emission record")(FluidEmitEvent)

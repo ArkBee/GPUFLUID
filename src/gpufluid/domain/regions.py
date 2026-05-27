@@ -29,6 +29,15 @@ class InflowBox:
     rate_per_sec: float = 5000.0   # particles per second
     frame_start: int = 0
     frame_end: int = 10_000
+    # Round-46: per-inflow colour + temperature. Pre-round-46
+    # `InflowBox` had no such fields, so FLIP scenes with
+    # `[[inflow]] color = [r,g,b]` in the TOML silently dropped
+    # the user value — emitted particles got the zero-padding
+    # default (black) at solver3d.py prepare_frame's emit-extend
+    # path. MPM's seed_inflow_particles always honoured per-source
+    # colour; mirror-drift §9.6 caught by round-45 reviewer.
+    color: Optional[Tuple[float, float, float]] = None
+    temperature: Optional[float] = None
 
     def emit(self, frame_idx: int, frame_dt: float, rng: np.random.Generator) -> Optional[np.ndarray]:
         """Return (N,3) positions or None if not emitting this frame."""
@@ -56,7 +65,10 @@ class InflowBox:
             return
         vel = np.broadcast_to(np.asarray(self.velocity, dtype=np.float32),
                               (len(pos), 3)).copy()
-        queue.push_emit(FluidEmitEvent(positions=pos, velocities=vel))
+        queue.push_emit(FluidEmitEvent(
+            positions=pos, velocities=vel,
+            color=self.color, temperature=self.temperature,
+        ))
 
 
 # [BLK D4.7]
