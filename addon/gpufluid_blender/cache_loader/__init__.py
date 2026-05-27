@@ -40,9 +40,15 @@ def _rebuild_mesh(obj, verts, faces, origin):
     n_v = len(verts)
     n_f = len(faces)
     me = obj.data
-    me.clear_geometry()
+    # Round-25: validate BEFORE clearing geometry. Pre-round-25 a
+    # corrupt/truncated/zero-data PLY mid-sequence (e.g. network
+    # share dropout during live-bake attach) wiped the visible mesh
+    # to nothing and returned. Now: keep the previous frame's last-
+    # good geometry on screen so the user sees a hold instead of a
+    # pop-to-empty-then-back glitch.
     if n_v == 0 or n_f == 0:
         return
+    me.clear_geometry()
     # Strip out-of-range face indices (MC degenerate triangles)
     if faces.size:
         mask = ((faces[:, 0] < n_v) & (faces[:, 1] < n_v) & (faces[:, 2] < n_v)

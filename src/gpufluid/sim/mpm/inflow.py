@@ -78,7 +78,15 @@ def k_inflow_gate(
         state.particle_F_trial[idx] = I
         state.particle_C[idx] = Z
         state.particle_selection[idx] = 1
-    elif current_step == ss:
+    elif current_step >= ss and state.particle_selection[idx] == 1:
+        # Round-25: was `elif current_step == ss` — fragile because the
+        # solver loop starts at step_index=1, so any particle whose
+        # `spawn_step` truncated to 0 (frame_start=0 + spawn_frame in
+        # [0, 1/dump_every)) never saw `current_step == 0` and stayed
+        # held forever (selection=1 → silently dropped from PLY).
+        # Same hazard for any future substepping / resume-from-checkpoint
+        # where step_index could skip an integer. Idempotent guard
+        # (only release if still held) keeps the velocity-set one-shot.
         state.particle_v[idx] = wp.vec3(vx, vy, vz)
         state.particle_selection[idx] = 0
 
@@ -98,6 +106,16 @@ def seed_inflow_particles(
     """
     if rng is None:
         rng = np.random.default_rng(42)
+    # Round-25: reject reversed range upfront with a clear ValueError.
+    # Pre-round-25 we silently clamped `duration_frames` to 1 then
+    # crashed inside `rng.uniform(low >= high)` with a numpy-internal
+    # traceback. Validators above (addon scene_dict + bake op) reject
+    # reversed ranges too — this is defence in depth at the seeding
+    # site so direct unit-test / fixture calls also get a clear msg.
+    if inflow.frame_end < inflow.frame_start:
+        raise ValueError(
+            f"MpmInflow: frame_end ({inflow.frame_end}) must be >= "
+            f"frame_start ({inflow.frame_start})")
     duration_frames = max(1, int(inflow.frame_end - inflow.frame_start))
     n = max(1, int(inflow.rate_per_sec * duration_frames / max(fps, 1)))
     # Distribute spawn frames uniformly across the active window.

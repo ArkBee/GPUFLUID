@@ -30,6 +30,15 @@ def _read_ply_minimal(path):
             if line.strip() == b"end_header":
                 break
         text = header.decode("ascii", errors="replace")
+        # Round-25: enforce binary_little_endian — pre-round-25 an
+        # ASCII PLY (hand-edit or MeshLab export) was parsed as if
+        # binary, yielding garbage floats reinterpreted from ASCII
+        # bytes (scrambled mesh, no error). gpufluid.io.ply.read_ply
+        # already had this guard; addon's parallel reader didn't.
+        if "format binary_little_endian" not in text:
+            raise ValueError(
+                f"PLY {path}: only binary_little_endian supported "
+                f"(got header without that format line)")
         n_v = 0
         n_f = 0
         has_color = False
