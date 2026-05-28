@@ -147,6 +147,18 @@ def build_toml(scene_dict: SceneDict) -> str:
         elif t == "box":
             lines.append(f"center = {_fmt_vec3(o['center'])}")
             lines.append(f"half_size = {_fmt_vec3(o['half_size'])}")
+            # Round-59: forward R57's OBB rotation matrix. Pre-R59 this
+            # branch silently dropped the rotation key emitted by bake.py
+            # (§9.6 mirror drift: bake.py updated to put `rotation` in
+            # the obstacle dict, this TOML writer wasn't). Symptom:
+            # rotated cube in viewport, fluid still treated it as AABB
+            # because scene.toml never carried the rotation.
+            if "rotation" in o:
+                rows = o["rotation"]
+                row_strs = [_fmt_vec3(r) for r in rows]
+                lines.append(
+                    "rotation = [" + ", ".join(row_strs) + "]"
+                )
         elif t == "cylinder_y":
             lines.append(f"center = {_fmt_vec3(o['center'])}")
             lines.append(f"radius = {float(o['radius']):g}")
