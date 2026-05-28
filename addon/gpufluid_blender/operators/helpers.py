@@ -5,7 +5,49 @@ reader shared by ``operators.bake`` and ``operators.render`` modal ops.
 """
 import os
 import shutil
+import stat
+import time
 import bpy
+
+
+def _robust_rmtree(path, attempts=5):
+    """Delete a directory tree, tolerating Windows file-lock / async-
+    delete races.
+
+    Round-60: `OT_clear_cache` crashed with `OSError [WinError 145]
+    "directory not empty"` on `mesh/`. Root cause: bare
+    `shutil.rmtree` on Windows can fail mid-tree when (a) a child file
+    was just unlinked but the directory listing hasn't flushed before
+    `os.rmdir` fires (async-delete race), (b) an AV scanner holds a
+    transient handle, or (c) a read-only attribute blocks unlink
+    (WinError 5). The old handler only caught `PermissionError`
+    (WinError 5/32) — WinError 145 maps to plain `OSError`
+    (errno ENOTEMPTY), so it propagated uncaught and crashed the op.
+
+    Strategy: retry the whole `rmtree` with linear backoff; between
+    attempts clear read-only bits across the tree so the next pass can
+    unlink them. Re-raises the last `OSError` if every attempt fails so
+    the caller can report a clear message (rather than silently leaving
+    a half-deleted cache).
+    """
+    last_exc = None
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:  # WinError 5/32/145 all land here
+            last_exc = exc
+            if not os.path.isdir(path):
+                return  # someone/something finished the job — treat as success
+            # Clear read-only attrs that block unlink (WinError 5).
+            for root, _dirs, files in os.walk(path):
+                for name in files:
+                    try:
+                        os.chmod(os.path.join(root, name), stat.S_IWRITE)
+                    except OSError:
+                        pass  # best-effort; the retry will surface real locks
+            time.sleep(0.2 * (i + 1))  # 0.2, 0.4, 0.6, 0.8s backoff
+    raise last_exc
 
 
 def subprocess_drain(proc, q):
@@ -188,20 +230,22 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
         # Brief settle for Windows file lock release
         time.sleep(0.1)
         if os.path.isdir(cache):
+            # Round-60: _robust_rmtree retries with backoff + chmod and
+            # catches OSError broadly (WinError 5/32/145). Pre-R60 only
+            # PermissionError was caught, so WinError 145 ("dir not
+            # empty", the Windows async-delete race on mesh/) escaped
+            # and crashed the operator.
             try:
-                shutil.rmtree(cache)
+                _robust_rmtree(cache)
                 self.report({"INFO"},
                             f"cleared {cache} (released {released} MSC)")
-            except PermissionError as exc:
-                # Retry once after a longer wait — sometimes mmap takes longer
-                time.sleep(0.5)
-                try:
-                    shutil.rmtree(cache)
-                    self.report({"INFO"}, f"cleared after retry")
-                except Exception as exc2:
-                    self.report({"ERROR"},
-                                f"could not clear cache (file locked): {exc2}")
-                    return {"CANCELLED"}
+            except OSError as exc:
+                self.report(
+                    {"ERROR"},
+                    f"could not clear cache after retries — files may be "
+                    f"held by an attached cache object (detach it first) "
+                    f"or an external process: {exc}")
+                return {"CANCELLED"}
         else:
             self.report({"INFO"}, "no cache to clear")
         return {"FINISHED"}
