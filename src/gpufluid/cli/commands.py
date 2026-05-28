@@ -171,6 +171,26 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         )
         for inf in scene.inflow
     )
+    # Round-58: warn when an inflow's emission window is shorter than the
+    # bake. Pre-R58: silently honoured the user's `frame_end`, so a TOML
+    # with `[[inflow]] frame_end = 200` and `[simulation] frames = 600`
+    # gave a 200-frame emit + 400 frames of no new fluid (the visual
+    # symptom: a falling stream that just stops). Now: print a one-line
+    # warning per such inflow so the trap is obvious in the log. Trigger
+    # only when end < sim.frames (clamping == ok, default 1_000_000 ⇒ ok).
+    for i, inf in enumerate(scene.inflow):
+        end_user = int(inf.frame_end)
+        if 0 < end_user < int(sim.frames):
+            print(
+                f"[mpm] WARN: inflow[{i}].frame_end={end_user} < "
+                f"simulation.frames={int(sim.frames)} — emitter will "
+                f"STOP at frame {end_user}; the remaining "
+                f"{int(sim.frames) - end_user} frames bake without new "
+                f"particles. Set frame_end = simulation.frames (or omit "
+                f"to use the default 1_000_000 which auto-clamps) if "
+                f"you want continuous emission throughout the bake.",
+                file=sys.stderr,
+            )
 
     # Each [[obstacle]] of type box becomes a slip-with-top-friction cube
     cubes = []
