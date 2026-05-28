@@ -138,6 +138,19 @@ def test_render_uses_output_sanity():
         "(both sync + modal) instead of reporting success blindly")
 
 
+def test_render_modal_rearms_reentrance():
+    """Round-61 (§9.6 mirror of bake round-28): render's modal FINISHED
+    branch must re-hold the reentrance mutex around its post-finish work
+    (tick_modal cleared it), or a second Render click in that tick can
+    spawn a parallel subprocess into the same out_dir."""
+    code = _code(_ADDON / "operators" / "render.py")
+    idx = code.index('if "FINISHED" in result')
+    tail = code[idx:]
+    assert "cls._is_running = True" in tail and "finally:" in tail, (
+        "round-61 regressed: render modal FINISHED no longer re-arms the "
+        "reentrance mutex around its post-finish work")
+
+
 def test_unregister_is_defensive():
     """A stale/half-registered class must not abort the whole teardown
     (live-hit 2026-05-28: an un-guarded unregister_class raised mid-loop

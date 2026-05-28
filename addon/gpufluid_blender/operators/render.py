@@ -223,20 +223,30 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             # survives `_clear_instance_state` — direct read is safe.
             # Round-16 reviewer flagged earlier comment about "snapshot
             # before runner clears it" as stale.
-            # Round-61: don't report success blindly — Blender can exit 0
-            # having written no PNGs (unwritable path, empty frame range,
-            # misconfigured camera/engine). Count output first and
-            # escalate the zero case to ERROR (mirror of the bake
-            # 0-frame fix; §9.6 — keep the two operators in step).
-            from ..cache_sanity import count_pngs, render_output_sanity
-            n_png = count_pngs(self._out_dir)
-            level, msg = render_output_sanity(n_png, 0)
-            if level is not None:
-                self.report({level}, msg)
-            else:
-                self.report({"INFO"},
-                            f"gpufluid render complete: {n_png} frame(s) "
-                            f"in {self._out_dir}")
+            # Round-61: re-arm the reentrance mutex around the post-FINISH
+            # work — tick_modal's _finish() already cleared _is_running,
+            # opening the same single-tick window bake.py closed in
+            # round-28. Mirror it here so a second Render click can't
+            # spawn a parallel subprocess into the same out_dir while this
+            # branch runs (§9.6 — keep bake/render in step).
+            cls = self.__class__
+            try:
+                cls._is_running = True
+                # Don't report success blindly — Blender can exit 0 having
+                # written no PNGs (unwritable path, empty frame range,
+                # misconfigured camera/engine). Count first; escalate the
+                # zero case to ERROR (mirror of the bake 0-frame fix).
+                from ..cache_sanity import count_pngs, render_output_sanity
+                n_png = count_pngs(self._out_dir)
+                level, msg = render_output_sanity(n_png, 0)
+                if level is not None:
+                    self.report({level}, msg)
+                else:
+                    self.report({"INFO"},
+                                f"gpufluid render complete: {n_png} "
+                                f"frame(s) in {self._out_dir}")
+            finally:
+                cls._is_running = False
         return result
 
     def cancel(self, context):
