@@ -42,7 +42,13 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
         subtype="XYZ", min=1e-6,
     )
     frame_offset: bpy.props.IntProperty(
-        name="Cache starts at scene frame", default=1)
+        name="Cache starts at scene frame", default=0,
+        description="Scene frame at which cache frame_0000 appears. "
+                    "frame_0000 is the empty pre-sim initial state (no "
+                    "surface yet), so the default 0 maps scene frame 1 to "
+                    "the first SIMULATED frame (frame_0001) — pre-round-61 "
+                    "default 1 put the empty frame on scene frame 1 (looked "
+                    "like a blank/failed bake) AND dropped the final frame.")
     # The Alembic fast path is currently disabled (see commands.py); keep
     # this flag so external scripts can still force the PLY path if needed.
     force_ply: bpy.props.BoolProperty(name="Force PLY preload", default=True)
@@ -196,7 +202,13 @@ class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
     origin_y: bpy.props.FloatProperty(name="Origin Y", default=0.0)
     origin_z: bpy.props.FloatProperty(name="Origin Z", default=0.0)
     frame_offset: bpy.props.IntProperty(
-        name="Cache starts at scene frame", default=1)
+        name="Cache starts at scene frame", default=0,
+        description="Scene frame at which cache frame_0000 appears. "
+                    "frame_0000 is the empty pre-sim initial state (no "
+                    "surface yet), so the default 0 maps scene frame 1 to "
+                    "the first SIMULATED frame (frame_0001) — pre-round-61 "
+                    "default 1 put the empty frame on scene frame 1 (looked "
+                    "like a blank/failed bake) AND dropped the final frame.")
 
     def execute(self, context):
         cache_dir = bpy.path.abspath(self.cache_dir)

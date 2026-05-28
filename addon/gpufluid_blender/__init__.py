@@ -116,10 +116,26 @@ def register():
 # [BLK A8.1]
 def unregister():
     cache_loader.unregister_handler()
-    del bpy.types.Object.gpufluid_outflow
-    del bpy.types.Object.gpufluid_inflow
-    del bpy.types.Object.gpufluid_obstacle
-    del bpy.types.Object.gpufluid_fluid
-    del bpy.types.Object.gpufluid_domain
+    # Round-61: guard every teardown step. A half-registered state — e.g.
+    # a prior reload that left a stale double-registration so the class
+    # object in _collect_classes() no longer matches the registered one —
+    # made `unregister_class` raise "missing bl_rna (may not be
+    # registered)" MID-LOOP. Pre-R61 that aborted the whole unregister:
+    # every remaining class leaked, the Object props were half-deleted,
+    # and the addon dropped into a corrupt half-enabled state that needed
+    # a full Blender restart to clear (live-hit 2026-05-28 on a reload).
+    # Now each step is best-effort so teardown always completes.
+    for prop in ("gpufluid_outflow", "gpufluid_inflow", "gpufluid_obstacle",
+                 "gpufluid_fluid", "gpufluid_domain"):
+        if hasattr(bpy.types.Object, prop):
+            try:
+                delattr(bpy.types.Object, prop)
+            except Exception:
+                pass  # already gone / mid-corrupt state — keep tearing down
     for cls in reversed(_collect_classes()):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            # not-registered / stale bl_rna — don't let one bad class
+            # leak all the others (the pre-R61 corruption mode).
+            pass

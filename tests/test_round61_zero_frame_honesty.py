@@ -76,8 +76,9 @@ def test_bake_truncated_is_warning():
 def test_bake_complete_is_silent():
     cs = _load_cache_sanity()
     assert cs.bake_frame_sanity(600, 600) == (None, "")
-    # actual > expected (the empty frame_0000 pushes file count to
-    # frames+1) must NOT be a false truncation.
+    # actual > expected (MPM writes frames+1 files — the empty frame_0000
+    # initial state plus `frames` simulated frames; FLIP writes exactly
+    # `frames`) must NOT be a false truncation.
     assert cs.bake_frame_sanity(601, 600) == (None, "")
 
 
@@ -135,6 +136,39 @@ def test_render_uses_output_sanity():
     assert "render_output_sanity" in code, (
         "round-61: render.py must run the shared output sanity check "
         "(both sync + modal) instead of reporting success blindly")
+
+
+def test_unregister_is_defensive():
+    """A stale/half-registered class must not abort the whole teardown
+    (live-hit 2026-05-28: an un-guarded unregister_class raised mid-loop
+    and left the addon corrupt). Every unregister_class call must be
+    wrapped so teardown always completes."""
+    code = _code(_ADDON / "__init__.py")
+    # The unregister loop must wrap unregister_class in try/except.
+    assert "try:" in code and "bpy.utils.unregister_class(cls)" in code
+    import re as _re
+    # crude but effective: the unregister_class call must sit under a try.
+    idx = code.index("for cls in reversed(_collect_classes())")
+    tail = code[idx:]
+    assert "try:" in tail and "except" in tail, (
+        "round-61 regressed: unregister loop no longer guards "
+        "unregister_class — one stale class will corrupt teardown")
+
+
+def test_attach_frame_offset_defaults_to_zero():
+    """Round-61: frame_offset default must be 0 so scene frame 1 shows
+    the first SIMULATED frame (frame_0001), not the empty pre-sim
+    frame_0000. Pre-R61 default 1 put the empty frame on scene frame 1
+    (looked like a blank/failed bake) and dropped the final frame. Guards
+    BOTH the surface and whitewater attach defaults (they must agree or
+    the two caches desync by a frame)."""
+    code = _code(_ADDON / "cache_loader" / "_ops.py")
+    assert 'name="Cache starts at scene frame", default=1)' not in code, (
+        "round-61 regressed: frame_offset default back to 1 (empty frame "
+        "on scene frame 1)")
+    assert code.count('name="Cache starts at scene frame", default=0') == 2, (
+        "round-61: both surface + whitewater frame_offset must default to "
+        "0 (or they desync)")
 
 
 def test_mpm_inflow_velocity_not_silently_overridden():

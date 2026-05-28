@@ -292,10 +292,28 @@ def collect_scene(context, domain_obj):
         elif oprops.obstacle_type == "SPHERE":
             r = max(hx_w, hy_w, hz_w) * avg_inv
             obstacles.append({"type": "sphere", "center": to_sim(centre_w), "radius": r})
+            # Round-61: a single sim-space radius from the AVERAGE inverse
+            # domain size only matches the visible sphere on a ~cubic
+            # domain; on a non-cubic domain the world shape is an ellipsoid
+            # the collider won't track. Mirrors the OBB anisotropy warning.
+            if max(inv_size) / min(inv_size) > 1.05:
+                warnings.append(
+                    f"obstacle '{o.name}' is a SPHERE on a non-cubic domain "
+                    f"— its radius is averaged across axes, so the collider "
+                    f"won't match the visible sphere. Use a MESH obstacle, "
+                    f"or make the domain cubic, for an exact fit.")
         elif oprops.obstacle_type == "CYLINDER_Y":
             r = max(hx_w, hz_w) * avg_inv
             obstacles.append({"type": "cylinder_y", "center": to_sim(centre_w),
                               "radius": r, "half_height": hy})
+            # Round-61: same anisotropy caveat as SPHERE (radius averaged
+            # across the X/Z axes).
+            if max(inv_size) / min(inv_size) > 1.05:
+                warnings.append(
+                    f"obstacle '{o.name}' is a CYLINDER on a non-cubic "
+                    f"domain — its radius is averaged across X/Z, so the "
+                    f"collider won't match the visible cylinder. Use a MESH "
+                    f"obstacle, or make the domain cubic, for an exact fit.")
         elif oprops.obstacle_type == "MESH":
             # export object's mesh as OBJ next to scene.toml.
             # cache_dir hoisted in round-53 — no need to re-resolve.
