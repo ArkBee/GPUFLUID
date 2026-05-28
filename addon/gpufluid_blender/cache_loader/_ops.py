@@ -162,9 +162,21 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
             dom_size=tuple(self.dom_size),
         )
         _frame_change_handler(context.scene)
-        self.report({"INFO"},
-                    f"cache attached (PLY preload) — {n} frames in "
-                    f"{_time.time() - t0:.1f}s")
+        # Round-61: 0 frames loaded means the bind points at an empty /
+        # cleared / torn cache — the user would see nothing on screen.
+        # Report WARNING (not the old unconditional INFO) so the empty
+        # result is visible instead of masquerading as success.
+        if n == 0:
+            self.report({"WARNING"},
+                        f"cache attached but 0 renderable frames found in "
+                        f"{os.path.join(cache_dir, 'mesh')} — the bake "
+                        f"produced no mesh output, or the cache was "
+                        f"cleared. Re-bake, or check the system console "
+                        f"for the CLI error.")
+        else:
+            self.report({"INFO"},
+                        f"cache attached (PLY preload) — {n} frames in "
+                        f"{_time.time() - t0:.1f}s")
         return {"FINISHED"}
 
 

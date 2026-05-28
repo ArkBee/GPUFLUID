@@ -223,8 +223,20 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             # survives `_clear_instance_state` — direct read is safe.
             # Round-16 reviewer flagged earlier comment about "snapshot
             # before runner clears it" as stale.
-            self.report({"INFO"},
-                        f"gpufluid render complete: {self._out_dir}")
+            # Round-61: don't report success blindly — Blender can exit 0
+            # having written no PNGs (unwritable path, empty frame range,
+            # misconfigured camera/engine). Count output first and
+            # escalate the zero case to ERROR (mirror of the bake
+            # 0-frame fix; §9.6 — keep the two operators in step).
+            from ..cache_sanity import count_pngs, render_output_sanity
+            n_png = count_pngs(self._out_dir)
+            level, msg = render_output_sanity(n_png, 0)
+            if level is not None:
+                self.report({level}, msg)
+            else:
+                self.report({"INFO"},
+                            f"gpufluid render complete: {n_png} frame(s) "
+                            f"in {self._out_dir}")
         return result
 
     def cancel(self, context):
@@ -232,10 +244,17 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             self._runner.cancel(self, context)
 
     def _sync_post_render_report(self) -> None:
-        """Sync on_complete: count PNGs + INFO report."""
-        n_png = len(list(Path(self._out_dir).glob("*.png")))
-        self.report(
-            {"INFO"},
-            f"gpufluid render (sync) finished — {n_png} PNG(s) "
-            f"in {self._out_dir}")
+        """Sync on_complete: count PNGs and report. Round-61: escalate
+        the 0-PNG case to ERROR via the shared cache_sanity classifier
+        instead of reporting an empty render as 'finished'."""
+        from ..cache_sanity import count_pngs, render_output_sanity
+        n_png = count_pngs(self._out_dir)
+        level, msg = render_output_sanity(n_png, 0)
+        if level is not None:
+            self.report({level}, msg)
+        else:
+            self.report(
+                {"INFO"},
+                f"gpufluid render (sync) finished — {n_png} PNG(s) "
+                f"in {self._out_dir}")
 

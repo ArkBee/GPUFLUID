@@ -685,8 +685,14 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             cls = self.__class__
             try:
                 cls._is_running = True
-                self._auto_attach_post_bake()
-                self.report({"INFO"}, "gpufluid bake complete")
+                # Round-61: gate auto-attach + the 'complete' message on
+                # the bake having actually produced frames. A 0-frame
+                # bake now reports ERROR (via _post_bake_sanity) instead
+                # of a misleading green 'complete' over an empty viewport.
+                actual = self._post_bake_sanity()
+                if actual > 0:
+                    self._auto_attach_post_bake()
+                    self.report({"INFO"}, "gpufluid bake complete")
             finally:
                 cls._is_running = False
         return result
@@ -730,33 +736,48 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             return None
 
     def _sync_post_bake_then_attach(self) -> None:
-        """Sync on_complete: run truncation sanity, then auto-attach.
-        Errors here downgrade to WARNING (don't fail the whole bake)."""
-        self._sync_truncation_sanity()
-        self._auto_attach_post_bake()
+        """Sync on_complete: run frame-count sanity, then auto-attach —
+        but only when the bake actually produced frames. Errors here
+        downgrade so they don't crash the operator."""
+        actual = self._post_bake_sanity()
+        if actual > 0:
+            self._auto_attach_post_bake()
 
-    def _sync_truncation_sanity(self) -> None:
-        """Round-10 stress-test finding: CLI can exit 0 with fewer
-        frames than requested. Compare mesh count vs MERGED [simulation]
-        frames (round-11 reviewer fix — overrides path).
+    def _post_bake_sanity(self) -> int:
+        """Round-61: count baked mesh frames vs requested and report any
+        shortfall. SHARED by the sync + modal paths so the two can't
+        drift (§9.6).
+
+        History: round-10 added a truncation check to the SYNC path
+        only; the modal (UI-default) path never got one. Worse, the sync
+        check bounded the shortfall below by a ``0 < actual`` clause,
+        which EXCLUDED the actual==0 case, so a bake that wrote ZERO was
+        reported as a clean 'complete' and the user saw an empty viewport
+        with a green success message (live-found 2026-05-28). The
+        decision now lives in the bpy-free ``cache_sanity`` module
+        (unit-tested) and escalates the zero case to ERROR.
+
+        Returns the actual mesh-frame count so the caller can skip the
+        auto-attach + 'complete' message when nothing was produced.
 
         Round-12 reviewer #6: tomllib only, no tomli fallback (Blender
         4.5+ ships Python 3.11+ which guarantees tomllib).
         """
+        from ..cache_sanity import bake_frame_sanity, count_mesh_frames
+        actual = count_mesh_frames(self._cache_dir_str)
+        expected = 0
         try:
-            mesh_dir = Path(self._cache_dir_str) / "mesh"
-            actual = (len(list(mesh_dir.glob("frame_*.ply")))
-                      if mesh_dir.is_dir() else 0)
             import tomllib
             emitted = tomllib.loads(self._toml_str_snapshot)
             expected = int(emitted.get("simulation", {}).get("frames", 0))
-            if expected > 0 and 0 < actual < expected:
-                self.report({"WARNING"},
-                    f"gpufluid bake produced {actual}/{expected} frames "
-                    f"— CLI exited cleanly but truncated (likely solver "
-                    f"OOM or early-stop). Cache attached as-is.")
         except Exception:
-            pass
+            # TOML unparseable → expected stays 0, so only the 0-frame
+            # disaster is flagged (never a false "truncated" verdict).
+            expected = 0
+        level, msg = bake_frame_sanity(actual, expected)
+        if level is not None:
+            self.report({level}, msg)
+        return actual
 
     def _auto_attach_post_bake(self) -> None:
         """Shared auto-attach for sync + modal success paths.
