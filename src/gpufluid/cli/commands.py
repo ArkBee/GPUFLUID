@@ -158,7 +158,14 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     inflows = tuple(
         MpmInflow(
             lo=tuple(inf.lo), hi=tuple(inf.hi),
-            velocity=tuple(inf.velocity) if any(inf.velocity) else (0.0, 0.0, -1.0),
+            # Round-61: forward the inflow velocity VERBATIM. Pre-R61 a
+            # zero velocity was silently rewritten to (0,0,-1.0) — a
+            # downward kick the user never asked for. That re-introduced
+            # exactly the round-51 UX-default bug (intuitive default is
+            # (0,0,0) = "emit, let gravity do the rest") on the MPM CLI
+            # side, and diverged from the FLIP path which always forwards
+            # inf.velocity. No fallback: (0,0,0) means gravity-only.
+            velocity=tuple(inf.velocity),
             rate_per_sec=float(inf.rate_per_sec),
             frame_start=int(inf.frame_start),
             frame_end=int(min(inf.frame_end, sim.frames)),
