@@ -183,6 +183,15 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
             self.report({"INFO"},
                         f"cache attached (PLY preload) — {n} frames in "
                         f"{_time.time() - t0:.1f}s")
+        # Round-62: force a 3D-viewport redraw. A MODAL bake's auto-attach
+        # swaps obj.data inside the frame_change handler, but the viewport
+        # kept showing the pre-bake state until the user moved the mouse /
+        # scrubbed — read as "I pressed Bake and nothing happened". Tag all
+        # VIEW_3D areas so the result appears the instant the bake finishes.
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
         return {"FINISHED"}
 
 

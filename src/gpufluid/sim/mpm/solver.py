@@ -651,10 +651,21 @@ class MpmSolver:
                            f"(last successfully dumped frame: {last_dumped} "
                            f"/ {cfg.n_frames} requested)",
                 )
-            if progress and k % 200 == 0:
-                print(f"  [MPM] step {k}/{cfg.n_frames}  "
+            if progress and k % cfg.dump_every == 0:
+                # Round-62: emit progress on the DUMP cadence in OUTPUT-
+                # FRAME units ("frame N/M"), not every 200 raw steps in
+                # "step" units. Two pre-round-62 bugs starved the Blender
+                # addon's modal progress bar: (1) the line said "step", but
+                # the addon parser only matches "frame N/M" → the counter
+                # never advanced for MPM bakes; (2) the 200-step cadence
+                # never fired on bakes shorter than 200 steps. Now it ticks
+                # once per written frame, so the UI shows real progress
+                # (the "no bake indicator / nothing happens" complaint).
+                out_frame = k // cfg.dump_every
+                total_frames = max(1, cfg.n_frames // cfg.dump_every)
+                print(f"  [MPM] frame {out_frame}/{total_frames}  "
                       f"z_min={float(pos[:, 2].min()):.3f}  "
-                      f"z_max={float(pos[:, 2].max()):.3f}")
+                      f"z_max={float(pos[:, 2].max()):.3f}", flush=True)
         return out_dir
 
     def __del__(self):

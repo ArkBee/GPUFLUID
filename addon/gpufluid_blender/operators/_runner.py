@@ -68,6 +68,19 @@ class ModalSubprocessRunner:
         # For modal status-bar updates
         self._current_frame: int = 0
         self._total_frames: int = 0
+        # Round-62: whether wm.progress_begin() is active (modal only), so
+        # _end_progress can pair every begin with exactly one end.
+        self._progress_active: bool = False
+
+    def _end_progress(self, context) -> None:
+        """Round-62: close the wm progress bar if open. Idempotent —
+        called from both _finish and abort (and safe if begin failed)."""
+        if getattr(self, "_progress_active", False):
+            try:
+                context.window_manager.progress_end()
+            except Exception:
+                pass
+            self._progress_active = False
 
     # ── Internal helpers ────────────────────────────────────────────
 
@@ -281,6 +294,15 @@ class ModalSubprocessRunner:
         self._timer = wm.event_timer_add(0.3, window=context.window)
         wm.modal_handler_add(operator)
         context.workspace.status_text_set(status_msg)
+        # Round-62: open a 0-100% progress bar so the job reads as active
+        # immediately, before the first parsed frame line. Guarded — a
+        # headless/odd context where progress_begin is unavailable must not
+        # abort the (otherwise working) bake.
+        try:
+            wm.progress_begin(0, 100)
+            self._progress_active = True
+        except Exception:
+            self._progress_active = False
         return {"RUNNING_MODAL"}
 
     def tick_modal(
@@ -324,6 +346,14 @@ class ModalSubprocessRunner:
                         self._total_frames = int(m.group(2))
                         if on_progress is not None:
                             on_progress(self._current_frame, self._total_frames)
+                        # Round-62: advance the wm progress bar too.
+                        if self._progress_active and self._total_frames:
+                            try:
+                                context.window_manager.progress_update(
+                                    min(100, int(100 * self._current_frame
+                                                 / self._total_frames)))
+                            except Exception:
+                                pass
                 if logger is not None and log_prefix is not None:
                     logger.info("%s: %s", log_prefix, line.rstrip())
         if rc is None:
@@ -374,6 +404,7 @@ class ModalSubprocessRunner:
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
         context.workspace.status_text_set(None)
+        self._end_progress(context)
         self._clear_instance_state()
         operator.report({"WARNING"},
                         f"gpufluid {self.label} aborted ({reason})")
@@ -407,6 +438,7 @@ class ModalSubprocessRunner:
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
         context.workspace.status_text_set(None)
+        self._end_progress(context)
         self._clear_instance_state()
         if not ok:
             friendly = None

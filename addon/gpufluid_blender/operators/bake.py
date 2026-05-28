@@ -33,7 +33,13 @@ from .helpers import subprocess_drain
 from ._runner import ModalSubprocessRunner
 
 
-_FRAME_RE = re.compile(r"frame\s+(\d+)/(\d+)")
+# Round-62: match BOTH the FLIP per-frame line ("  frame 0005/40") and
+# the MPM per-frame line ("  [MPM] frame 5/40"), tolerant of spaces around
+# the slash and case. The legacy "step N/M" form is also accepted so any
+# solver/path that still prints steps advances the bar instead of freezing
+# it (the "no bake indicator" complaint was MPM printing "step", which the
+# old `frame\s+...` regex never matched).
+_FRAME_RE = re.compile(r"(?:frame|step)\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 
 
 def collect_scene(context, domain_obj):
@@ -724,9 +730,12 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
     # ── Operator-specific callbacks for the runner ──────────────────
 
     def _update_status(self, current: int, total: int) -> None:
-        """Called by runner.tick_modal on each parsed `frame N/M` line."""
+        """Called by runner.tick_modal on each parsed `frame N/M` line.
+        Round-62: show a percentage + 'Esc to cancel' so the status bar
+        reads as a live indicator, not a frozen label."""
+        pct = int(100 * current / total) if total else 0
         bpy.context.workspace.status_text_set(
-            f"gpufluid: frame {current}/{total}")
+            f"gpufluid: baking frame {current}/{total} ({pct}%) — Esc to cancel")
 
     def _friendly_error_for_rc(self, rc: int):
         """Round-20: translate CLI rc into actionable error message.
