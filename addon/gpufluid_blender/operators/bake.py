@@ -391,6 +391,21 @@ def collect_scene(context, domain_obj):
                 # `dprops.frames` frames; the rest are dead-letter
                 # rows the solver never reaches.
                 fe_eff = min(fe, fs + int(dprops.frames))
+                # Pre-public-test audit (2026-06-01): when frame_end (default
+                # 10000) overshoots the bake range, the keyframe list below is
+                # clipped to fe_eff but entry["frame_end"] still carried the
+                # original fe. The solver then emitted past the last keyframe,
+                # freezing the emitter at its final position — looked like a
+                # solver bug. Warn, and write the clamped end so emission stops
+                # exactly when the animated keyframes run out.
+                if fe_eff < fe:
+                    warnings.append(
+                        f"inflow '{o.name}' frame_end ({fe}) is beyond the "
+                        f"bake range — emission is clamped to frame {fe_eff} "
+                        f"({int(dprops.frames)} baked frames from start {fs}). "
+                        f"Lower frame_end, or raise Domain Frames, to emit "
+                        f"for longer.")
+                entry["frame_end"] = fe_eff
                 kfs = []
                 for f in range(fs, fe_eff + 1):
                     lf, hf = _bbox_world_at_frame(o, f)
@@ -589,7 +604,12 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
 
         try:
             scene_dict, dom_size, origin, warnings = collect_scene(context, domain)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # ValueError: DomainTransform.from_world_aabb rejects a degenerate
+            # world AABB (Domain Empty scaled to 0 on an axis, or mirrored so
+            # world_lo > world_hi). Pre-audit only RuntimeError was caught, so
+            # the ValueError escaped collect_scene as a raw traceback popup
+            # instead of the actionable message it already carries.
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
         # Surface every wall-clip / out-of-domain warning before the heavy
@@ -642,7 +662,12 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # Live-found 2026-05-25 during round-3 testing.
         import shutil as _shutil
         out_root = Path(str(scene_dict["output"]["cache_dir"]))
-        for sub in ("mesh", "particles_raw", "colors"):
+        # whitewater + whitewater_kinds added per pre-public-test audit
+        # (2026-06-01): they were omitted, so a shorter re-bake left the
+        # prior run's tail whitewater frames on disk and the loader served
+        # them silently (the surface dirs were cleaned, whitewater was not).
+        for sub in ("mesh", "particles_raw", "colors",
+                    "whitewater", "whitewater_kinds"):
             d = out_root / sub
             if d.is_dir():
                 try:

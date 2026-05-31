@@ -54,6 +54,36 @@ def count_pngs(out_dir: str) -> int:
     return len(glob.glob(os.path.join(out_dir, "*.png")))
 
 
+def count_ww_frames(cache_dir: str) -> int:
+    """Number of whitewater point-cloud frames in
+    ``<cache_dir>/whitewater/frame_*.npy``.
+
+    The whitewater attach path had no frame-count check (pre-public-test
+    audit 2026-06-01, §9.6 mirror-drift): the surface attach escalates a
+    0-frame bind to WARNING, but ``attach_ww_cache`` reported plain INFO
+    success even when the whitewater dir was empty/truncated — the user saw
+    "attached" and nothing on playback. This is the whitewater sibling of
+    ``count_mesh_frames`` so both honesty paths share one source.
+    """
+    ww_dir = os.path.join(cache_dir, "whitewater")
+    if not os.path.isdir(ww_dir):
+        return 0
+    return len(glob.glob(os.path.join(ww_dir, "frame_*.npy")))
+
+
+def attach_ww_sanity(actual: int) -> Verdict:
+    """Classify a whitewater attach by its frame count. Mirrors the surface
+    attach's 0-frame WARNING (cache_loader/_ops.py). ``expected`` is unknown
+    at attach time, so only the empty case is flagged."""
+    if actual == 0:
+        return ("WARNING",
+                "whitewater cache attached but 0 frames found in "
+                "whitewater/ — the bake produced no whitewater output "
+                "(whitewater may be disabled on the Domain, or the bake "
+                "errored). Nothing will appear on playback.")
+    return (None, "")
+
+
 def _level(actual: int, expected: int) -> Optional[str]:
     """ERROR when nothing was produced, WARNING when fewer than asked,
     None when complete (or when ``expected`` is unknown and we got >0)."""

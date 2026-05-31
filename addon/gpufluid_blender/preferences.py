@@ -138,8 +138,9 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         row = col.row(align=True)
         row.prop(self, "interpreter_path", text="")
         row.operator("gpufluid.detect_interpreter", text="Detect", icon="VIEWZOOM")
-        col.label(text="Example: E:\\projects\\gpu_flip\\gpufluid\\.venv\\Scripts\\python.exe",
+        col.label(text="Example (Windows): C:\\path\\to\\gpufluid\\.venv\\Scripts\\python.exe",
                   icon="INFO")
+        col.label(text="Example (macOS/Linux): /path/to/gpufluid/.venv/bin/python")
         col.separator()
         col.label(text=f"Blender's own Python: {sys.executable}  (NOT this — see README)",
                   icon="ERROR")

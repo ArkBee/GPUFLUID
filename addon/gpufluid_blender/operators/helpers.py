@@ -303,7 +303,16 @@ class GPUFLUID_OT_open_cache_dir(bpy.types.Operator):
                 os.startfile(cache)  # noqa: S606
             else:
                 import subprocess
-                subprocess.Popen(["xdg-open", cache])
+                # dodge: xdg-open missing / not on PATH (headless Linux, minimal
+                # desktops) makes Popen raise FileNotFoundError. Pre-public-test
+                # audit (2026-06-01): unguarded, this crashed the operator with a
+                # traceback popup instead of a graceful warning.
+                try:
+                    subprocess.Popen(["xdg-open", cache])
+                except OSError as exc:
+                    self.report({"WARNING"},
+                                f"could not open file manager (xdg-open): "
+                                f"{exc}. Cache is at: {cache}")
         else:
             self.report({"WARNING"}, "cache dir does not exist yet — bake first")
         return {"FINISHED"}

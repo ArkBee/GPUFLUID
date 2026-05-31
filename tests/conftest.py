@@ -10,10 +10,20 @@ if str(_ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(_ADDON_DIR))
 
 import pytest
-import warp as wp
+
+try:
+    import warp as wp
+except ModuleNotFoundError:
+    # warp is the GPU stack; absent on machines that only run the bpy-free /
+    # pure-Python unit tests (addon sanity helpers, source-grep contract
+    # tests). Don't abort collection of the whole suite for those — gate the
+    # GPU tests via HAS_CUDA below, which is False when warp can't import.
+    wp = None
 
 
 def _has_cuda() -> bool:
+    if wp is None:
+        return False
     try:
         wp.init()
     except Exception:

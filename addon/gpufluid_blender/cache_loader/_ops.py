@@ -238,7 +238,20 @@ class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
             (self.origin_x, self.origin_y, self.origin_z),
             frame_offset=self.frame_offset)
         _frame_change_handler(context.scene)
-        self.report({"INFO"}, f"whitewater cache attached to '{target.name}'")
+        # Pre-public-test audit (2026-06-01, §9.6 mirror-drift): the surface
+        # attach WARNINGs on a 0-frame bind, but this path reported plain INFO
+        # success even when whitewater/ was empty — "attached" then nothing on
+        # playback. Count via the shared cache_sanity helper so both honesty
+        # paths can't drift.
+        from ..cache_sanity import attach_ww_sanity, count_ww_frames
+        n = count_ww_frames(cache_dir)
+        level, msg = attach_ww_sanity(n)
+        if level is not None:
+            self.report({level}, msg)
+        else:
+            self.report({"INFO"},
+                        f"whitewater cache attached to '{target.name}' "
+                        f"({n} frames)")
         return {"FINISHED"}
 
 
