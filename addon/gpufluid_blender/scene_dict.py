@@ -269,6 +269,18 @@ def validate_scene_dict(d: Any) -> None:
             raise SceneDictError(
                 f"'domain.dx' must be numeric, "
                 f"got {type(d['domain']['dx']).__name__}")
+        # FU-016/FU-019: real world extent in metres (gravity/velocity scaling).
+        # Validate the shape here so a malformed value (via toml_overrides or a
+        # hand-built dict) fails with a clear key-path message instead of a
+        # cryptic TypeError deep in config_builder/commands at float(sw[2]).
+        if "size_world" in d["domain"]:
+            sw = d["domain"]["size_world"]
+            if (not isinstance(sw, (list, tuple)) or len(sw) != 3
+                    or not all(isinstance(x, (int, float)) and x > 0
+                               for x in sw)):
+                raise SceneDictError(
+                    f"'domain.size_world' must be a 3-list of positive "
+                    f"numbers (metres), got {sw!r}")
 
     # Simulation — validate IF present
     if "simulation" in d:

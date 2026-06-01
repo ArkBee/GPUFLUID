@@ -206,14 +206,28 @@ def collect_scene(context, domain_obj):
                 cw_sim = to_sim((centre_obb_world.x,
                                  centre_obb_world.y,
                                  centre_obb_world.z))
-                # Half-extents into sim space: divide by per-axis
-                # domain size. Assumes ~cubic domain — for severely
-                # anisotropic domains the rotation in sim coords
-                # would no longer be orthogonal; warn in that case.
-                inv_avg = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
-                hx_sim = hx_obb * inv_avg
-                hy_sim = hy_obb * inv_avg
-                hz_sim = hz_obb * inv_avg
+                # Half-extents into sim space. FU-019 (2026-06-01 deep-dive):
+                #  - Axis-aligned box (identity rotation): use PER-AXIS
+                #    inv_size — exact, and identical to the hx/hy/hz already
+                #    computed above. Pre-FU-019 this used the averaged inv_avg
+                #    even for unrotated boxes, which mis-sized the collider on
+                #    a non-cubic domain (e.g. a wide tank). The common BBOX
+                #    case is axis-aligned, so this is the one that mattered.
+                #  - Rotated box: per-axis scaling would SHEAR the box (the
+                #    rotation matrix R is orthonormal only under a UNIFORM
+                #    scale). Keep the averaged inv_avg so the collider stays a
+                #    proper oriented box; the non-cubic+rotated case is
+                #    genuinely approximate and is warned below.
+                # On a cubic domain inv_avg == inv_size[i], so both branches
+                # agree — no behaviour change for the common cubic scene.
+                rot_is_identity = not (rotation_nonzero or non_axis_aligned)
+                if rot_is_identity:
+                    hx_sim, hy_sim, hz_sim = hx, hy, hz
+                else:
+                    inv_avg = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
+                    hx_sim = hx_obb * inv_avg
+                    hy_sim = hy_obb * inv_avg
+                    hz_sim = hz_obb * inv_avg
                 if (rotation_nonzero or non_axis_aligned) and (
                     max(inv_size) / min(inv_size) > 1.05
                 ):
@@ -331,6 +345,22 @@ def collect_scene(context, domain_obj):
             _export_obj(o, mesh_path)
             # OBJ verts are in world metres — scale to the unit cube so the
             # solver's [0,1]³ collision sampling lands on the mesh.
+            # FU-019 (2026-06-01 deep-dive): `scale` is a single scalar in the
+            # ObstacleMeshCfg schema, so this can only apply a UNIFORM scale.
+            # On a non-cubic domain the correct map is per-axis
+            # (vert*inv_size - origin*inv_size); a uniform avg_inv squashes the
+            # mesh wrong on the short axis. MESH is advertised as the "exact
+            # fit" workaround for SPHERE/CYL, so silently mis-scaling it breaks
+            # the one escape hatch we recommend. Proper per-axis mesh scaling
+            # needs a schema + solver change (FU-019 follow-up); until then,
+            # warn so the "exact fit" claim isn't a silent lie.
+            if max(inv_size) / min(inv_size) > 1.05:
+                warnings.append(
+                    f"obstacle '{o.name}' is a MESH on a non-cubic domain — "
+                    f"the mesh is scaled uniformly (single-scalar limitation), "
+                    f"so the collider is squashed on the short domain axis and "
+                    f"won't match the visible mesh. Make the domain cubic for "
+                    f"an exact fit (per-axis mesh scaling is a known follow-up).")
             obstacles.append({
                 "type": "mesh", "path": mesh_path,
                 "scale": avg_inv,

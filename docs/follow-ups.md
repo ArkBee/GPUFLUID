@@ -128,6 +128,33 @@ adversarial-verified). Вердикт: **🟡 GO-WITH-FIXES** — истинны
   не дефолт — FU-017). Чинить если/когда FLIP вернётся в продакт-сценарии; тогда — то же
   `world_size`-масштабирование, что в MPM-ветке.
 
+### Deep-dive раунд 2 (2026-06-01) — obstacle per-axis scaling
+
+Источник: workflow `ws3gzv5zn` (12 агентов, adversarial-verified) + личная перепроверка
+кода (§9.1 — отчёт агента НЕ применялся на слово; его предложенный OBB-фикс был НЕВЕРЕН
+для повёрнутого случая — см. ниже).
+
+- ✅ **FU-019** — Obstacle half-sizes/scale усреднялись по осям вместо per-axis на non-cubic домене. **ИСПРАВЛЕНО частично + honest-warn 2026-06-01.**
+  - **Box (axis-aligned):** `bake.py:213` использовал `inv_avg` даже для неповёрнутого
+    бокса → коллайдер мис-сайзился на широком/плоском домене. Фикс: для identity-rotation
+    юзаем per-axis `hx/hy/hz` (точно). **Повёрнутый бокс ОСТАВЛЕН на `inv_avg`** — там
+    per-axis шиарит ortho-матрицу R (агент-отчёт это пропустил, я поймал перечитав код).
+    На кубическом домене обе ветки совпадают → 0 изменений для дефолтной сцены.
+  - **MESH:** `scale` в схеме `ObstacleMeshCfg` — СКАЛЯР (`config.py:134`), per-axis
+    невозможен без смены схемы+солвера. MESH рекламируется как «exact fit» workaround для
+    SPHERE/CYL, но молча сквошился. Фикс: добавлен WARNING на non-cubic (чтобы «exact fit»
+    не был тихой ложью). Полноценный per-axis MESH scaling → отдельный follow-up (схема+солвер).
+  - **size_world валидация:** `scene_dict.py` теперь проверяет `domain.size_world` =
+    3-list положительных чисел → внятная ошибка вместо `TypeError` в глубине CLI.
+  - **Готово когда:** `test_axis_aligned_box_uses_per_axis_halfsize`,
+    `test_mesh_obstacle_warns_on_noncubic_domain`, `test_size_world_validation_*`. ✅
+    95 тестов (obstacle/schema/OBB-emit) зелёные в venv — без регрессий.
+
+- 📝 **FU-020** — Per-axis MESH-obstacle scaling (инвазивный). `ObstacleMeshCfg.scale` сделать
+  vec3 (или передавать per-axis translate+scale), солвер mesh-collider должен принять
+  анизотропный масштаб. Сейчас MESH на non-cubic домене сквошится (FU-019 повесил warning).
+  **НЕ блокер** (warning есть, workaround = кубический домен). Низкий приоритет.
+
 ### Live-smoke gaps (обязательно до выкатки, §9.13)
 
 - 🔴 **FU-012** — **pytest локально НЕ гонялся** (нет `warp`). Полный сьют (особенно солвер/kernels)

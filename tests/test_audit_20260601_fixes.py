@@ -45,6 +45,18 @@ def _code(path: Path) -> str:
         ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
 
+def _load_scene_dict():
+    """Load the bpy-free scene_dict module directly (package __init__ pulls bpy)."""
+    import importlib.util
+    name = "_test_scene_dict_audit"
+    spec = importlib.util.spec_from_file_location(
+        name, _ADDON / "scene_dict.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # ── FU-001 UNIT: whitewater attach honesty classifier ────────────────
 
 def test_count_ww_frames_missing_dir(tmp_path):
@@ -165,6 +177,51 @@ def test_mpm_is_default_solver():
         "FU-017: the Domain solver EnumProperty must default to 'mpm'")
     assert 'default="flip"' not in code, (
         "FU-017 regressed: solver default is back to legacy FLIP")
+
+
+# ── FU-019 CONTRACT: axis-aligned box uses per-axis (not averaged) scale ──
+
+def test_axis_aligned_box_uses_per_axis_halfsize():
+    """FU-019 (deep-dive): the unrotated MPM-OBB box must size its half-extents
+    per-axis (hx/hy/hz = world half * inv_size[axis]), not via the averaged
+    inv_avg — averaging mis-sizes the collider on a non-cubic domain. The
+    averaged path is RETAINED only for the rotated case (per-axis would shear
+    an oriented box)."""
+    code = _code(_ADDON / "operators" / "bake.py")
+    assert "rot_is_identity" in code, (
+        "FU-019: the OBB box branch must split identity vs rotated and use "
+        "per-axis half-size for the axis-aligned case")
+    assert "hx_sim, hy_sim, hz_sim = hx, hy, hz" in code, (
+        "FU-019: axis-aligned box must use the per-axis hx/hy/hz half-extents")
+
+
+def test_mesh_obstacle_warns_on_noncubic_domain():
+    """FU-019: MESH obstacle uses a single-scalar `scale`, so it can't scale
+    per-axis. Since MESH is advertised as the exact-fit workaround for
+    SPHERE/CYL, it must at least WARN on a non-cubic domain instead of silently
+    squashing the collider."""
+    code = _code(_ADDON / "operators" / "bake.py")
+    # there must be a MESH-branch warning keyed on the same anisotropy ratio.
+    assert code.count("max(inv_size) / min(inv_size) > 1.05") >= 3, (
+        "FU-019: the explicit MESH obstacle branch must warn on non-cubic "
+        "domains (SPHERE + CYLINDER already do; MESH was silent)")
+
+
+# ── FU-019 UNIT: size_world validation gives a clear key-path error ──
+
+def test_size_world_validation_accepts_good():
+    sd = _load_scene_dict()
+    sd.validate_scene_dict({"domain": {"resolution": [48, 48, 48],
+                                       "size_world": [2.5, 2.5, 2.5]}})  # no raise
+
+
+def test_size_world_validation_rejects_malformed():
+    sd = _load_scene_dict()
+    import pytest
+    for bad in ("2.5", [2.5], [2.5, 2.5], [2.5, 2.5, 0.0], [2.5, "x", 2.5]):
+        with pytest.raises(sd.SceneDictError):
+            sd.validate_scene_dict({"domain": {"resolution": [48, 48, 48],
+                                               "size_world": bad}})
 
 
 # ── FU-005 CONTRACT: degenerate domain → clean ERROR, not traceback ──
