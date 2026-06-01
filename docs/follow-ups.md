@@ -7,6 +7,30 @@
 
 ---
 
+## Iterative-validation workflow round (2026-06-02)
+
+Workflow `gpufluid-iterative-validation` (12 агентов: GPU-валидация + 3 ревьюера +
+адверсариальная перепроверка). Вердикт: **GREEN-WITH-FIXES**. FU-023 (adaptive CFL)
+подтверждён на GPU live A/B (off→дивергенция кадр 230, on→чисто 250/250). Найдено 6,
+из них починил/разобрал:
+
+- ✅ **FU-024** — Outflow despawn НЕ был one-way: дренированную inflow-частицу
+  inflow-gate **переоткрывал каждый кадр** (drain ставит selection=1 — ровно тот
+  стейт, по которому gate релизит). Мой первый A/B это замаскировал (inflow vel=0 +
+  dump после despawn). Фикс: отдельный `_despawned` флаг — drain ставит, gate
+  early-return по нему. Verified GPU: jet (0,0,-2) в drain, 25000 эмитнуто →
+  live держится ~1700 (с багом раздулось бы до 25000). Тесты: predicate_in_box (CPU),
+  one-way grep-contract, step()-spy (n_sub pushback'ов — страховка CUDA-700 фикса).
+- ❌ **FU-025 (REJECTED, false positive)** — агенты сказали inflow velocity не
+  скейлится на inv_dom_z (как остальные). **Неверно:** аддон пре-нормализует inflow
+  velocity per-axis (`normalize_velocity`, bake.py:399); CLI-скейл там = double-scale,
+  сломал бы продукт-путь. §9.3 trust-but-verify сработал на сам workflow. Добавил
+  units-коммент на commands.py:169, код НЕ трогал.
+- 📝 **FU-026** (minor) — пер-axis скейлинг для standalone-TOML конвенции: для
+  hand-TOML inflow velocity = normalized, а mpm_initial_velocity = m/s (CLI-скейл).
+  Асимметрия только для рукописных TOML (продукт-путь корректен). Задокументировать
+  в SCENE_SCHEMA. Низкий приоритет.
+
 ## Capability: MPM outflow/drain (2026-06-02) ✅
 
 - ✅ **FU-022** — MPM теперь поддерживает outflow (дренаж). Раньше MPM-ветка
