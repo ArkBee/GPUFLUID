@@ -65,10 +65,17 @@ def k_inflow_gate(
     spawn_step: wp.array(dtype=int),
     hold_pos: wp.array(dtype=wp.vec3),
     vx: float, vy: float, vz: float,
+    despawned: wp.array(dtype=int),
 ):
     p = wp.tid()
     idx = base_idx + p
     ss = spawn_step[p]
+    # S2.17.8: a particle drained by an outflow is marked despawned[idx]=1 and
+    # left at selection=1. Skip it entirely so the release branch below can't
+    # resurrect it (selection==1 is also the held-pre-spawn state, so without
+    # this flag the gate can't tell "not yet spawned" from "drained").
+    if despawned[idx] == 1:
+        return
     if current_step < ss:
         state.particle_x[idx] = hold_pos[p]
         state.particle_v[idx] = wp.vec3(0.0, 0.0, 0.0)

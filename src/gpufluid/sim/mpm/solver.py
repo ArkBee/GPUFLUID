@@ -472,6 +472,12 @@ class MpmSolver:
             ))
         # S2.17.9: one-shot guard so the CFL-saturation warning prints once.
         self._cfl_warned = False
+        # S2.17.8: per-particle "drained" flag (1 = removed by an outflow,
+        # never to be re-released by the inflow gate). Always allocated; stays
+        # all-zero when there are no outflows, so the inflow gate behaves
+        # byte-identically to pre-S2.17.8 for non-drain scenes.
+        self._despawned = wp.zeros(self.n_particles, dtype=int,
+                                   device=cfg.device)
 
     # ── pipeline -----------------------------------------------------
 
@@ -488,6 +494,7 @@ class MpmSolver:
                     int(step_index), int(g["base"]),
                     g["spawn_wp"], g["hold_wp"],
                     float(vx), float(vy), float(vz),
+                    self._despawned,
                 ],
                 device=cfg.device,
             )
@@ -534,7 +541,8 @@ class MpmSolver:
         # the next dump.
         for of in self._outflow_params:
             wp.launch(k_outflow_despawn, dim=self.n_particles,
-                      inputs=[self.mpm.mpm_state, int(step_index), *of],
+                      inputs=[self.mpm.mpm_state, int(step_index), *of,
+                              self._despawned],
                       device=cfg.device)
 
     def _cfl_substeps(self) -> tuple[int, bool]:

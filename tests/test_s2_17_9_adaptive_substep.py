@@ -78,6 +78,57 @@ def test_cfl_formula_matches_bound():
     assert s._cfl_substeps()[0] == expected
 
 
+def _spy_solver(adaptive, n_sub, saturated=False):
+    """A real MpmSolver instance with no GPU state (object.__new__), wired with
+    spy stubs so step() can be exercised on a CPU box. Counts p2g2p +
+    _apply_pushback calls."""
+    from types import SimpleNamespace
+    from gpufluid.sim.mpm.solver import MpmSolver
+    s = object.__new__(MpmSolver)
+    counts = {"p2g2p": 0, "pushback": 0, "pre": 0, "post": 0}
+    s.cfg = SimpleNamespace(adaptive_substep=adaptive, dt=5e-3, device="cpu",
+                            dump_every=8, adaptive_max_substeps=16)
+    s.mpm = SimpleNamespace(
+        p2g2p=lambda *a, **k: counts.__setitem__("p2g2p", counts["p2g2p"] + 1))
+    s._cfl_warned = False
+    s._pre_step = lambda si: counts.__setitem__("pre", counts["pre"] + 1)
+    s._post_step = lambda si: counts.__setitem__("post", counts["post"] + 1)
+    s._apply_pushback = lambda: counts.__setitem__(
+        "pushback", counts["pushback"] + 1)
+    s._cfl_substeps = lambda: (n_sub, saturated)
+    return s, counts
+
+
+def test_step_runs_pushback_every_substep():
+    """GUARD for the live-found CUDA-700 fix: in the adaptive branch, step()
+    must call _apply_pushback once PER sub-step (not once per frame). A refactor
+    moving it out of the loop would silently reintroduce the illegal-access
+    crash (a tunnelling particle hits an out-of-bounds grid node)."""
+    s, counts = _spy_solver(adaptive=True, n_sub=5)
+    s.step(1)
+    assert counts["p2g2p"] == 5, "5 sub-steps -> 5 p2g2p calls"
+    assert counts["pushback"] == 5, "pushback MUST run every sub-step (CUDA-700 guard)"
+
+
+def test_step_single_p2g2p_when_off():
+    """Default (adaptive off) is exactly one p2g2p and no in-loop pushback —
+    byte-identical to pre-S2.17.9 control flow."""
+    s, counts = _spy_solver(adaptive=False, n_sub=1)
+    s.step(1)
+    assert counts["p2g2p"] == 1
+    assert counts["pushback"] == 0  # _post_step (stubbed) owns the per-frame one
+
+
+def test_cfl_saturation_warns_once(capsys):
+    """The saturation WARN is one-shot (guarded by _cfl_warned) — must not spam
+    every frame, must not stay silent."""
+    s, counts = _spy_solver(adaptive=True, n_sub=16, saturated=True)
+    s.step(1)
+    s.step(2)
+    err = capsys.readouterr().err
+    assert err.count("CFL demands more than") == 1, "WARN must print exactly once"
+
+
 def test_cli_threads_cfl_into_mpm():
     """Contract: the MPM CLI branch must pass the [simulation] cfl knobs into
     MpmConfig.adaptive_* (so the existing addon 'CFL Substepping' checkbox

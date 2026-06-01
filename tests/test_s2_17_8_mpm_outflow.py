@@ -51,6 +51,44 @@ def test_outflow_params_convert_frames_to_steps():
     assert step_end == 10 * 5
 
 
+def test_predicate_in_box_cpu():
+    """CPU-runnable (no GPU) coverage of the despawn gate+containment
+    predicate — mirrors the kernel's frame-gate + AABB test. Closes the gap
+    where the kernel branches were only exercised by a live GPU bake."""
+    from gpufluid.sim.mpm.outflow import predicate_in_box
+    lo, hi = (0.1, 0.1, 0.1), (0.9, 0.9, 0.2)
+    # inside box, within frame window -> True
+    assert predicate_in_box((0.5, 0.5, 0.15), lo, hi, 5, 0, 10) is True
+    # outside box (z above) -> False
+    assert predicate_in_box((0.5, 0.5, 0.5), lo, hi, 5, 0, 10) is False
+    # inside box but before the window -> False
+    assert predicate_in_box((0.5, 0.5, 0.15), lo, hi, 0, 2, 10) is False
+    # inside box but after the window -> False
+    assert predicate_in_box((0.5, 0.5, 0.15), lo, hi, 11, 0, 10) is False
+    # boundary inclusive
+    assert predicate_in_box((0.1, 0.1, 0.2), lo, hi, 10, 0, 10) is True
+
+
+def test_outflow_despawn_is_one_way_contract():
+    """§9.12 source-grep: the drain must mark a dedicated despawned flag and
+    the inflow gate must skip despawned particles — otherwise the gate
+    re-releases a drained inflow particle every frame (workflow-found
+    2026-06-02). Guards against a refactor dropping the flag."""
+    import re
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1] / "src" / "gpufluid" / "sim" / "mpm"
+    of = "\n".join(l for l in (base / "outflow.py").read_text(encoding="utf-8")
+                   .splitlines() if not l.lstrip().startswith("#"))
+    inf = "\n".join(l for l in (base / "inflow.py").read_text(encoding="utf-8")
+                    .splitlines() if not l.lstrip().startswith("#"))
+    assert "despawned[p] = 1" in of, "drain must set the despawned flag"
+    assert "despawned" in inf and "return" in inf, \
+        "inflow gate must reference the despawned flag to skip drained particles"
+    # the gate must early-return on despawned before the release branch
+    assert re.search(r"if\s+despawned\[idx\]\s*==\s*1\s*:", inf), \
+        "inflow gate must early-return when despawned==1"
+
+
 def test_cli_threads_outflow_into_mpm(tmp_path):
     """Contract (§9.6): the MPM CLI branch must build MpmOutflow from
     scene.outflow. Pre-this-fix only the FLIP path consumed outflow."""

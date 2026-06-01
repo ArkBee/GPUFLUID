@@ -166,6 +166,16 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             # (0,0,0) = "emit, let gravity do the rest") on the MPM CLI
             # side, and diverged from the FLIP path which always forwards
             # inf.velocity. No fallback: (0,0,0) means gravity-only.
+            #
+            # UNITS (verified 2026-06-02, do NOT add an inv_dom_z factor here):
+            # inf.velocity is ALREADY in normalised [0,1]³ units/s. The addon
+            # pre-scales it PER-AXIS via DomainTransform.normalize_velocity
+            # (bake.py:399 → divide by world dom_size per axis), and a hand-
+            # written standalone TOML follows the same normalised convention as
+            # its positions. So forwarding verbatim is correct and is actually
+            # MORE precise than `initial_velocity_z`/`v_terminal` below (which
+            # scale a raw-m/s knob by the single-axis inv_dom_z). Multiplying
+            # by inv_dom_z here would DOUBLE-scale the addon path.
             velocity=tuple(inf.velocity),
             rate_per_sec=float(inf.rate_per_sec),
             frame_start=int(inf.frame_start),

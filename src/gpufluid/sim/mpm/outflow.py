@@ -45,6 +45,16 @@ class MpmOutflow:
     frame_end: int = 1_000_000
 
 
+def predicate_in_box(pos, lo, hi, current_step, step_start, step_end):
+    """Pure-Python mirror of the kernel's gate+containment predicate
+    (frame in [start,end] AND pos inside the AABB). CPU-testable without a GPU
+    so the despawn condition is covered on every CI box, not only the GPU one."""
+    if current_step < step_start or current_step > step_end:
+        return False
+    return (lo[0] <= pos[0] <= hi[0] and lo[1] <= pos[1] <= hi[1]
+            and lo[2] <= pos[2] <= hi[2])
+
+
 @block("S2.17.8",
        "MPM outflow despawn: live particles inside an active drain AABB are "
        "marked selection=1 (excluded from dumps + all kernels), velocity and "
@@ -57,6 +67,7 @@ def k_outflow_despawn(
     step_end: int,
     lo_x: float, lo_y: float, lo_z: float,
     hi_x: float, hi_y: float, hi_z: float,
+    despawned: wp.array(dtype=int),
 ):
     p = wp.tid()
     # Only drain currently-live particles. Held inflow particles
@@ -83,3 +94,11 @@ def k_outflow_despawn(
         state.particle_F_trial[p] = I
         state.particle_C[p] = Z
         state.particle_selection[p] = 1
+        # Mark permanently drained. selection==1 alone is NOT enough: the
+        # inflow gate (k_inflow_gate) releases any of ITS slice's particles
+        # whose selection==1 once current_step>=spawn_step — which is exactly
+        # the state we just set. Without this dedicated flag the gate would
+        # RE-RELEASE a drained inflow particle every frame (re-injecting its
+        # velocity at the drain centre, and leaking it back out if that
+        # velocity is non-zero). The gate's release branch checks despawned==0.
+        despawned[p] = 1
