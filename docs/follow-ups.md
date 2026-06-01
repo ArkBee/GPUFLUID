@@ -27,11 +27,17 @@
   ramps from hand-TOML have an unreliable tilt-direction convention (FU-027 below),
   avoided by using axis-aligned bowls.
 
-- 📝 **FU-027** — MPM OBB obstacle `rotation` from a hand-written TOML slid water
-  the same direction (-x) for both +θ and -θ about Y → the tilt-direction
-  convention between bake.py's emitted matrix and k_cube_pushback needs a documented
-  contract test (the addon round-57/59 path is tested; the raw-TOML path isn't).
-  Low priority (addon path works; hand-TOML ramps are niche).
+- ✅ **FU-027 (RESOLVED — NOT a bug, §9.3)** — OBB rotated-box obstacles work
+  correctly. My earlier "slid wrong both ways" tests were BAD: (a) the sphere was
+  dropped PAST the ramp's raised high edge (fell to floor, never touched the
+  surface), and (b) a later test ran only 60 SOLVER STEPS where the CLI's
+  "frames=60" is 60×dump_every ≈ 1620 steps — far too short to slide. A clean
+  test confirms: water rests on the ramp and slides the tilt direction;
+  convention = rotation matrix row-major, COLUMNS are box-local axes in world,
+  so **R_y(+θ) → downhill +x**, R_y(−θ) → downhill −x. Now locked by a GPU
+  regression test (`tests/test_s2_17_obb_tilt_direction.py`) — the round-57 OBB
+  feature previously had only emission/round-trip tests, no slide-direction
+  coverage. Tilted-ramp cascades are therefore viable too.
 
 ## Iterative-validation workflow round (2026-06-02)
 
