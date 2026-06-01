@@ -7,6 +7,35 @@
 
 ---
 
+## Capability: MPM outflow/drain (2026-06-02) ✅
+
+- ✅ **FU-022** — MPM теперь поддерживает outflow (дренаж). Раньше MPM-ветка
+  CLI игнорировала `scene.outflow` (только FLIP потреблял — §9.6 mirror drift):
+  проточные сцены (водопад/фонтан/река) копили частицы до переполнения домена.
+  - **Решение:** `src/gpufluid/sim/mpm/outflow.py` — `MpmOutflow` + kernel
+    `k_outflow_despawn` (S2.17.8). MPM пре-аллоцирует фикс-массив (inflow-частицы
+    time-gated, не спавнятся), компактить нельзя → despawn: живая частица
+    (selection==0) внутри активного drain-AABB получает selection=1 (исключается
+    из дампов и всех kernel'ов), v и F/C сброшены, паркуется в центр бокса.
+    Зеркало inflow-гейта, one-way + идемпотентно.
+  - **Wiring:** `MpmConfig.outflows`; solver строит `_outflow_params`
+    (frame→step via dump_every), запускает в `_post_step` ПОСЛЕ физики. CLI
+    строит `MpmOutflow` из `scene.outflow`. Аддон уже эмитил `[[outflow]]` +
+    имеет `mark_outflow` → UI→TOML→solver путь полный end-to-end.
+  - **Верифицировано (RTX 4080):** A/B на идентичном непрерывном 3-ступенчатом
+    каскаде, drain vs no-drain. Кадр 300: no-drain=31250 live (=rate×time,
+    безгранично), drain=18449 → удалено 12801 (40%), разрыв растёт монотонно.
+    Без дивергенции. Тесты `test_s2_17_8_mpm_outflow.py` (4) + регрессия 60 зелёных.
+  - **Замечено по ходу (live cascade тест, §9.13):** MPM дивергирует на
+    накоплении при `dt=0.005`/`bulk=1500` (глубокая лужа) — стабильно на
+    `dt=0.001`/`bulk≈900`. Стоит подобрать adaptive dt / лучший EOS как отдельный
+    research-тикет (FU-023, не блокер).
+
+- 📝 **FU-023** — MPM accumulation stability: при большой глубине лужи солвер
+  дивергирует на дефолтном dt. Workaround: dt=0.001. Корень — explicit MPM +
+  жёсткий EOS. Идея: adaptive substepping по max-скорости, или мягче bulk при
+  большой плотности. Research, не блокер.
+
 ## Pre-public-test audit (2026-06-01)
 
 Источник: multi-agent workflow `gpufluid-pretest-audit` (30 агентов, 6 поверхностей,
