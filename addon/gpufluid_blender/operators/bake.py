@@ -426,7 +426,12 @@ def collect_scene(context, domain_obj):
     csf_passes = int(stg.csf_smoothing_passes) if stg is not None else 2
 
     return {
-        "domain": {"resolution": res, "dx": dx, "origin": list(origin)},
+        # FU-016: forward the real world extent (metres) so the CLI scales
+        # gravity/velocity by metres, not the resolution aspect-ratio. dom_size
+        # is DomainTransform.dom_size (world hi - lo).
+        "domain": {"resolution": res, "dx": dx, "origin": list(origin),
+                   "size_world": [float(dom_size[0]), float(dom_size[1]),
+                                  float(dom_size[2])]},
         "fluids": fluid_sources,
         "obstacles": obstacles,
         "inflows": inflows,

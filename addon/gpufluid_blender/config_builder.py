@@ -104,6 +104,13 @@ def build_toml(scene_dict: SceneDict) -> str:
     lines.append(f"resolution = [{int(dom['resolution'][0])}, {int(dom['resolution'][1])}, {int(dom['resolution'][2])}]")
     if "dx" in dom and dom["dx"] is not None:
         lines.append(f"dx = {float(dom['dx']):g}")
+    # FU-016: forward the REAL world extent (metres) so the CLI scales gravity
+    # and velocities by metres, not by the resolution aspect-ratio. collect_scene
+    # puts DomainTransform.dom_size here.
+    if "size_world" in dom and dom["size_world"] is not None:
+        sw = dom["size_world"]
+        lines.append(
+            f"size_world = [{float(sw[0]):g}, {float(sw[1]):g}, {float(sw[2]):g}]")
     lines.append("")
 
     def _emit_fluid_body(prefix_lines, f):

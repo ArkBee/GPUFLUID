@@ -128,6 +128,31 @@ def test_inflow_temperature_kelvin_default():
         "with the Kelvin convention")
 
 
+# ── FU-016 CONTRACT: addon forwards real world extent to the CLI ─────
+
+def test_addon_forwards_size_world():
+    """FU-016: collect_scene must put the real metre extent in the domain
+    dict (size_world) so the CLI scales gravity/velocity by metres, not the
+    resolution aspect-ratio. config_builder must emit it into the TOML."""
+    bake = _code(_ADDON / "operators" / "bake.py")
+    assert '"size_world"' in bake, (
+        "FU-016: collect_scene must forward domain size_world (metres)")
+    cb = _code(_ADDON / "config_builder.py")
+    assert "size_world" in cb, (
+        "FU-016: config_builder must emit [domain] size_world into the TOML")
+
+
+def test_gravity_no_longer_uses_aspect_ratio_domain_size():
+    """FU-016: the CLI gravity scaling must read world_size (metres), not the
+    aspect-ratio domain_size."""
+    cmds = _code(_REPO / "src" / "gpufluid" / "cli" / "commands.py")
+    assert "scene.world_size" in cmds, (
+        "FU-016: gravity/velocity scaling must use scene.world_size (metres)")
+    assert "dom_size = scene.domain_size" not in cmds, (
+        "FU-016 regressed: gravity scaling is back on the aspect-ratio "
+        "scene.domain_size instead of world_size")
+
+
 # ── FU-005 CONTRACT: degenerate domain → clean ERROR, not traceback ──
 
 def test_collect_scene_catches_value_error():

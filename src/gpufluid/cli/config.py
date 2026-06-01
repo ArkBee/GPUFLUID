@@ -67,6 +67,12 @@ else:  # pragma: no cover
 class DomainCfg:
     resolution: Tuple[int, int, int] = (64, 64, 64)
     dx: Optional[float] = None
+    # FU-016 (2026-06-01): the REAL world extent of the domain in metres,
+    # (sx, sy, sz). The Blender addon knows it (DomainTransform.dom_size) and
+    # now forwards it. None for hand-written standalone TOMLs that don't set
+    # it — Scene.world_size then falls back to the resolution aspect-ratio
+    # `domain_size` (pre-FU-016 behaviour, correct only for a 1 m unit cube).
+    size_world: Optional[Tuple[float, float, float]] = None
 
 
 @dataclass
@@ -294,8 +300,22 @@ class SceneCfg:
 
     @property
     def domain_size(self) -> Tuple[float, float, float]:
+        """Normalised [0,1]³ extent (resolution aspect-ratio). This is NOT
+        metres — it is nx/max(res) per axis. Kept for callers that genuinely
+        want the normalised extent; use `world_size` for real-metre physics
+        (gravity/velocity) scaling."""
         nx, ny, nz = self.domain.resolution
         return (nx * self.dx, ny * self.dx, nz * self.dx)
+
+    @property
+    def world_size(self) -> Tuple[float, float, float]:
+        """Real world extent of the domain in metres. FU-016: prefer the
+        forwarded `domain.size_world` (the addon knows it); fall back to the
+        normalised `domain_size` when absent (hand-written TOML). The fallback
+        is only physically correct for a 1 m unit cube — see FU-016."""
+        if self.domain.size_world is not None:
+            return self.domain.size_world
+        return self.domain_size
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +437,10 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
     domain = DomainCfg(
         resolution=_tuple(dom.get("resolution", [64, 64, 64]), 3, "domain.resolution"),
         dx=float(dom["dx"]) if "dx" in dom else None,
+        # FU-016: real world extent in metres, forwarded by the addon.
+        size_world=(tuple(float(v) for v in _tuple(
+            dom["size_world"], 3, "domain.size_world"))
+            if "size_world" in dom else None),
     )
     def _parse_fluid_entry(fl: dict) -> object:
         ftype = fl.get("type", "box")

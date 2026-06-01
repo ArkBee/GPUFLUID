@@ -15,11 +15,15 @@ adversarial-verified). Вердикт: **🟡 GO-WITH-FIXES** — истинны
 тот фикс не тронул; §9.6 mirror-drift) надо закрыть до паблик-теста.
 
 > **Update 2026-06-01:** all five should-fix (FU-001…005) + three trivial minors
-> (FU-006/008/009) applied on branch `fix/round61-zero-frame-honesty`. New tests:
-> `tests/test_audit_20260601_fixes.py` (12) + conftest made warp-optional so the
-> warp-free suite runs locally. Verified: 34 passed (12 new + 22 round-61/62) +
-> 53 passed (contract/round-fix regression set). FU-002a intentionally folded
-> into FU-002b (per-frame cache.json read would be hot-path I/O, §9.5).
+> (FU-006/008/009) + the physics-fidelity **FU-016** applied on branch
+> `fix/round61-zero-frame-honesty`. New tests: `tests/test_audit_20260601_fixes.py`
+> + `tests/test_fu016_gravity_world_metres.py`; conftest made warp-optional so the
+> warp-free suite runs locally. **Verified in project `.venv` (gpufluid+warp+CUDA):
+> full suite green except 2 pre-existing unrelated fails** — `test_blocks_registry`
+> (BLOCKS.md A8.* impl-rows without @block decorator, addon-can't-carry-warp
+> limitation) and `test_s2_16_sparse_jacobi` (GPU perf-timing benchmark, hardware
+> flake). Both confirmed failing without these changes. FU-002a folded into FU-002b
+> (per-frame cache.json read = hot-path I/O, §9.5).
 
 ### Should-fix (гейт паблик-теста)
 
@@ -87,7 +91,7 @@ adversarial-verified). Вердикт: **🟡 GO-WITH-FIXES** — истинны
 
 ### Physics fidelity (не блокер паблик-теста, но честно зафиксировать)
 
-- 📝 **FU-016** — MPM gravity масштабируется по aspect-ratio, а не по метрам. **CONFIRMED расчётом 2026-06-01** (live-smoke).
+- ✅ **FU-016** — MPM gravity масштабируется по aspect-ratio, а не по метрам. **CONFIRMED расчётом + ИСПРАВЛЕНО 2026-06-01.** *(addon форвардит `[domain] size_world` (метры) из `DomainTransform.dom_size`; CLI считает `SceneCfg.world_size` с fallback на `domain_size` для standalone TOML; gravity+velocity+v_terminal+anti-splash стали метро-корректны разом. 6 unit + 2 contract теста; backward-compatible.)*
   - **Зачем:** `commands.py:244` делит `g_norm = g_world / dom_z`, где
     `dom_z = scene.domain_size[2] = nz/max(res)` (`config.py:296-298`, `dx=1/max(res)`) —
     это нормализованный aspect-ratio, НЕ реальные метры (реальный world-extent в CLI не

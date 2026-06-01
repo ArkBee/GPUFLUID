@@ -234,11 +234,21 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     total_steps = sim.frames * dump_every
     # ── Gravity scaling for non-unit domains ───────────────────────────────
     # The MPM solver runs in a unit cube [0,1]³ (see solver.MpmDomainWalls).
-    # One normalized unit equals `dom_size_z` real metres. To preserve real
-    # falling time, gravity in normalised units = real_g (m/s²) / dom_size_z.
+    # One normalized unit equals `world_size_z` real metres. To preserve real
+    # falling time, gravity in normalised units = real_g (m/s²) / world_size_z.
     # Without this, a 2.32 m domain has particles falling 2.32× too fast
     # (looks "cartoonish"); a 0.5 m domain has them falling 2× too slow.
-    dom_size = scene.domain_size
+    #
+    # FU-016 (2026-06-01): this used `scene.domain_size[2]`, which is
+    # nz/max(res) — the resolution ASPECT RATIO, not metres (the real extent
+    # was never forwarded). So a cubic 2.5 m domain got g unscaled (water fell
+    # 1.59× too fast) and a flat 4×4×1 m domain got g×4 (2× too fast); only a
+    # true 1 m unit cube was correct. Now uses `scene.world_size` (the addon
+    # forwards `domain.size_world` in metres; standalone TOMLs without it fall
+    # back to domain_size, i.e. the old behaviour). The same `inv_dom_z`
+    # scales velocity / v_terminal / anti-splash below, so all four become
+    # metre-correct together.
+    dom_size = scene.world_size
     dom_z = float(dom_size[2]) if dom_size[2] > 1e-9 else 1.0
     g_world = float(sim.gravity)   # m/s², scalar (-9.81 default)
     g_norm = (0.0, 0.0, g_world / dom_z)
