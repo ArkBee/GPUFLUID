@@ -153,6 +153,20 @@ def test_gravity_no_longer_uses_aspect_ratio_domain_size():
         "scene.domain_size instead of world_size")
 
 
+# ── FU-017 CONTRACT: MPM is the default solver (FLIP is legacy) ──────
+
+def test_mpm_is_default_solver():
+    """2026-06-01: MPM is the production path for everything; FLIP is legacy
+    water-only and (unlike MPM after FU-016) does NOT metre-scale gravity. The
+    addon UI default must be 'mpm' so a public-test user's first bake lands on
+    the correct path, not on legacy FLIP with the gravity bug."""
+    code = _code(_ADDON / "properties.py")
+    assert 'default="mpm"' in code, (
+        "FU-017: the Domain solver EnumProperty must default to 'mpm'")
+    assert 'default="flip"' not in code, (
+        "FU-017 regressed: solver default is back to legacy FLIP")
+
+
 # ── FU-005 CONTRACT: degenerate domain → clean ERROR, not traceback ──
 
 def test_collect_scene_catches_value_error():

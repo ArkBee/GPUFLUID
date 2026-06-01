@@ -146,14 +146,20 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     reseed_max_per_cell: bpy.props.IntProperty(name="Reseed Max/Cell", default=16, min=1, max=64)
 
     # solver dispatch (B17.12)
+    # 2026-06-01: MPM is now the DEFAULT and recommended production path for all
+    # scenes. FLIP is retained as a legacy option for low-viscosity water-only
+    # splashes, but it (a) only handles water and (b) still applies gravity in
+    # raw m/s² rather than the metre-correct normalised scaling MPM got in FU-016
+    # — so a default-FLIP bake on a non-1m domain falls at the wrong rate. MPM is
+    # listed first so the UI default lands on the correct path.
     solver: bpy.props.EnumProperty(
         name="Solver",
         items=[
-            ("flip", "FLIP (general)", "FLIP/APIC pressure-projection. Good for splashes, dam-break, low-viscosity scenes."),
-            ("mpm",  "MPM (water on solids)", "MLS-MPM shell-out (F3.7). Required for water spreading laterally on a flat rigid surface; FLIP fails this case."),
+            ("mpm",  "MPM (recommended)", "MLS-MPM shell-out (F3.7). The production path for everything: water-on-solids, viscous fluids, lateral spreading. Metre-correct gravity (FU-016). Default."),
+            ("flip", "FLIP (legacy, water-only)", "FLIP/APIC pressure-projection — low-viscosity water splashes/dam-break only. Legacy: does NOT metre-scale gravity, and fails water spreading on flat rigid surfaces. Prefer MPM."),
         ],
-        default="flip",
-        description="Underlying solver algorithm. MPM is the production path for water-on-cube and viscous fluids.",
+        default="mpm",
+        description="Underlying solver. MPM (default) is the production path for all fluids; FLIP is legacy water-only.",
     )
     # MPM-specific knobs (used only when solver == 'mpm')
     mpm_bulk_modulus: bpy.props.FloatProperty(
