@@ -31,10 +31,21 @@
     `dt=0.001`/`bulk≈900`. Стоит подобрать adaptive dt / лучший EOS как отдельный
     research-тикет (FU-023, не блокер).
 
-- 📝 **FU-023** — MPM accumulation stability: при большой глубине лужи солвер
-  дивергирует на дефолтном dt. Workaround: dt=0.001. Корень — explicit MPM +
-  жёсткий EOS. Идея: adaptive substepping по max-скорости, или мягче bulk при
-  большой плотности. Research, не блокер.
+- ✅ **FU-023** — MPM accumulation stability — **ИСПРАВЛЕНО 2026-06-02** (adaptive
+  CFL substepping, S2.17.9). Юзер ловил "MPM solver diverged at frame 680".
+  - **Решение:** `step()` опционально дробит frame dt на N суб-шагов по CFL
+    `dt_sub ≤ cfl·dx/(c_sound+v_max)`, `c_sound=√(K/ρ)`. Стабильно при любой
+    глубине лужи без ручного занижения bulk/dt. Opt-in, default OFF =
+    byte-identical старому (1× p2g2p). Переиспользует существующие
+    `[simulation] cfl/cfl_factor/cfl_max_substeps` → чекбокс "CFL Substepping"
+    в аддоне теперь работает и для MPM (новый UI не нужен).
+  - **2 неочевидных бага, пойманных live A/B (§9.4):** (1) pushback ОБЯЗАН
+    запускаться каждый суб-шаг, иначе туннелирующая частица вылетает за грид →
+    CUDA error 700 (не чистый NaN) — первая наивная версия упала на кадре 362;
+    (2) при превышении cap CFL-demand — one-shot WARN, а не тихий under-substep.
+  - **Верифицировано (RTX 4080):** идентичный каскад dt=0.003/bulk=1200. CFL off
+    → дивергенция кадр 179. CFL on → все 300 кадров, 0 NaN, физично. Тесты
+    `test_s2_17_9_adaptive_substep.py` (6) + регрессия 66 зелёных.
 
 ## Pre-public-test audit (2026-06-01)
 
