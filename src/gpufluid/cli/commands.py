@@ -117,6 +117,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         MpmConfig, MpmCubeCollider, MpmTap, MpmAntiSplash, make_column,
     )
     from ..sim.mpm.inflow import MpmInflow
+    from ..sim.mpm.outflow import MpmOutflow
     sim = scene.simulation
     # Build initial column from the single [fluid] box (the multi-source
     # [[fluids]] list seeds get coloured-per-source for FLIP; MPM uses
@@ -199,6 +200,21 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                 file=sys.stderr,
             )
 
+    # S2.17.8 — drain zones. Pre-R(this) the MPM branch ignored
+    # scene.outflow entirely (only the FLIP path consumed them, §9.6 mirror
+    # drift): a continuous-flow MPM scene (waterfall/fountain) accumulated
+    # particles until the domain filled. Now each [[outflow]] becomes an
+    # MpmOutflow that despawns particles entering it. frame_end clamps to
+    # sim.frames so the default 1_000_000 means "drain for the whole bake".
+    outflows = tuple(
+        MpmOutflow(
+            lo=tuple(out.lo), hi=tuple(out.hi),
+            frame_start=int(out.frame_start),
+            frame_end=int(min(out.frame_end, sim.frames)),
+        )
+        for out in scene.outflow
+    )
+
     # Each [[obstacle]] of type box becomes a slip-with-top-friction cube
     cubes = []
     for ob in scene.obstacle:
@@ -279,6 +295,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         n_frames=total_steps,
         dump_every=dump_every,
         inflows=inflows,
+        outflows=outflows,
         fps=int(sim.fps),
         cubes=tuple(cubes),
         gravity=g_norm,
@@ -308,7 +325,8 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     n_inflow = int(solver.n_particles - solver.n_initial)
     print(f"[mpm] particles={solver.n_particles} "
           f"(initial={n_init}, inflow_pool={n_inflow})  "
-          f"cubes={len(cubes)}  inflows={len(inflows)}  out={cache_dir}")
+          f"cubes={len(cubes)}  inflows={len(inflows)}  "
+          f"outflows={len(outflows)}  out={cache_dir}")
     # Round-20: catch MpmDivergenceError + write truncated cache.json +
     # exit rc=2. Pre-round-20 path silently swallowed NaN-divergence
     # via `print + break` in solver.run, leaving rc=0 + a misleading

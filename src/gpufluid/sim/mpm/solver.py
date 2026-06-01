@@ -74,6 +74,7 @@ from ._warp_mpm_imports import (
 )
 from .colliders import k_sdf_box_collide
 from .inflow import MpmInflow, k_inflow_gate, seed_inflow_particles
+from .outflow import MpmOutflow, k_outflow_despawn
 from .pushback import k_cube_pushback, k_wall_pushback
 from .velcaps import k_anti_splash_vz, k_tap_terminal_velocity
 
@@ -170,6 +171,9 @@ class MpmConfig:
     # S2.17.7: continuous inflow zones. Particles are pre-allocated at t=0
     # and time-gated until their spawn_step (see :mod:`inflow`).
     inflows: Sequence[MpmInflow] = field(default_factory=tuple)
+    # S2.17.8: drain zones. Live particles entering an active outflow AABB are
+    # despawned (selection=1), bounding the count for continuous-flow scenes.
+    outflows: Sequence[MpmOutflow] = field(default_factory=tuple)
     fps: int = 60
     device: str = "cuda:0"
     # Round-22: seed for the inflow-particle RNG. Default 42 preserves
@@ -442,6 +446,18 @@ class MpmSolver:
         self._wall_lo = cfg.walls.lo
         self._wall_hi = cfg.walls.hi
 
+        # S2.17.8 outflow drains. Convert output-frame gates to sim steps
+        # (same dump_every convention as the inflow gate). Pre-resolve each
+        # box to a flat tuple for the per-step kernel launch.
+        self._outflow_params = []
+        for of in cfg.outflows:
+            self._outflow_params.append((
+                int(of.frame_start) * cfg.dump_every,
+                int(of.frame_end) * cfg.dump_every,
+                of.lo[0], of.lo[1], of.lo[2],
+                of.hi[0], of.hi[1], of.hi[2],
+            ))
+
     # ── pipeline -----------------------------------------------------
 
     def _pre_step(self, step_index: int = 0) -> None:
@@ -482,7 +498,7 @@ class MpmSolver:
                               cfg.anti_splash.vz_max],
                       device=cfg.device)
 
-    def _post_step(self) -> None:
+    def _post_step(self, step_index: int = 0) -> None:
         cfg = self.cfg
         for cube in self._cube_params:
             wp.launch(k_cube_pushback, dim=self.n_particles,
@@ -491,12 +507,19 @@ class MpmSolver:
         wp.launch(k_wall_pushback, dim=self.n_particles,
                   inputs=[self.mpm.mpm_state, *self._wall_lo, *self._wall_hi],
                   device=cfg.device)
+        # S2.17.8: drain AFTER physics has moved particles this step, so a
+        # particle that crossed into the drain box this frame is caught before
+        # the next dump.
+        for of in self._outflow_params:
+            wp.launch(k_outflow_despawn, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, int(step_index), *of],
+                      device=cfg.device)
 
     def step(self, step_index: int) -> None:
         """Advance the simulation by `dt`."""
         self._pre_step(step_index)
         self.mpm.p2g2p(step_index, self.cfg.dt, device=self.cfg.device)
-        self._post_step()
+        self._post_step(step_index)
 
     # ── output -------------------------------------------------------
 
