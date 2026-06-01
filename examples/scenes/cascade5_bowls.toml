@@ -1,0 +1,103 @@
+# GOAL: sphere source + inflow -> 5-step zigzag cascade -> floor drain
+[domain]
+resolution = [80, 80, 80]
+size_world = [2.0, 2.0, 2.0]
+
+[[fluids]]
+type = "sphere"
+center = [0.15, 0.50, 0.90]
+radius = 0.06
+ppc = 8
+
+[[inflow]]
+lo = [0.10, 0.45, 0.86]
+hi = [0.20, 0.55, 0.90]
+velocity = [0.0, 0.0, 0.0]
+rate_per_sec = 3000.0
+frame_start = 0
+frame_end = 600
+
+[[obstacle]]
+type = "box"
+center = [0.18, 0.5, 0.76]
+half_size = [0.1, 0.26, 0.035]
+
+[[obstacle]]
+type = "box"
+center = [0.092, 0.5, 0.815]
+half_size = [0.012, 0.26, 0.04]
+
+[[obstacle]]
+type = "box"
+center = [0.34, 0.5, 0.61]
+half_size = [0.1, 0.26, 0.035]
+
+[[obstacle]]
+type = "box"
+center = [0.252, 0.5, 0.665]
+half_size = [0.012, 0.26, 0.04]
+
+[[obstacle]]
+type = "box"
+center = [0.5, 0.5, 0.46]
+half_size = [0.1, 0.26, 0.035]
+
+[[obstacle]]
+type = "box"
+center = [0.412, 0.5, 0.515]
+half_size = [0.012, 0.26, 0.04]
+
+[[obstacle]]
+type = "box"
+center = [0.66, 0.5, 0.31]
+half_size = [0.1, 0.26, 0.035]
+
+[[obstacle]]
+type = "box"
+center = [0.572, 0.5, 0.365]
+half_size = [0.012, 0.26, 0.04]
+
+[[obstacle]]
+type = "box"
+center = [0.8, 0.5, 0.18]
+half_size = [0.1, 0.26, 0.035]
+
+[[obstacle]]
+type = "box"
+center = [0.712, 0.5, 0.235]
+half_size = [0.012, 0.26, 0.04]
+
+[[outflow]]
+lo = [0.05, 0.05, 0.105]
+hi = [0.95, 0.95, 0.15]
+frame_start = 0
+frame_end = 600
+
+[simulation]
+solver = "mpm"
+dt = 0.0015
+pressure_iters = 0
+pressure_solver = "pcg"
+gravity = -9.81
+frames = 600
+fps = 24
+cfl = true
+cfl_factor = 0.6
+cfl_max_substeps = 16
+
+[simulation.mpm]
+bulk_modulus = 1000.0
+cube_friction = 0.3
+
+[output]
+cache_dir = "out/cascade5_bowls"
+mesh = true
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 2
+mesh_smooth_method = "taubin"
+decimate_ratio = 1.0
+wall_margin_cells = 2
+particles = true
+usd = false
+color_mix_mode = "off"

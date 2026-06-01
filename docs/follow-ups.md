@@ -7,6 +7,32 @@
 
 ---
 
+## GOAL met: non-cube sources + 5-bowl waterfall, 600 frames, visually tested (2026-06-02)
+
+- ✅ **Non-cube fluid sources** (S2.17.10): "Mark as Source" works on any object;
+  source shape = BBOX / SPHERE / MESH (addon `source_type` enum + panel; CLI seeds
+  via `sim/mpm/seeding.py`). Proven: a sphere source seeds 2104 particles in a
+  sphere and drops cleanly. 7 unit/contract tests.
+- ✅ **Goal scene** `examples/scenes/cascade5_bowls.toml`: a SPHERE source (non-cube)
+  + sustained inflow cascading over **5 bowls** (each = floor + back-wall lip → a
+  чаша that fills and overflows to the next) into a floor drain. 601 frames baked
+  (adaptive CFL on, drain bounds count, no divergence).
+- ✅ **Verified — all 5 contacted in waterfall order** (particle dumps): S1@0 →
+  S2@22 → S3@82 → S4@182 → S5@332; all 5 hold water at frame 600.
+- ✅ **Visually tested**: `tmp/cascade5_scatter.png` (6-frame X-Z particle view) +
+  `tmp/cascade5_mesh.png` (Blender Eevee mesh render) — clear 5-stage diagonal
+  waterfall, water flowing bowl→bowl.
+- Lessons (logged): flat steps leak off the near edge (water escapes straight down
+  → lower steps starve) — back-wall bowls channel flow +x and fix it; OBB-rotated
+  ramps from hand-TOML have an unreliable tilt-direction convention (FU-027 below),
+  avoided by using axis-aligned bowls.
+
+- 📝 **FU-027** — MPM OBB obstacle `rotation` from a hand-written TOML slid water
+  the same direction (-x) for both +θ and -θ about Y → the tilt-direction
+  convention between bake.py's emitted matrix and k_cube_pushback needs a documented
+  contract test (the addon round-57/59 path is tested; the raw-TOML path isn't).
+  Low priority (addon path works; hand-TOML ramps are niche).
+
 ## Iterative-validation workflow round (2026-06-02)
 
 Workflow `gpufluid-iterative-validation` (12 агентов: GPU-валидация + 3 ревьюера +
