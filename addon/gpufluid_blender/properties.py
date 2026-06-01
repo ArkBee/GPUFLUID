@@ -218,10 +218,22 @@ class GpufluidFluidProps(bpy.types.PropertyGroup):
     is_fluid: bpy.props.BoolProperty(name="Is gpufluid Source", default=False)
     ppc: bpy.props.IntProperty(name="Particles per Cell (cubed)", default=8, min=1, max=64,
                                description="N particles per cell ≈ ppc")
-    # D4.5.2 — fill the object's actual mesh shape (not just its bbox)
+    # S2.17.10 — fluid SOURCE shape. "Mark as Source" works on any object; the
+    # bake fills this shape with fluid particles (MPM + FLIP). Not just a cube.
+    source_type: bpy.props.EnumProperty(
+        name="Source Shape",
+        items=[
+            ("BBOX", "Bounding Box", "Fill the object's world bounding box (fastest; the classic cube source)"),
+            ("SPHERE", "Sphere", "Fill a sphere at the object's location, radius = max(scale). A ball of fluid."),
+            ("MESH", "Mesh Volume", "Fill the object's actual mesh shape (any geometry: torus, monkey, terrain). Mesh must be watertight."),
+        ],
+        default="BBOX",
+        description="Shape the fluid source fills. SPHERE/MESH let a source be any shape, not only a cube.",
+    )
+    # D4.5.2 — legacy fill flag (kept for back-compat; superseded by source_type=MESH)
     fill_mesh: bpy.props.BoolProperty(name="Fill Mesh Volume (D4.5.2)", default=False,
-                                       description="Seed particles inside the object's triangle mesh "
-                                                   "(via GPU ray-cast); if off, fills its bounding box")
+                                       description="Legacy: seed particles inside the object's triangle mesh. "
+                                                   "Superseded by Source Shape = Mesh Volume.")
     # S2.15 — per-particle colour seeded from this source (B1.2)
     use_color: bpy.props.BoolProperty(
         name="Tint Particles (S2.15)", default=False,

@@ -86,6 +86,16 @@ class FluidBoxCfg:
 
 
 @dataclass
+class FluidSphereCfg:
+    type: Literal["sphere"] = "sphere"
+    center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
+    radius: float = 0.1
+    ppc: int = 8
+    color: Optional[Tuple[float, float, float]] = None
+    temperature: Optional[float] = None
+
+
+@dataclass
 class FluidMeshCfg:
     type: Literal["mesh"] = "mesh"
     path: str = ""
@@ -453,6 +463,15 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
                 type="box",
                 lo=_tuple(fl.get("lo", [0.05, 0.05, 0.05]), 3, "fluid.lo"),
                 hi=_tuple(fl.get("hi", [0.40, 0.70, 0.40]), 3, "fluid.hi"),
+                ppc=int(fl.get("ppc", 8)),
+                color=color,
+                temperature=temperature,
+            )
+        if ftype == "sphere":
+            return FluidSphereCfg(
+                type="sphere",
+                center=_tuple(fl.get("center", [0.5, 0.5, 0.5]), 3, "fluid.center"),
+                radius=float(fl.get("radius", 0.1)),
                 ppc=int(fl.get("ppc", 8)),
                 color=color,
                 temperature=temperature,

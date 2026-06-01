@@ -124,11 +124,11 @@ class GPUFLUID_PT_fluid(bpy.types.Panel):
         layout = self.layout
         f = context.active_object.gpufluid_fluid
         layout.prop(f, "is_fluid")
+        # S2.17.10 — source shape: any object can be a source of its own shape.
+        layout.prop(f, "source_type")
         layout.prop(f, "ppc")
-        # fill_mesh hidden in UI — requires runtime .obj export not yet wired
-        # (see docs/BACKLOG.md "Addon mesh-fill export pipeline"). Property is
-        # kept on the PropertyGroup so existing .blend files don't break.
-        # layout.prop(f, "fill_mesh")
+        if f.source_type == "MESH":
+            layout.label(text="Mesh must be watertight (closed)", icon="INFO")
         # Per-source colour (S2.15 / B1.2)
         cbox = layout.box()
         cbox.label(text="Particle Colour (S2.15)")

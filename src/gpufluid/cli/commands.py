@@ -129,15 +129,23 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     #   2) explicit [fluid] from TOML — but ONLY if no [[inflow]] is set,
     #      otherwise we assume the bake is inflow-driven and the default
     #      scene.fluid is a leftover artefact.
+    # S2.17.10: a fluid SOURCE can be any shape, not just a box. Pick the
+    # first source (explicit [[fluids]] preferred; else the [fluid] singular
+    # only when it's a real box and there's no inflow), then build the initial
+    # particle cloud for its shape. Box keeps make_column (byte-identical to
+    # pre-S2.17.10); sphere/mesh use the seeding helpers.
+    from .config import FluidBoxCfg, FluidSphereCfg, FluidMeshCfg
+    from ..sim.mpm.seeding import seed_sphere, seed_mesh
     f0 = None
     if scene.fluids:
-        for cand in scene.fluids:
-            if hasattr(cand, "lo") and hasattr(cand, "hi"):
-                f0 = cand
-                break
-    elif not scene.inflow and hasattr(scene.fluid, "lo"):
+        f0 = scene.fluids[0]
+    elif not scene.inflow and isinstance(scene.fluid, FluidBoxCfg) \
+            and tuple(scene.fluid.lo) != tuple(scene.fluid.hi):
         f0 = scene.fluid
-    if f0 is not None:
+    column = None
+    cx = cy = 0.5
+    half = 0.05
+    if isinstance(f0, FluidBoxCfg):
         lo, hi = f0.lo, f0.hi
         cx = 0.5 * (lo[0] + hi[0])
         cy = 0.5 * (lo[1] + hi[1])
@@ -146,6 +154,30 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         n_xy = max(4, int(2 * half / scene.dx))
         n_z = max(20, int((z_hi - z_lo) / scene.dx))
         column = make_column((cx, cy), half, z_lo, z_hi, n_xy, n_z)
+    elif isinstance(f0, FluidSphereCfg):
+        column = seed_sphere(f0.center, f0.radius, scene.dx)
+        cx, cy = float(f0.center[0]), float(f0.center[1])
+        half = max(0.005, float(f0.radius))
+        print(f"[mpm] fluid source: sphere r={f0.radius} "
+              f"@ {tuple(round(c,3) for c in f0.center)} -> {column.shape[0]} particles")
+    elif isinstance(f0, FluidMeshCfg):
+        mp = f0.path
+        if scene.config_dir is not None and not Path(mp).is_absolute():
+            mp = str(scene.config_dir / mp)
+        column = seed_mesh(mp, scene.dx, scale=f0.scale,
+                           translate=f0.translate, rotate_deg=f0.rotate_deg)
+        if column.shape[0] == 0:
+            print(f"[mpm] fluid mesh source '{mp}' seeded 0 particles "
+                  f"(mesh not watertight, or outside [0,1]^3 after transform)",
+                  file=sys.stderr)
+            return 2
+        bb_lo = column.min(axis=0); bb_hi = column.max(axis=0)
+        cx = 0.5 * float(bb_lo[0] + bb_hi[0])
+        cy = 0.5 * float(bb_lo[1] + bb_hi[1])
+        half = max(0.005, 0.5 * float(min(bb_hi[0] - bb_lo[0], bb_hi[1] - bb_lo[1])))
+        print(f"[mpm] fluid source: mesh '{Path(mp).name}' -> {column.shape[0]} particles")
+    if column is not None:
+        pass
     elif scene.inflow:
         # No static fluid box — the bake is driven entirely by continuous
         # [[inflow]] zones (S2.17.7). Start with an empty initial column;

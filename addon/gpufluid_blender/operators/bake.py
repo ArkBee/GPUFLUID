@@ -83,6 +83,8 @@ def collect_scene(context, domain_obj):
         if w:
             warnings.append(w)
 
+    # S2.17.10: avg inverse domain size for uniform (sphere/mesh) sim scaling.
+    avg_inv = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
     for fobj in fluid_objs:
         flow, fhiw = _bbox_world(fobj)
         flo_sim_raw = list(to_sim(flow))
@@ -91,8 +93,31 @@ def collect_scene(context, domain_obj):
         flo_sim = [max(eps_norm, v) for v in flo_sim_raw]
         fhi_sim = [min(1.0 - eps_norm, fhi_sim_raw[i]) for i in range(3)]
         fprops = fobj.gpufluid_fluid
-        entry = {"kind": "box", "lo": tuple(flo_sim), "hi": tuple(fhi_sim),
-                 "ppc": int(fprops.ppc)}
+        # S2.17.10: source shape. "Mark as Source" works on any object; emit
+        # the shape so the bake fills it (not just a cube). Legacy fill_mesh
+        # bool still promotes BBOX -> MESH for back-compat.
+        stype = getattr(fprops, "source_type", "BBOX")
+        if stype == "BBOX" and getattr(fprops, "fill_mesh", False):
+            stype = "MESH"
+        if stype == "SPHERE":
+            centre_w = ((flow[0] + fhiw[0]) * 0.5, (flow[1] + fhiw[1]) * 0.5,
+                        (flow[2] + fhiw[2]) * 0.5)
+            r_w = max((fhiw[0] - flow[0]), (fhiw[1] - flow[1]),
+                      (fhiw[2] - flow[2])) * 0.5
+            entry = {"kind": "sphere", "center": tuple(to_sim(centre_w)),
+                     "radius": float(r_w * avg_inv), "ppc": int(fprops.ppc)}
+        elif stype == "MESH":
+            mesh_path = os.path.join(
+                cache_dir, f"fluid_{_safe_obj_name(fobj.name)}.obj")
+            _export_obj(fobj, mesh_path)
+            entry = {"kind": "mesh", "path": mesh_path,
+                     "scale": float(avg_inv),
+                     "translate": (-origin.x * avg_inv, -origin.y * avg_inv,
+                                   -origin.z * avg_inv),
+                     "ppc": int(fprops.ppc)}
+        else:  # BBOX
+            entry = {"kind": "box", "lo": tuple(flo_sim), "hi": tuple(fhi_sim),
+                     "ppc": int(fprops.ppc)}
         if getattr(fprops, "use_color", False):
             entry["color"] = tuple(float(c) for c in fprops.color)
         if getattr(fprops, "use_temperature", False):
