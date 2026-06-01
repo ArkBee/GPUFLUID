@@ -311,6 +311,12 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             vz_max=sim.mpm_vz_max_splash * inv_dom_z,
         ),
         dt=sim.dt,
+        # S2.17.9 (FU-023): reuse the existing [simulation] cfl knobs (shared
+        # with the FLIP CFL path) to drive MPM adaptive substepping. Off by
+        # default → one p2g2p(dt) per frame, byte-identical to pre-FU-023.
+        adaptive_substep=bool(sim.cfl),
+        adaptive_cfl=float(sim.cfl_factor),
+        adaptive_max_substeps=int(sim.cfl_max_substeps),
     )
     cfg.fluid.bulk_modulus = sim.mpm_bulk_modulus
     cfg.fluid.rpic_damping = sim.mpm_rpic_damping

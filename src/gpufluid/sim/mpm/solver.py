@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -176,6 +177,18 @@ class MpmConfig:
     outflows: Sequence[MpmOutflow] = field(default_factory=tuple)
     fps: int = 60
     device: str = "cuda:0"
+    # S2.17.9 (FU-023): adaptive substepping. Deep pools / fast jets push the
+    # stress-wave + advection CFL past the fixed `dt`, so the bake diverges
+    # (NaN) late — the user only sees "lower bulk/dt and re-bake". When enabled,
+    # step() splits each frame dt into N sub-steps sized by the CFL bound
+    #   dt_sub <= cfl_target * dx / (c_sound + v_max),  c_sound=sqrt(K/rho)
+    # so stability holds regardless of pool depth, with no hand-tuning. Default
+    # OFF → step() makes exactly one p2g2p(dt) call, byte-identical to pre-FU-023
+    # (reference bakes / determinism tests unaffected). N is clamped to
+    # adaptive_max_substeps so a runaway frame can't stall the bake.
+    adaptive_substep: bool = False
+    adaptive_cfl: float = 0.6
+    adaptive_max_substeps: int = 16
     # Round-22: seed for the inflow-particle RNG. Default 42 preserves
     # pre-round-22 determinism (regression tests + repro of bake hashes);
     # set to a different int per-bake when comparing variability, or
@@ -457,6 +470,8 @@ class MpmSolver:
                 of.lo[0], of.lo[1], of.lo[2],
                 of.hi[0], of.hi[1], of.hi[2],
             ))
+        # S2.17.9: one-shot guard so the CFL-saturation warning prints once.
+        self._cfl_warned = False
 
     # ── pipeline -----------------------------------------------------
 
@@ -498,7 +513,10 @@ class MpmSolver:
                               cfg.anti_splash.vz_max],
                       device=cfg.device)
 
-    def _post_step(self, step_index: int = 0) -> None:
+    def _apply_pushback(self) -> None:
+        """Cube + wall pushback. Shared by _post_step (per frame) and the
+        adaptive-substep inner loop (per sub-step) so a tunnelling particle is
+        clamped back inside the domain/colliders before the next P2G."""
         cfg = self.cfg
         for cube in self._cube_params:
             wp.launch(k_cube_pushback, dim=self.n_particles,
@@ -507,6 +525,10 @@ class MpmSolver:
         wp.launch(k_wall_pushback, dim=self.n_particles,
                   inputs=[self.mpm.mpm_state, *self._wall_lo, *self._wall_hi],
                   device=cfg.device)
+
+    def _post_step(self, step_index: int = 0) -> None:
+        cfg = self.cfg
+        self._apply_pushback()
         # S2.17.8: drain AFTER physics has moved particles this step, so a
         # particle that crossed into the drain box this frame is caught before
         # the next dump.
@@ -515,10 +537,72 @@ class MpmSolver:
                       inputs=[self.mpm.mpm_state, int(step_index), *of],
                       device=cfg.device)
 
+    def _cfl_substeps(self) -> tuple[int, bool]:
+        """S2.17.9: (n_substeps, saturated) for this frame from the CFL bound.
+
+        dt_sub <= cfl * dx / (c_sound + v_max), so
+            N = ceil(dt / dt_sub) = ceil(dt * (c_sound + v_max) / (cfl * dx)).
+        c_sound = sqrt(bulk_modulus / density) is the EOS stress wavespeed
+        (the term the divergence message blames). v_max is the current peak
+        particle speed (advection term) — read once per frame (cheap GPU→CPU
+        copy at 10⁴-10⁵ particles, same cost as the existing per-step NaN
+        check). Clamped to [1, adaptive_max_substeps].
+
+        ``saturated`` is True when the unclamped CFL demand exceeded the cap —
+        i.e. substepping is *under*-resolving and the frame may still diverge.
+        The caller surfaces this so the user gets an honest "raise
+        cfl_max_substeps / lower dt" signal instead of a silent under-substep
+        followed by a cryptic CUDA fault.
+        """
+        cfg = self.cfg
+        import math
+        c_sound = math.sqrt(max(cfg.fluid.bulk_modulus, 0.0)
+                            / max(cfg.fluid.density, 1e-9))
+        vel = self.mpm.mpm_state.particle_v.numpy()
+        v_max = float(np.abs(vel).max()) if vel.size else 0.0
+        denom = max(cfg.adaptive_cfl * cfg.dx(), 1e-12)
+        n_demand = int(math.ceil(cfg.dt * (c_sound + v_max) / denom))
+        n_cap = int(cfg.adaptive_max_substeps)
+        return max(1, min(n_demand, n_cap)), (n_demand > n_cap)
+
     def step(self, step_index: int) -> None:
-        """Advance the simulation by `dt`."""
+        """Advance the simulation by `dt`.
+
+        Default: one p2g2p(dt) call (byte-identical to pre-FU-023). When
+        ``cfg.adaptive_substep`` is set, the frame dt is split into N CFL-sized
+        sub-steps so deep-pool / fast-jet scenes stay stable without the user
+        lowering bulk_modulus or dt by hand (FU-023).
+
+        CRITICAL (live-found 2026-06-02): the pushback colliders (cube + wall)
+        MUST run every sub-step, not just once per frame. A sub-step advects
+        particles; if a fast particle tunnels through a cube/wall and isn't
+        pushed back before the next sub-step's P2G, it lands outside the grid →
+        out-of-bounds node index → CUDA illegal-access (error 700), NOT a clean
+        NaN. So the inner loop brackets each p2g2p with pushback. The inflow
+        gate + outflow drain stay frame-clocked (they key off step_index, which
+        is constant across the frame's sub-steps) and run once in
+        _pre_step/_post_step.
+        """
         self._pre_step(step_index)
-        self.mpm.p2g2p(step_index, self.cfg.dt, device=self.cfg.device)
+        cfg = self.cfg
+        if cfg.adaptive_substep:
+            n_sub, saturated = self._cfl_substeps()
+            if saturated and not self._cfl_warned:
+                self._cfl_warned = True
+                print(f"[mpm] WARN: CFL demands more than "
+                      f"cfl_max_substeps={cfg.adaptive_max_substeps} sub-steps "
+                      f"at frame {step_index // max(1, cfg.dump_every)} — the "
+                      f"bake is under-resolving and may still diverge. Raise "
+                      f"cfl_max_substeps, lower dt, or lower bulk_modulus.",
+                      file=sys.stderr)
+            sub_dt = cfg.dt / float(n_sub)
+            for _ in range(n_sub):
+                self.mpm.p2g2p(step_index, sub_dt, device=cfg.device)
+                # Bracket each sub-step with the pushbacks so tunnelling
+                # particles are clamped before the next sub-step's P2G.
+                self._apply_pushback()
+        else:
+            self.mpm.p2g2p(step_index, cfg.dt, device=cfg.device)
         self._post_step(step_index)
 
     # ── output -------------------------------------------------------
