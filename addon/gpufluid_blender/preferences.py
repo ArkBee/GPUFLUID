@@ -34,7 +34,18 @@ def _has_gpufluid(python_exe: str) -> bool:
         return False
 
 
-def _detect_interpreter() -> str:
+def _venv_python(root: str) -> str:
+    """Return the .venv/venv python under `root` that has gpufluid, or ''."""
+    for venv_dir in (".venv", "venv"):
+        cand = (os.path.join(root, venv_dir, "Scripts", "python.exe")
+                if os.name == "nt"
+                else os.path.join(root, venv_dir, "bin", "python"))
+        if os.path.exists(cand) and _has_gpufluid(cand):
+            return cand
+    return ""
+
+
+def _detect_interpreter(extra_roots=None) -> str:
     """Best-effort guess at a Python with `gpufluid` installed.
 
     Validates each candidate by spawning ``python -c 'import gpufluid'``;
@@ -46,8 +57,11 @@ def _detect_interpreter() -> str:
       1. ``$GPUFLUID_PYTHON`` env override (always honored if exists,
          no validation — power-user escape hatch)
       2. ``$VIRTUAL_ENV/{Scripts/python.exe,bin/python}`` — current venv
-      3. Common project venv layouts near the bake/cwd (`.venv/Scripts/...`,
-         `venv/Scripts/...`) walking up from cwd
+      3. ``.venv``/``venv`` walking up from each of ``extra_roots`` (the
+         .blend dir + cache_dir, passed by the caller) THEN from cwd. The
+         extra roots matter because Blender is usually launched from the Start
+         menu, so cwd is never the project — but the user's .blend / cache is
+         (2026-06-02: this was why auto-detect kept returning '').
       4. ``shutil.which("python")`` — only if it can import gpufluid
     """
     env_override = os.environ.get("GPUFLUID_PYTHON", "").strip()
@@ -61,19 +75,21 @@ def _detect_interpreter() -> str:
         if os.path.exists(cand) and _has_gpufluid(cand):
             return cand
 
-    # Walk up from cwd looking for `.venv/Scripts/python.exe` or `venv/...`
-    cwd = os.getcwd()
-    for _ in range(6):
-        for venv_dir in (".venv", "venv"):
-            cand = (os.path.join(cwd, venv_dir, "Scripts", "python.exe")
-                    if os.name == "nt"
-                    else os.path.join(cwd, venv_dir, "bin", "python"))
-            if os.path.exists(cand) and _has_gpufluid(cand):
-                return cand
-        parent = os.path.dirname(cwd)
-        if parent == cwd:
-            break
-        cwd = parent
+    # Walk up from each extra root (project-adjacent) then cwd, looking for a
+    # `.venv`/`venv` that can import gpufluid.
+    roots = [r for r in (extra_roots or []) if r] + [os.getcwd()]
+    for start in roots:
+        cur = os.path.abspath(start)
+        if os.path.isfile(cur):
+            cur = os.path.dirname(cur)
+        for _ in range(6):
+            hit = _venv_python(cur)
+            if hit:
+                return hit
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
 
     # Last resort — system Python on PATH, ONLY if it has gpufluid
     found = shutil.which("python")
@@ -82,15 +98,33 @@ def _detect_interpreter() -> str:
     return ""
 
 
+def _context_roots() -> list:
+    """Project-adjacent dirs to search for a `.venv`: the saved .blend's
+    directory and each Domain's cache_dir. These beat Blender's cwd (which is
+    the Start-menu launch dir, never the project)."""
+    roots = []
+    try:
+        if bpy.data.filepath:
+            roots.append(os.path.dirname(bpy.path.abspath(bpy.data.filepath)))
+        for o in getattr(bpy.context.scene, "objects", []):
+            d = getattr(o, "gpufluid_domain", None)
+            if d is not None and d.is_domain and d.cache_dir.strip():
+                roots.append(os.path.dirname(bpy.path.abspath(d.cache_dir)))
+    except Exception:
+        pass
+    return roots
+
+
 class GPUFLUID_OT_detect_interpreter(bpy.types.Operator):
     bl_idname = "gpufluid.detect_interpreter"
     bl_label = "Detect Python interpreter"
     bl_description = ("Re-run the auto-detect for the Python interpreter "
-                      "($VIRTUAL_ENV, $GPUFLUID_PYTHON, or python on PATH)")
+                      "($GPUFLUID_PYTHON, $VIRTUAL_ENV, a .venv near the "
+                      ".blend / cache dir, or python on PATH)")
 
     def execute(self, context):
         prefs = context.preferences.addons[ADDON_PKG].preferences
-        guess = _detect_interpreter()
+        guess = _detect_interpreter(_context_roots())
         if not guess:
             self.report({"WARNING"},
                         "No Python found in $VIRTUAL_ENV / $GPUFLUID_PYTHON / PATH. "
@@ -165,6 +199,6 @@ def auto_fill_interpreter_on_first_use() -> None:
         return
     if prefs.interpreter_path.strip():
         return
-    guess = _detect_interpreter()
+    guess = _detect_interpreter(_context_roots())
     if guess:
         prefs.interpreter_path = guess

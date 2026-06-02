@@ -25,7 +25,7 @@ import mathutils
 from .. import logger
 from ..config_builder import build_toml
 from ..domain_transform import DomainTransform
-from ..preferences import get_prefs
+from ..preferences import get_prefs, _detect_interpreter, _context_roots
 from ..scene_validator import out_of_domain_warning
 from ._animation import _bbox_world, _bbox_world_at_frame, _is_animated
 from ._collect import _export_obj, _output_dict, _safe_obj_name
@@ -594,7 +594,25 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         prefs = get_prefs(context)
         interp = bpy.path.abspath(prefs.interpreter_path).strip()
         if not interp or not Path(interp).exists():
-            self.report({"ERROR"}, "Set a valid Python interpreter in Addon Preferences (must have gpufluid installed).")
+            # Last-chance auto-detect using project-adjacent roots (the .blend
+            # dir + this Domain's cache_dir) — Blender's cwd is the Start-menu
+            # launch dir so register-time detection often misses the project
+            # .venv. If we find one, persist it so the button "just works".
+            guess = _detect_interpreter(_context_roots())
+            if guess:
+                prefs.interpreter_path = guess
+                interp = bpy.path.abspath(guess).strip()
+                self.report({"INFO"}, f"auto-detected Python interpreter: {guess}")
+                try:
+                    bpy.ops.wm.save_userpref()
+                except Exception:
+                    pass
+        if not interp or not Path(interp).exists():
+            self.report({"ERROR"},
+                        "No Python with gpufluid found. Set the interpreter in "
+                        "Addon Preferences (or click Detect), or set "
+                        "$GPUFLUID_PYTHON. It must be a venv where "
+                        "`pip install -e .` was run on the gpufluid repo.")
             return {"CANCELLED"}
 
         # Pick the domain: prefer the SELECTED domain if it's one (standard
