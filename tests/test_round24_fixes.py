@@ -21,7 +21,11 @@ def _build_solver_with_attrs(tmp_path: Path):
     exercises the sidecar branch. Skips warp/h5py heavy __init__."""
     from gpufluid.sim.mpm.solver import MpmSolver
     sol = object.__new__(MpmSolver)
-    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20)
+    # audit-20260610: save_frame_ply now reads cfg.outflows (sidecar dedup
+    # is only valid for drain-free bakes); §9.7 mock fidelity — the spy must
+    # expose the full surface the production code touches. Empty tuple =
+    # drain-free, preserving the round-24 dedup semantics under test.
+    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20, outflows=())
 
     n_part = 8
     pos = np.tile(np.array([[0.1, 0.2, 0.3]], dtype=np.float32), (n_part, 1))
@@ -62,7 +66,8 @@ def test_sidecar_written_when_particle_count_changes(tmp_path: Path):
     death), a per-frame snapshot IS written so colours stay aligned."""
     from gpufluid.sim.mpm.solver import MpmSolver
     sol = object.__new__(MpmSolver)
-    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20)
+    # audit-20260610: outflows=() — see _build_solver_with_attrs (§9.7).
+    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20, outflows=())
 
     state = {"count": 8}
     cols_full = np.tile(np.array([[0.5, 0.5, 0.5]], dtype=np.float32),

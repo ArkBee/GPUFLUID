@@ -135,7 +135,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     # particle cloud for its shape. Box keeps make_column (byte-identical to
     # pre-S2.17.10); sphere/mesh use the seeding helpers.
     from .config import FluidBoxCfg, FluidSphereCfg, FluidMeshCfg
-    from ..sim.mpm.seeding import seed_sphere, seed_mesh
+    from ..sim.mpm.seeding import seed_sphere, seed_mesh, clamp_to_unit_box
     f0 = None
     if scene.fluids:
         f0 = scene.fluids[0]
@@ -156,6 +156,20 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         column = make_column((cx, cy), half, z_lo, z_hi, n_xy, n_z)
     elif isinstance(f0, FluidSphereCfg):
         column = seed_sphere(f0.center, f0.radius, scene.dx)
+        if column.shape[0] == 0:
+            # audit-20260610: mirror the mesh branch's clean rc=2 exit.
+            # Pre-fix a degenerate sphere (radius <= 0) fell through to
+            # MpmSolver and died with a raw ValueError traceback.
+            print(f"[mpm] fluid sphere source r={f0.radius} "
+                  f"@ {tuple(round(c, 3) for c in f0.center)} seeded 0 "
+                  f"particles (radius must be > 0)", file=sys.stderr)
+            return 2
+        # dodge: sphere seeds bypass the addon's box-path eps clamp; points
+        # outside [0,1]^3 are slip-flattened onto the walls at the first
+        # _pre_step (mangled geometry) and pollute the frame-0 PLY (dumped
+        # before any pushback runs). Clamp to the same 1.5-cell margin the
+        # addon applies to box sources (audit-20260610).
+        column = clamp_to_unit_box(column, 1.5 * scene.dx)
         cx, cy = float(f0.center[0]), float(f0.center[1])
         half = max(0.005, float(f0.radius))
         print(f"[mpm] fluid source: sphere r={f0.radius} "
@@ -167,10 +181,21 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         column = seed_mesh(mp, scene.dx, scale=f0.scale,
                            translate=f0.translate, rotate_deg=f0.rotate_deg)
         if column.shape[0] == 0:
-            print(f"[mpm] fluid mesh source '{mp}' seeded 0 particles "
-                  f"(mesh not watertight, or outside [0,1]^3 after transform)",
+            # audit-20260610: name BOTH known causes — a non-cubic domain's
+            # uniform avg-scale transform can land the source fully outside
+            # [0,1]^3, which is indistinguishable here from a bad mesh.
+            print(f"[mpm] fluid mesh source '{mp}' seeded 0 particles — "
+                  f"either the mesh is not watertight/degenerate, OR the "
+                  f"source lies outside [0,1]^3 after scale/translate "
+                  f"(non-cubic domains scale mesh sources uniformly, which "
+                  f"can push them out of the domain; check the transform)",
                   file=sys.stderr)
             return 2
+        # dodge: same OOB-seed clamp as the sphere branch — mesh sources
+        # also bypass the addon's box-path eps clamp. Clamp BEFORE the
+        # bbox-derived tap placement so tap geometry matches the cloud
+        # actually handed to the solver (audit-20260610).
+        column = clamp_to_unit_box(column, 1.5 * scene.dx)
         bb_lo = column.min(axis=0); bb_hi = column.max(axis=0)
         cx = 0.5 * float(bb_lo[0] + bb_hi[0])
         cy = 0.5 * float(bb_lo[1] + bb_hi[1])
@@ -460,10 +485,16 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             # the regular colour sidecar.
             vc_u8 = None
             cols_np = None  # (P, 3) float32 in [0,1] for whichever source
-            # Round-24: sidecars now de-duplicated — frame 0 written
-            # once; subsequent frames only get their own .npy when the
-            # particle count drifts (mid-bake spawn/death). Fall back
-            # to frame_0000.npy whenever the per-frame file is absent.
+            # Round-24: sidecars de-duplicated — frame 0 written once;
+            # fall back to frame_0000.npy when the per-frame file is
+            # absent. audit-20260610: the solver now ALWAYS writes a
+            # per-frame sidecar when an outflow is configured (a drain
+            # mutates selection row-IDENTITY without necessarily
+            # changing the row COUNT, so the frame-0 fallback + the
+            # shape-equality check below would silently apply attribute
+            # rows to the wrong particles). The fallback is therefore
+            # only ever taken on drain-free bakes, where equal count
+            # implies an identical mask (inflow spawns are monotonic).
             if use_temp_color and v.shape[0] > 0:
                 temp_path = temps_dir / f"frame_{frame_idx:04d}.npy"
                 if not temp_path.exists():

@@ -43,6 +43,26 @@ def seed_box(lo: Vec3, hi: Vec3, spacing: float) -> np.ndarray:
     return _grid_points(lo, hi, spacing)
 
 
+def clamp_to_unit_box(pts: np.ndarray, eps: float) -> np.ndarray:
+    """Clamp seeded positions into ``[eps, 1-eps]³`` (audit-20260610).
+
+    Box sources get this margin addon-side (the addon clamps the box
+    lo/hi to its 1.5-cell ``eps_norm`` before emitting the TOML), but
+    sphere/mesh sources bypass that path entirely — their point clouds
+    come straight from :func:`seed_sphere`/:func:`seed_mesh` and can
+    stick outside the solver's [0,1]³ space when the shape touches the
+    domain edge (or a non-cubic-domain transform lands it outside).
+    """
+    # dodge: out-of-box seeds are not a crash (k_wall_pushback slip-clamps
+    # them at the first _pre_step) but they ARE silent artefacts — the
+    # OOB portion gets flattened onto the wall (mangled geometry) and the
+    # frame-0 PLY is dumped BEFORE any pushback runs, so it contains the
+    # raw OOB cloud. Clamping here mirrors the box path's addon-side
+    # eps clamp for the shapes that bypass it.
+    eps = float(eps)
+    return np.clip(pts, eps, 1.0 - eps).astype(np.float32, copy=False)
+
+
 def seed_sphere(center: Vec3, radius: float, spacing: float) -> np.ndarray:
     """Fill a sphere by grid-sampling its bounding box and keeping points
     within ``radius`` of ``center``."""
