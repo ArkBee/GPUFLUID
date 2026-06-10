@@ -147,8 +147,10 @@ class ModalSubprocessRunner:
              - TimeoutExpired → kill + wait + flag-clear + ERROR + return.
           4. join drain thread → log accumulated lines.
           5. rc check → ERROR if non-zero.
-          6. on_complete() callback (auto-attach).
-          7. INFO report + FINISHED.
+          6. on_complete() callback (auto-attach). May return False to
+             suppress step 7's INFO (audit-20260610 — a 0-output run
+             already reported ERROR; don't end the log on "finished").
+          7. INFO report (unless vetoed) + FINISHED.
 
         `op.__class__._is_running` ALWAYS cleared before return via
         try/finally — even on OSError between sub-paths.
@@ -247,15 +249,24 @@ class ModalSubprocessRunner:
                     friendly or
                     f"gpufluid {self.label} (sync) failed with rc={rc}")
                 return {"CANCELLED"}
+            post_ok = True
             if on_complete is not None:
                 try:
-                    on_complete()
+                    # audit-20260610: an on_complete that already reported
+                    # ERROR for a zero-output run (0 mesh frames / 0 PNGs)
+                    # returns False to veto the "(sync) finished" INFO below.
+                    # Pre-audit the INFO printed unconditionally AFTER that
+                    # ERROR, so the Info log ended on a success line over an
+                    # empty result. Legacy callbacks returning None keep the
+                    # INFO (only an explicit False suppresses).
+                    post_ok = on_complete() is not False
                 except Exception as e:
                     operator.report(
                         {"WARNING"},
                         f"sync {self.label} ok, but on_complete failed: {e}")
-            operator.report(
-                {"INFO"}, f"gpufluid {self.label} (sync) finished")
+            if post_ok:
+                operator.report(
+                    {"INFO"}, f"gpufluid {self.label} (sync) finished")
             return {"FINISHED"}
         finally:
             # Caller set the flag; we always clear on return so the
@@ -271,10 +282,18 @@ class ModalSubprocessRunner:
         context,
         argv: list[str],
         status_msg: str,
+        use_progress: bool = True,
     ) -> set[str]:
         """Spawn subprocess + drain thread (via subprocess_drain helper,
         which uses a sentinel-terminated Queue protocol so the modal
         timer can drain non-blockingly) + arm timer + register modal.
+
+        ``use_progress`` (audit-20260610): whether to open the round-62
+        wm progress bar. Callers whose subprocess emits NO parsable
+        ``N/M`` per-frame line (OT_render — headless Blender prints
+        ``Fra:N`` with no total) pass False: a bar permanently stuck at
+        0% reads as "hung", which is worse than the honest static
+        status text.
 
         Returns RUNNING_MODAL on success or CANCELLED on spawn failure.
         On failure, clears the class flag the caller set."""
@@ -297,11 +316,15 @@ class ModalSubprocessRunner:
         # Round-62: open a 0-100% progress bar so the job reads as active
         # immediately, before the first parsed frame line. Guarded — a
         # headless/odd context where progress_begin is unavailable must not
-        # abort the (otherwise working) bake.
-        try:
-            wm.progress_begin(0, 100)
-            self._progress_active = True
-        except Exception:
+        # abort the (otherwise working) bake. Skipped entirely when the
+        # caller has no parsable frame line to advance it (audit-20260610).
+        if use_progress:
+            try:
+                wm.progress_begin(0, 100)
+                self._progress_active = True
+            except Exception:
+                self._progress_active = False
+        else:
             self._progress_active = False
         return {"RUNNING_MODAL"}
 

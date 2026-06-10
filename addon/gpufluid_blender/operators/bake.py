@@ -85,6 +85,16 @@ def collect_scene(context, domain_obj):
 
     # S2.17.10: avg inverse domain size for uniform (sphere/mesh) sim scaling.
     avg_inv = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
+    # Round-53: hoist cache_dir once — the obstacle MESH branch and the
+    # round-53 BBOX→MESH auto-promote need it before any obstacle is
+    # written. Idempotent makedirs.
+    # audit-20260610: hoisted further, ABOVE the fluid-sources loop — the
+    # S2.17.10 fluid MESH branch exports its .obj into cache_dir too, and
+    # referencing it before the (previous) obstacles-section assignment
+    # raised UnboundLocalError on every source_type=MESH bake (and on
+    # legacy fill_mesh=True .blends via the BBOX→MESH promotion).
+    cache_dir = bpy.path.abspath(dprops.cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
     for fobj in fluid_objs:
         flow, fhiw = _bbox_world(fobj)
         flo_sim_raw = list(to_sim(flow))
@@ -106,6 +116,16 @@ def collect_scene(context, domain_obj):
                       (fhiw[2] - flow[2])) * 0.5
             entry = {"kind": "sphere", "center": tuple(to_sim(centre_w)),
                      "radius": float(r_w * avg_inv), "ppc": int(fprops.ppc)}
+            # audit-20260610 (§9.6): SPHERE/CYL/MESH obstacles all warn when
+            # their scalar avg-radius is used on a non-cubic domain — fluid
+            # sources carried the SAME approximation silently. Mirror the
+            # obstacle wording so the seeded ball mismatch isn't a surprise.
+            if max(inv_size) / min(inv_size) > 1.05:
+                warnings.append(
+                    f"fluid source '{fobj.name}' is a SPHERE on a non-cubic "
+                    f"domain — its radius is averaged across axes, so the "
+                    f"seeded ball won't match the visible sphere. Make the "
+                    f"domain cubic for an exact fit.")
         elif stype == "MESH":
             mesh_path = os.path.join(
                 cache_dir, f"fluid_{_safe_obj_name(fobj.name)}.obj")
@@ -115,6 +135,17 @@ def collect_scene(context, domain_obj):
                      "translate": (-origin.x * avg_inv, -origin.y * avg_inv,
                                    -origin.z * avg_inv),
                      "ppc": int(fprops.ppc)}
+            # audit-20260610 (§9.6): mirror of the FU-019 MESH-obstacle
+            # warning — `scale` is a single scalar, so on a non-cubic domain
+            # the source mesh is uniformly scaled into a per-axis sim space:
+            # the seeded fluid is squashed/offset on the short domain axis.
+            if max(inv_size) / min(inv_size) > 1.05:
+                warnings.append(
+                    f"fluid source '{fobj.name}' is a MESH on a non-cubic "
+                    f"domain — the mesh is scaled uniformly (single-scalar "
+                    f"limitation), so the seeded fluid won't match the "
+                    f"visible mesh. Make the domain cubic for an exact fit "
+                    f"(per-axis mesh scaling is a known follow-up).")
         else:  # BBOX
             entry = {"kind": "box", "lo": tuple(flo_sim), "hi": tuple(fhi_sim),
                      "ppc": int(fprops.ppc)}
@@ -126,11 +157,8 @@ def collect_scene(context, domain_obj):
 
     # obstacles
     obstacles = []
-    # Round-53: hoist cache_dir once — both the MESH branch and the new
-    # round-53 BBOX→MESH auto-promote need it before any obstacle is
-    # written. Idempotent makedirs.
-    cache_dir = bpy.path.abspath(dprops.cache_dir)
-    os.makedirs(cache_dir, exist_ok=True)
+    # (cache_dir is hoisted above the fluid-sources loop — audit-20260610;
+    #  the round-53 hoist used to live here.)
     for o in scene.objects:
         if not o.gpufluid_obstacle.is_obstacle or o is domain_obj:
             continue
@@ -606,6 +634,13 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                 try:
                     bpy.ops.wm.save_userpref()
                 except Exception:
+                    # dodge: headless/CI Blender or a locked/read-only
+                    # userpref file makes save_userpref raise — persisting
+                    # the detected path is best-effort and must not abort an
+                    # otherwise-ready bake (the in-session prefs value is
+                    # already set above). Note the side effect when it DOES
+                    # succeed: save_userpref writes ALL pending preference
+                    # changes, not just interpreter_path (audit-20260610).
                     pass
         if not interp or not Path(interp).exists():
             self.report({"ERROR"},
@@ -865,13 +900,20 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         except Exception:
             return None
 
-    def _sync_post_bake_then_attach(self) -> None:
+    def _sync_post_bake_then_attach(self) -> bool:
         """Sync on_complete: run frame-count sanity, then auto-attach —
         but only when the bake actually produced frames. Errors here
-        downgrade so they don't crash the operator."""
+        downgrade so they don't crash the operator.
+
+        audit-20260610: returns False on a 0-frame bake so the runner
+        suppresses its unconditional "(sync) finished" INFO — that line
+        used to print AFTER the 0-frame ERROR, leaving the Info log
+        ending on a success message over an empty result."""
         actual = self._post_bake_sanity()
         if actual > 0:
             self._auto_attach_post_bake()
+            return True
+        return False
 
     def _post_bake_sanity(self) -> int:
         """Round-61: count baked mesh frames vs requested and report any

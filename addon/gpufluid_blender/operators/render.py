@@ -25,7 +25,7 @@ from typing import Optional
 import bpy
 
 from .. import logger
-from ..preferences import get_prefs
+from ..preferences import get_prefs, _detect_interpreter, _context_roots
 from ._runner import ModalSubprocessRunner
 
 
@@ -146,9 +146,34 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         prefs = get_prefs(context)
         interp = bpy.path.abspath(prefs.interpreter_path).strip()
         if not interp or not Path(interp).exists():
+            # audit-20260610 (§9.6): mirror of bake.py's last-chance
+            # auto-detect (commit c5834f1) — Render used to hard-fail here
+            # where Bake self-healed, so "attach an existing cache → click
+            # Render first" dead-ended on an ERROR the user couldn't act on
+            # without leaving the panel. Same project-adjacent .venv search;
+            # persist the hit so the next click "just works".
+            guess = _detect_interpreter(_context_roots())
+            if guess:
+                prefs.interpreter_path = guess
+                interp = bpy.path.abspath(guess).strip()
+                self.report({"INFO"},
+                            f"auto-detected Python interpreter: {guess}")
+                try:
+                    bpy.ops.wm.save_userpref()
+                except Exception:
+                    # dodge: headless/CI Blender or a locked/read-only
+                    # userpref file makes save_userpref raise — persisting
+                    # is best-effort and must not abort the render (the
+                    # in-session prefs value is already set above). Side
+                    # effect when it DOES succeed: saves ALL pending
+                    # preference changes, not just interpreter_path.
+                    pass
+        if not interp or not Path(interp).exists():
             self.report({"ERROR"},
-                "Set a valid Python interpreter in Addon Preferences "
-                "(must have gpufluid installed).")
+                        "No Python with gpufluid found. Set the interpreter "
+                        "in Addon Preferences (or click Detect), or set "
+                        "$GPUFLUID_PYTHON. It must be a venv where "
+                        "`pip install -e .` was run on the gpufluid repo.")
             return {"CANCELLED"}
 
         domain, all_domains = _find_domain(context)
@@ -182,6 +207,25 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         if not out_dir.is_absolute():
             out_dir = cache_dir / out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
+        # audit-20260610 (§9.6 mirror of bake's pre-run stale-artefact
+        # strip): remove leftover *.png from a previous render of this
+        # cache. Without this, the round-61 post-render honesty check
+        # counts STALE frames — a re-render that writes ZERO PNGs still
+        # reported "complete: N frame(s)" off the previous run's files,
+        # the exact false-success disease round-61 fixed for bake. Only
+        # top-level *.png files are removed; subdirs are kept.
+        for stale in out_dir.glob("*.png"):
+            try:
+                stale.unlink()
+            except OSError as e:
+                # dodge: a PNG held open by an external viewer (Windows
+                # file lock) must not abort the render — but a survivor
+                # poisons the post-render count, so say so out loud.
+                self.report(
+                    {"WARNING"},
+                    f"could not remove stale render frame "
+                    f"{stale.name}: {e} — the post-render frame count "
+                    f"may overcount.")
         self._out_dir = str(out_dir)
 
         argv = [
@@ -208,8 +252,15 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             )
 
         # ─── MODAL PATH ───────────────────────────────────────────────
+        # use_progress=False (audit-20260610): the render subprocess is a
+        # headless Blender whose per-frame output is `Fra:N` — no total, so
+        # no `N/M` line exists for tick_modal's frame_regex to advance the
+        # round-62 progress bar. A bar permanently stuck at 0% reads as
+        # "hung"; the honest static status text is better until the CLI
+        # grows a parsable N/M render-progress line.
         return self._runner.start_modal(
-            self, context, argv, status_msg="gpufluid rendering…")
+            self, context, argv, status_msg="gpufluid rendering…",
+            use_progress=False)
 
     def modal(self, context, event):
         result = self._runner.tick_modal(
@@ -253,18 +304,24 @@ class GPUFLUID_OT_render(bpy.types.Operator):
         if self._runner is not None:
             self._runner.cancel(self, context)
 
-    def _sync_post_render_report(self) -> None:
+    def _sync_post_render_report(self) -> bool:
         """Sync on_complete: count PNGs and report. Round-61: escalate
         the 0-PNG case to ERROR via the shared cache_sanity classifier
-        instead of reporting an empty render as 'finished'."""
+        instead of reporting an empty render as 'finished'.
+
+        audit-20260610: returns False on the 0-PNG ERROR so the runner
+        suppresses its unconditional "(sync) finished" INFO — that line
+        used to print AFTER the ERROR, ending the Info log on a success
+        message over an empty output dir."""
         from ..cache_sanity import count_pngs, render_output_sanity
         n_png = count_pngs(self._out_dir)
         level, msg = render_output_sanity(n_png, 0)
         if level is not None:
             self.report({level}, msg)
-        else:
-            self.report(
-                {"INFO"},
-                f"gpufluid render (sync) finished — {n_png} PNG(s) "
-                f"in {self._out_dir}")
+            return level != "ERROR"
+        self.report(
+            {"INFO"},
+            f"gpufluid render (sync) finished — {n_png} PNG(s) "
+            f"in {self._out_dir}")
+        return True
 

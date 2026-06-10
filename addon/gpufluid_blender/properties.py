@@ -330,13 +330,18 @@ class GpufluidInflowProps(bpy.types.PropertyGroup):
                     "<cache>/temperatures/ sidecar .npy and is invisible.",
     )
     temperature: bpy.props.FloatProperty(
-        name="Temperature", default=293.0, min=0.0, max=5000.0, soft_max=2000.0,
+        # audit-20260610: 293.0 → 300.0 so the default EQUALS the Fluid
+        # source's Temperature default exactly (GpufluidFluidProps above) —
+        # the previous 293 claimed "same scale so the two mix coherently"
+        # while differing by 7 K from the sibling default it cited.
+        name="Temperature", default=300.0, min=0.0, max=5000.0, soft_max=2000.0,
         description="Scalar temperature (Kelvin) stamped on particles from "
-                    "this inflow when 'Stamp Temperature' is on. Same absolute "
-                    "scale as a Fluid source's Temperature so the two mix "
-                    "coherently (293 K = room-temp water; lava ~1500 K). "
-                    "Pre-v0.8 this defaulted to 20 in a '°C' convention which "
-                    "silently mixed against the Fluid source's Kelvin values.",
+                    "this inflow when 'Stamp Temperature' is on. Default "
+                    "300 K matches the Fluid source's Temperature default "
+                    "exactly, so default-marked source + inflow mix without "
+                    "a step (lava ~1500 K). Pre-v0.8 this defaulted to 20 in "
+                    "a '°C' convention which silently mixed against the "
+                    "Fluid source's Kelvin values.",
     )
 
 
