@@ -23,6 +23,7 @@ This suite has two layers:
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -42,10 +43,17 @@ def _load_cache_sanity():
     return mod
 
 
+# audit-20260610: §9.12 — docstrings must be stripped too, not only
+# comment lines (a triple-quoted block retelling a fix could satisfy or
+# trip a grep exactly like a comment).
+_TRIPLE_RE = re.compile(r'("""|\'\'\')[\s\S]*?\1')
+
+
 def _code(path: Path) -> str:
-    """Source with comment lines stripped (§9.12) so the fix history in
-    comments can't satisfy or trip a grep assertion."""
-    src = path.read_text(encoding="utf-8")
+    """Source with docstrings (triple-quoted blocks) and comment lines
+    stripped (§9.12) so the fix history in comments/docstrings can't
+    satisfy or trip a grep assertion."""
+    src = _TRIPLE_RE.sub("", path.read_text(encoding="utf-8"))
     return "\n".join(
         ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
@@ -142,30 +150,39 @@ def test_render_modal_rearms_reentrance():
     """Round-61 (§9.6 mirror of bake round-28): render's modal FINISHED
     branch must re-hold the reentrance mutex around its post-finish work
     (tick_modal cleared it), or a second Render click in that tick can
-    spawn a parallel subprocess into the same out_dir."""
+    spawn a parallel subprocess into the same out_dir.
+    audit-20260610: the search window is bounded to the FINISHED block's
+    method (the old tail-to-EOF scan was satisfied by a `finally:` anywhere
+    later in the file)."""
     code = _code(_ADDON / "operators" / "render.py")
     idx = code.index('if "FINISHED" in result')
-    tail = code[idx:]
-    assert "cls._is_running = True" in tail and "finally:" in tail, (
-        "round-61 regressed: render modal FINISHED no longer re-arms the "
-        "reentrance mutex around its post-finish work")
+    nxt = code.find("\n    def ", idx)  # end of modal(): next method def
+    block = code[idx:nxt if nxt != -1 else len(code)]
+    assert ("cls._is_running = True" in block and "finally:" in block
+            and "cls._is_running = False" in block), (
+        "round-61 regressed: render modal FINISHED no longer re-arms (and "
+        "finally-releases) the reentrance mutex around its post-finish work")
 
 
 def test_unregister_is_defensive():
     """A stale/half-registered class must not abort the whole teardown
     (live-hit 2026-05-28: an un-guarded unregister_class raised mid-loop
     and left the addon corrupt). Every unregister_class call must be
-    wrapped so teardown always completes."""
+    wrapped so teardown always completes.
+    audit-20260610: the search window is bounded to the unregister loop
+    itself (the old tail-to-EOF scan was satisfied by any try/except in
+    any later code)."""
     code = _code(_ADDON / "__init__.py")
-    # The unregister loop must wrap unregister_class in try/except.
-    assert "try:" in code and "bpy.utils.unregister_class(cls)" in code
-    import re as _re
-    # crude but effective: the unregister_class call must sit under a try.
     idx = code.index("for cls in reversed(_collect_classes())")
-    tail = code[idx:]
-    assert "try:" in tail and "except" in tail, (
+    nxt = code.find("\ndef ", idx)  # next top-level def (or EOF)
+    block = code[idx:nxt if nxt != -1 else len(code)]
+    assert ("try:" in block and "bpy.utils.unregister_class(cls)" in block
+            and "except" in block), (
         "round-61 regressed: unregister loop no longer guards "
         "unregister_class — one stale class will corrupt teardown")
+    # the guarded call must come AFTER the try that wraps it.
+    assert block.index("try:") < block.index("bpy.utils.unregister_class(cls)"), (
+        "round-61: unregister_class is no longer inside the try block")
 
 
 def test_attach_frame_offset_defaults_to_zero():

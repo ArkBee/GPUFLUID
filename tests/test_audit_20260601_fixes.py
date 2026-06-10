@@ -19,11 +19,17 @@ Findings closed here:
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
 _ADDON = _REPO / "addon" / "gpufluid_blender"
+
+# audit-20260610: docstrings must be stripped too (§9.12) — a triple-quoted
+# block retelling the fix history could otherwise satisfy a required-pattern
+# assert exactly like a comment line would.
+_TRIPLE_RE = re.compile(r'("""|\'\'\')[\s\S]*?\1')
 
 
 def _load_cache_sanity():
@@ -39,8 +45,9 @@ def _load_cache_sanity():
 
 
 def _code(path: Path) -> str:
-    """Source with comment lines stripped (§9.12)."""
-    src = path.read_text(encoding="utf-8")
+    """Source with triple-quoted blocks (docstrings) and comment lines
+    stripped (§9.12) — neither can satisfy or trip a grep assertion."""
+    src = _TRIPLE_RE.sub("", path.read_text(encoding="utf-8"))
     return "\n".join(
         ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
@@ -93,12 +100,25 @@ def test_attach_ww_operator_uses_sanity():
     assert "count_ww_frames" in code and "attach_ww_sanity" in code, (
         "FU-001: attach_ww_cache must run the shared whitewater sanity "
         "check instead of reporting INFO success blindly")
-    # The old unconditional 'attached to' INFO without a frame count must
-    # be gone (it now lives under the else-branch with an (N frames) suffix).
-    assert 'self.report({"INFO"}, f"whitewater cache attached to' not in code \
-        or "frames)" in code, (
-        "FU-001: the 0-frame whitewater attach must not still report a bare "
-        "INFO success")
+    # audit-20260610: the original guard here was a vacuous disjunct
+    # (`X not in code or "frames)" in code` — the right side is always true
+    # once any frame-count suffix exists anywhere in the file). Pin the real
+    # invariant instead: every whitewater-attach success message must carry
+    # a frame count within the same report statement, and at least one such
+    # message must exist (else this guard itself would go vacuous).
+    occurrences = [m.start() for m in
+                   re.finditer(re.escape("whitewater cache attached"), code)]
+    assert occurrences, (
+        "FU-001: the whitewater-attach success report is gone entirely — "
+        "the attach operator no longer confirms a successful bind")
+    for at in occurrences:
+        # The report f-string spans 2-3 source lines; a 200-char window
+        # covers the whole statement without reaching the next one.
+        window = code[at:at + 200]
+        assert "frames)" in window, (
+            "FU-001: a whitewater-attach success report without an "
+            "'(N frames)' count is back — a 0-frame attach must never "
+            "masquerade as plain success")
 
 
 # ── FU-002b CONTRACT: stale whitewater dirs cleaned pre-bake ──────────
@@ -127,13 +147,29 @@ def test_animated_inflow_frame_end_clamp_warns():
 # ── FU-004 CONTRACT: inflow temperature is Kelvin, default 293 ────────
 
 def test_inflow_temperature_kelvin_default():
+    """FU-004: both Temperature defaults (Fluid source + inflow) must sit on
+    the same absolute Kelvin scale — the pre-fix inflow defaulted to 20 in a
+    '°C' convention that silently mixed against the source's Kelvin.
+    audit-20260610: assert the INVARIANT (the two defaults are equal and
+    Kelvin-scale) instead of pinning a literal — the literal moved 293→300
+    when the prod audit aligned the inflow to the Fluid source default."""
     code = _code(_ADDON / "properties.py")
     assert "default=20.0, min=0.0, max=5000.0, soft_max=2000.0" not in code, (
         "FU-004: inflow temperature must no longer default to 20 in a '°C' "
         "convention (it silently mixed against the Fluid source's Kelvin)")
-    assert "default=293.0, min=0.0, max=5000.0, soft_max=2000.0" in code, (
-        "FU-004: inflow temperature must default to 293 K (room-temp water) "
-        "on the same absolute scale as a Fluid source")
+    defaults = [float(v) for v in re.findall(
+        r'name="Temperature",\s*default=([0-9.]+)', code)]
+    assert len(defaults) == 2, (
+        f"FU-004: expected exactly 2 Temperature properties (Fluid source + "
+        f"inflow); found {len(defaults)} — update this contract if a third "
+        f"temperature-bearing role was added")
+    assert defaults[0] == defaults[1], (
+        f"FU-004 regressed: Fluid source ({defaults[0]}) and inflow "
+        f"({defaults[1]}) Temperature defaults differ — default-marked "
+        f"source + inflow would mix with a temperature step again")
+    assert all(d >= 273.0 for d in defaults), (
+        f"FU-004 regressed: a Temperature default ({defaults}) is below "
+        f"273 — that's a °C-convention value on the Kelvin scale")
     # The misleading '°C in default convention' wording must be gone.
     assert "C in default convention" not in code, (
         "FU-004: the '°C default convention' description must be replaced "
@@ -195,16 +231,33 @@ def test_axis_aligned_box_uses_per_axis_halfsize():
         "FU-019: axis-aligned box must use the per-axis hx/hy/hz half-extents")
 
 
+def _obstacle_branch(code: str, marker: str) -> str:
+    """The slice of collect_scene from this obstacle_type's branch test to
+    the next branch (or the trailing motion_type block). Binds an assert to
+    ONE branch instead of counting occurrences file-wide (audit-20260610:
+    the old `count >= 3` accepted any 3 occurrences anywhere)."""
+    start = code.index(marker)
+    ends = [i for i in (code.find("elif oprops.obstacle_type", start + 1),
+                        code.find("oprops.motion_type", start + 1))
+            if i != -1]
+    return code[start:min(ends)] if ends else code[start:]
+
+
 def test_mesh_obstacle_warns_on_noncubic_domain():
     """FU-019: MESH obstacle uses a single-scalar `scale`, so it can't scale
     per-axis. Since MESH is advertised as the exact-fit workaround for
     SPHERE/CYL, it must at least WARN on a non-cubic domain instead of silently
-    squashing the collider."""
+    squashing the collider. audit-20260610: each assert is bound to its own
+    branch window, not a file-wide occurrence count."""
     code = _code(_ADDON / "operators" / "bake.py")
-    # there must be a MESH-branch warning keyed on the same anisotropy ratio.
-    assert code.count("max(inv_size) / min(inv_size) > 1.05") >= 3, (
-        "FU-019: the explicit MESH obstacle branch must warn on non-cubic "
-        "domains (SPHERE + CYLINDER already do; MESH was silent)")
+    aniso = "max(inv_size) / min(inv_size) > 1.05"
+    for marker, label in (('oprops.obstacle_type == "SPHERE"', "SPHERE"),
+                          ('oprops.obstacle_type == "CYLINDER_Y"', "CYLINDER"),
+                          ('oprops.obstacle_type == "MESH"', "MESH")):
+        assert aniso in _obstacle_branch(code, marker), (
+            f"FU-019: the {label} obstacle branch must warn on non-cubic "
+            f"domains (its averaged/uniform scale can't match the visible "
+            f"shape there; MESH was the silent one pre-FU-019)")
 
 
 # ── FU-019 UNIT: size_world validation gives a clear key-path error ──

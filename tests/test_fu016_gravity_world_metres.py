@@ -16,6 +16,7 @@ the addon-side forwarding is grep-guarded in test_audit_20260601_fixes.py.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -29,9 +30,39 @@ from gpufluid.cli.config import DomainCfg, SceneCfg, load_scene  # noqa: E402
 
 
 def _g_norm_z(scene: SceneCfg, g_world: float = -9.81) -> float:
-    """Reproduce commands.py:242-244 gravity normalisation."""
+    """TEST-LOCAL MIRROR of the commands.py gravity normalisation (the real
+    code path needs warp). The mirror's formula direction is pinned to prod
+    by test_prod_gravity_formula_divides_by_world_z below — without that
+    pin, an inversion in commands.py would leave every mirror test green
+    (audit-20260610)."""
     dom_z = scene.world_size[2] if scene.world_size[2] > 1e-9 else 1.0
     return g_world / dom_z
+
+
+def test_prod_gravity_formula_divides_by_world_z():
+    """audit-20260610: pin the REAL commands.py expression, not just 'reads
+    world_size'. Invariant: g_norm's Z term DIVIDES real-world g by the
+    metre extent (g_world / dom_z). A flip to multiplication (or swapping
+    operands) would pass every mirror-based test above; this grep is the
+    only thing that fails on an inversion short of a live GPU bake."""
+    src = (Path(__file__).resolve().parents[1] / "src" / "gpufluid" / "cli"
+           / "commands.py").read_text(encoding="utf-8")
+    # §9.12: strip docstrings + comment lines before asserting.
+    src = re.sub(r'("""|\'\'\')[\s\S]*?\1', "", src)
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert "dom_size = scene.world_size" in code, (
+        "FU-016: gravity scaling must source the metre extent from "
+        "scene.world_size (the addon-forwarded size_world)")
+    assert re.search(
+        r"g_norm\s*=\s*\(\s*0\.0\s*,\s*0\.0\s*,\s*g_world\s*/\s*dom_z\s*\)",
+        code), (
+        "FU-016: the gravity Z term must be `g_world / dom_z` (divide real "
+        "g by the world-Z metres). If the names changed, keep a "
+        "divide-by-world-extent form and update this pin")
+    assert not re.search(r"g_world\s*\*\s*dom_z|dom_z\s*/\s*g_world", code), (
+        "FU-016 INVERTED: gravity is multiplied by (or divided into) the "
+        "domain extent — water falls wrong by dom_z² relative to the fix")
 
 
 def test_world_size_uses_forwarded_metres():

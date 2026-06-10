@@ -22,25 +22,44 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent
 _ADDON = _REPO / "addon" / "gpufluid_blender"
 
-# Mirror of the addon's _FRAME_RE — kept in sync by test_bake_regex_broadened.
-_PAT = re.compile(r"(?:frame|step)\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+# audit-20260610: strip docstrings too (§9.12), not only comment lines.
+_TRIPLE_RE = re.compile(r'("""|\'\'\')[\s\S]*?\1')
 
 
 def _code(path: Path) -> str:
-    src = path.read_text(encoding="utf-8")
+    src = _TRIPLE_RE.sub("", path.read_text(encoding="utf-8"))
     return "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
 
 
+def _prod_frame_re() -> re.Pattern:
+    """Extract the REAL _FRAME_RE pattern literal from bake.py source and
+    compile it. audit-20260610: this replaces a hand-copied mirror regex —
+    the mirror could drift from production (the old 'sync guard' only
+    checked two substrings) and the behavioural cases below would keep
+    passing against a stale copy. bake.py imports bpy, so source-extraction
+    is the bpy-free way to exercise the regex production actually runs."""
+    src = (_ADDON / "operators" / "bake.py").read_text(encoding="utf-8")
+    m = re.search(
+        r'_FRAME_RE\s*=\s*re\.compile\(\s*r"([^"]+)"\s*,\s*re\.IGNORECASE\s*\)',
+        src)
+    assert m, ("round-62: could not extract _FRAME_RE from bake.py — if it "
+               "was renamed/reformatted, update this extractor (do NOT "
+               "fall back to a hand-copied mirror)")
+    return re.compile(m.group(1), re.IGNORECASE)
+
+
 def test_regex_matches_mpm_and_flip_progress():
+    pat = _prod_frame_re()  # the production regex, not a mirror
     cases = [
         ("  frame 0005/40", (5, 40)),                       # FLIP
         ("  [MPM] frame 5/40  z_min=0.10 z_max=0.90", (5, 40)),  # round-62 MPM
         ("  [MPM] step 200/1600", (200, 1600)),             # legacy fallback
         ("frame 12 / 60", (12, 60)),                        # spaces around /
+        ("  FRAME 7/40", (7, 40)),                          # IGNORECASE load-bearing
     ]
     for line, expect in cases:
-        m = _PAT.search(line)
-        assert m, f"progress line not matched: {line!r}"
+        m = pat.search(line)
+        assert m, f"progress line not matched by bake.py _FRAME_RE: {line!r}"
         assert (int(m.group(1)), int(m.group(2))) == expect
 
 

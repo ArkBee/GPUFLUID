@@ -6,6 +6,7 @@ sphere config parse, and the addon emission contract.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +18,16 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from gpufluid.sim.mpm import seeding  # noqa: E402
+
+# audit-20260610: §9.12 grep hygiene — strip docstrings (triple-quoted
+# blocks) AND comment lines before any source assertion below.
+_TRIPLE_RE = re.compile(r'("""|\'\'\')[\s\S]*?\1')
+
+
+def _code(path: Path) -> str:
+    src = _TRIPLE_RE.sub("", path.read_text(encoding="utf-8"))
+    return "\n".join(l for l in src.splitlines()
+                     if not l.lstrip().startswith("#"))
 
 
 def test_seed_box_fills_aabb():
@@ -78,23 +89,21 @@ def test_config_parses_sphere_fluid():
 
 def test_addon_emits_source_shapes():
     """Contract: collect_scene emits sphere/mesh kinds (not only box) driven by
-    GpufluidFluidProps.source_type, and the panel + property exist."""
+    GpufluidFluidProps.source_type, and the panel + property exist.
+    audit-20260610: properties.py is now comment+docstring-stripped before
+    asserting (the raw-text grep could be satisfied by a comment)."""
     base = Path(__file__).resolve().parents[1] / "addon" / "gpufluid_blender"
-    bake = "\n".join(l for l in (base / "operators" / "bake.py")
-                     .read_text(encoding="utf-8").splitlines()
-                     if not l.lstrip().startswith("#"))
+    bake = _code(base / "operators" / "bake.py")
     assert '"kind": "sphere"' in bake, "fluid source must be able to emit a sphere"
     assert '"kind": "mesh"' in bake, "fluid source must be able to emit a mesh"
     assert 'source_type' in bake
-    props = (base / "properties.py").read_text(encoding="utf-8")
+    props = _code(base / "properties.py")
     assert "source_type" in props and "SPHERE" in props and "MESH" in props
 
 
 def test_cli_threads_shape_seeding():
     """The MPM CLI branch must dispatch on fluid type to the seeders."""
-    src = (Path(__file__).resolve().parents[1] / "src" / "gpufluid" / "cli"
-           / "commands.py").read_text(encoding="utf-8")
-    code = "\n".join(l for l in src.splitlines()
-                     if not l.lstrip().startswith("#"))
+    code = _code(Path(__file__).resolve().parents[1] / "src" / "gpufluid"
+                 / "cli" / "commands.py")
     assert "seed_sphere(" in code and "seed_mesh(" in code
     assert "FluidSphereCfg" in code and "FluidMeshCfg" in code

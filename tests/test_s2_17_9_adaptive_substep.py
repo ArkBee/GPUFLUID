@@ -9,8 +9,12 @@ opt-in default (off = one p2g2p, byte-identical to pre-FU-023).
 from __future__ import annotations
 
 import math
+import re
+from pathlib import Path
 
 import pytest
+
+from conftest import HAS_CUDA
 
 pytest.importorskip("warp")
 
@@ -23,6 +27,11 @@ def _make_solver(**cfg_kw):
     try:
         return MpmSolver(cfg)
     except Exception:
+        # audit-20260610: skip ONLY when CUDA is genuinely absent. On a GPU
+        # box a constructor exception is a real regression and must FAIL —
+        # the old blanket `except → skip` reported it as a green skip.
+        if HAS_CUDA:
+            raise
         pytest.skip("no CUDA device for MpmSolver construction")
 
 
@@ -133,9 +142,10 @@ def test_cli_threads_cfl_into_mpm():
     """Contract: the MPM CLI branch must pass the [simulation] cfl knobs into
     MpmConfig.adaptive_* (so the existing addon 'CFL Substepping' checkbox
     drives MPM, not just FLIP)."""
-    from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "gpufluid" / "cli"
            / "commands.py").read_text(encoding="utf-8")
+    # §9.12 (audit-20260610): strip docstrings too, not only comment lines.
+    src = re.sub(r'("""|\'\'\')[\s\S]*?\1', "", src)
     code = "\n".join(l for l in src.splitlines()
                      if not l.lstrip().startswith("#"))
     assert "adaptive_substep=bool(sim.cfl)" in code
