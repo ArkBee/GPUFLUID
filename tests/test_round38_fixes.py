@@ -40,6 +40,9 @@ def test_bake_clamps_keyframe_loop_to_dprops_frames():
 
 
 # ─── 2. MPM _patches tolerates read-only install ────────────────────────
+# [BLK S2.17.PATCH.SLIP] guard: exercises _patch_slip (the registered
+# patch callable) on its read-only-install error path (audit-20260610:
+# coverage ref added; the test predates the convention).
 
 def test_patch_slip_returns_false_on_oserror(monkeypatch, tmp_path):
     """Round-38: pre-round-38 a PermissionError from write_text

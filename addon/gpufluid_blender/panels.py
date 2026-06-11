@@ -1,10 +1,22 @@
 """[BLK A8.7] N-sidebar UI panels for gpufluid."""
 import bpy
 
+try:
+    from ._blocks import block
+except ImportError:
+    # dodge: tests load this file under a stub package with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 PANEL_CATEGORY = "GpuFluid"
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_main(bpy.types.Panel):
     bl_label = "gpufluid"
     bl_space_type = "VIEW_3D"
@@ -24,6 +36,7 @@ class GPUFLUID_PT_main(bpy.types.Panel):
         col.operator("gpufluid.detach_cache", icon="UNLINKED")
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_domain(bpy.types.Panel):
     bl_label = "Domain"
     bl_space_type = "VIEW_3D"
@@ -109,6 +122,7 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
             cmix.label(text="Requires `pip install pymixbox`", icon="INFO")
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_fluid(bpy.types.Panel):
     bl_label = "Fluid"
     bl_space_type = "VIEW_3D"
@@ -143,6 +157,7 @@ class GPUFLUID_PT_fluid(bpy.types.Panel):
             tbox.prop(f, "temperature")
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_obstacle(bpy.types.Panel):
     bl_label = "Obstacle"
     bl_space_type = "VIEW_3D"
@@ -166,6 +181,7 @@ class GPUFLUID_PT_obstacle(bpy.types.Panel):
             box.prop(o, "motion_velocity")
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_inflow(bpy.types.Panel):
     bl_label = "Inflow"
     bl_space_type = "VIEW_3D"
@@ -198,6 +214,7 @@ class GPUFLUID_PT_inflow(bpy.types.Panel):
             tbox.prop(i, "temperature")
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_outflow(bpy.types.Panel):
     bl_label = "Outflow"
     bl_space_type = "VIEW_3D"
@@ -218,6 +235,7 @@ class GPUFLUID_PT_outflow(bpy.types.Panel):
 
 
 # [BLK A8.7.1] Whitewater sub-panel (B1.5)
+@block("A8.7.1", "Whitewater sub-panel (B1.5)")
 class GPUFLUID_PT_whitewater(bpy.types.Panel):
     bl_label = "Whitewater (W7)"
     bl_space_type = "VIEW_3D"
@@ -254,6 +272,7 @@ class GPUFLUID_PT_whitewater(bpy.types.Panel):
         row.prop(ww, "show_bubble", toggle=True)
 
 
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
 class GPUFLUID_PT_bake(bpy.types.Panel):
     bl_label = "Bake"
     bl_space_type = "VIEW_3D"

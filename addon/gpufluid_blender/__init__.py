@@ -52,6 +52,19 @@ try:
 except ImportError:  # pragma: no cover — running headless / under pytest
     bpy = None  # type: ignore[assignment]
 
+# audit-20260610: real A8.* registration via the _blocks shim (no-op inside
+# Blender — see _blocks.py). Defensive: standalone file-loads in tests have
+# no parent package, so the relative import can fail there.
+try:
+    from ._blocks import block
+except ImportError:
+    # dodge: spec_from_file_location loads with no parent package —
+    # registration is irrelevant in those harnesses. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 if bpy is not None:
     from . import properties
     from . import preferences
@@ -100,6 +113,7 @@ def _collect_classes():
 
 
 # [BLK A8.1]
+@block("A8.1", "Addon register/unregister")
 def register():
     for cls in _collect_classes():
         bpy.utils.register_class(cls)
@@ -114,6 +128,7 @@ def register():
 
 
 # [BLK A8.1]
+@block("A8.1", "Addon register/unregister (teardown half)")
 def unregister():
     cache_loader.unregister_handler()
     # Round-61: guard every teardown step. A half-registered state — e.g.

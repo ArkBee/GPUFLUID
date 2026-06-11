@@ -9,6 +9,17 @@ import stat
 import time
 import bpy
 
+try:
+    from .._blocks import block
+except ImportError:
+    # dodge: tests load this file under a stub package with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 def _robust_rmtree(path, attempts=5):
     """Delete a directory tree, tolerating Windows file-lock / async-
@@ -68,6 +79,7 @@ def subprocess_drain(proc, q):
         q.put(None)  # sentinel
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_add_domain(bpy.types.Operator):
     bl_idname = "gpufluid.add_domain"
     bl_label = "Add gpufluid Domain"
@@ -111,6 +123,7 @@ def _set_single_role(obj, role_attr: str) -> None:
         setattr(getattr(obj, grp), attr, attr == role_attr)
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_mark_fluid(bpy.types.Operator):
     bl_idname = "gpufluid.mark_fluid"
     bl_label = "Mark as Fluid Source"
@@ -126,6 +139,7 @@ class GPUFLUID_OT_mark_fluid(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_mark_obstacle(bpy.types.Operator):
     bl_idname = "gpufluid.mark_obstacle"
     bl_label = "Mark as Obstacle"
@@ -141,6 +155,7 @@ class GPUFLUID_OT_mark_obstacle(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_mark_inflow(bpy.types.Operator):
     bl_idname = "gpufluid.mark_inflow"
     bl_label = "Mark as Inflow"
@@ -153,6 +168,7 @@ class GPUFLUID_OT_mark_inflow(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_mark_outflow(bpy.types.Operator):
     bl_idname = "gpufluid.mark_outflow"
     bl_label = "Mark as Outflow"
@@ -165,6 +181,7 @@ class GPUFLUID_OT_mark_outflow(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_clear_cache(bpy.types.Operator):
     bl_idname = "gpufluid.clear_cache"
     bl_label = "Clear Cache"
@@ -251,6 +268,7 @@ class GPUFLUID_OT_clear_cache(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_apply_eevee_preset(bpy.types.Operator):
     """[BLK A8.9] One-click Eevee perf preset for the active scene.
 
@@ -285,6 +303,7 @@ class GPUFLUID_OT_apply_eevee_preset(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.8", "Helper operator family (mark_*/clear/open_cache_dir/detect_interp/single-role)")
 class GPUFLUID_OT_open_cache_dir(bpy.types.Operator):
     bl_idname = "gpufluid.open_cache_dir"
     bl_label = "Open Cache Folder"

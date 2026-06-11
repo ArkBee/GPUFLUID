@@ -57,10 +57,49 @@ def _install_bpy_stub() -> None:
     if not hasattr(bpy.utils, "unregister_class"):
         bpy.utils.unregister_class = lambda cls: None
 
+    # audit-20260610: bpy.app.handlers.persistent is used as a DECORATOR at
+    # module-import time (cache_loader/__init__.py) — without it the whole
+    # cache_loader package fails to import and its A8.6 blocks never
+    # register. Top up rather than replace (earlier tests may have left a
+    # thinner namespace-style stub).
+    app = getattr(bpy, "app", None) or types.SimpleNamespace()
+    handlers = getattr(app, "handlers", None) or types.SimpleNamespace()
+    if not hasattr(handlers, "persistent"):
+        handlers.persistent = lambda f: f
+    for hook in ("frame_change_pre", "load_post"):
+        if not hasattr(handlers, hook):
+            setattr(handlers, hook, [])
+    app.handlers = handlers
+    bpy.app = app
+    for attr, default in (("path", types.SimpleNamespace(abspath=lambda p: p)),
+                          ("data", types.SimpleNamespace(filepath="",
+                                                         objects={})),
+                          ("context", types.SimpleNamespace()),
+                          ("ops", types.SimpleNamespace())):
+        if not hasattr(bpy, attr):
+            setattr(bpy, attr, default)
+
     sys.modules["bpy"] = bpy
     sys.modules["bpy.types"] = bpy.types
     sys.modules["bpy.props"] = bpy.props
     sys.modules["bpy.utils"] = bpy.utils
+
+    # audit-20260610 (root cause of the latent registry failure): the stub
+    # never provided `mathutils`, so bake.py / _animation.py / the package
+    # __init__ chain ALL failed import with ModuleNotFoundError — silently,
+    # because load_all_modules swallowed ImportError (§9.10). Minimal
+    # mathutils so the addon tree imports fully; top up an existing thinner
+    # stub (e.g. test_audit_20260610_addon leaves one with only Vector).
+    mathutils = sys.modules.get("mathutils") or types.ModuleType("mathutils")
+
+    class _Stub:
+        def __init__(self, *a, **k):
+            pass
+
+    for cls_name in ("Vector", "Matrix", "Euler", "Quaternion"):
+        if not hasattr(mathutils, cls_name):
+            setattr(mathutils, cls_name, type(cls_name, (_Stub,), {}))
+    sys.modules["mathutils"] = mathutils
 
 
 @pytest.fixture(scope="module")
@@ -72,8 +111,42 @@ def populated_registry():
     the whole sweep.
     """
     _install_bpy_stub()
+    # audit-20260610: earlier tests (e.g. test_addon_preload_lru) leave a
+    # STUB `gpufluid_blender` package in sys.modules — a bare ModuleType
+    # with __path__ but without the real __init__ body (no ADDON_PKG, no
+    # submodule imports). The sweep would then resolve submodule parents
+    # against that stub and die with a confusing "cannot import name
+    # 'ADDON_PKG' from 'gpufluid_blender' (unknown location)" — exactly
+    # the order-dependent flakiness this fixture's docstring promises to
+    # avoid. Evict all cached addon entries so the sweep imports the real
+    # package fresh.
+    for name in [n for n in sys.modules
+                 if n == "gpufluid_blender"
+                 or n.startswith("gpufluid_blender.")]:
+        del sys.modules[name]
     from gpufluid.blocks.check import load_all_modules, run_checks
-    load_all_modules()
+    loaded, failed = load_all_modules()
+    # audit-20260610 (§9.10): a module skipped on ImportError is a module
+    # whose @block decorators never fired. Pre-audit this was SILENT: the
+    # stub lacked `mathutils`, all 16 addon modules were skipped, zero A8
+    # blocks registered, and check 3 emitted 17 misleading
+    # "impl-row-without-registry" errors with no hint of the real cause.
+    # Addon failures are now a hard fixture failure (the stub above is
+    # supposed to make the WHOLE addon importable); core failures are
+    # printed loudly but tolerated (optional heavy deps may be absent in
+    # minimal environments).
+    addon_failed = [f for f in failed if f[0].startswith("gpufluid_blender")]
+    if addon_failed:
+        pytest.fail(
+            "addon modules failed to import under the bpy stub — their A8 "
+            "blocks did NOT register (extend _install_bpy_stub for whatever "
+            "is missing):\n  "
+            + "\n  ".join(f"{name}: {err}" for name, err in addon_failed))
+    if failed:
+        print(f"\n[populated_registry] {len(failed)} core module(s) skipped "
+              f"on ImportError (their blocks did not register):")
+        for name, err in failed:
+            print(f"  {name}: {err}")
     return run_checks()
 
 

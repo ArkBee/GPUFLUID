@@ -1,5 +1,11 @@
 """Addon Python-interpreter auto-detection (preferences._detect_interpreter).
 
+[BLK A8.8] guard: covers the detect_interp member of the A8.8 helper-operator
+family — these tests exercise `_detect_interpreter`, the entire logic behind
+GPUFLUID_OT_detect_interpreter (audit-20260610: coverage ref added when A8.8
+gained a real @block registration; the rest of the family — mark_*/clear/
+open_cache_dir — still has no behavioural test, see follow-ups).
+
 Blender is normally launched from the Start menu, so its cwd is never the
 project — register-time detection kept returning '' and the Bake button
 errored until the user set the path by hand. The fix: also search up from

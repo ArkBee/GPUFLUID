@@ -28,6 +28,17 @@ from .. import logger
 from ..preferences import get_prefs, _detect_interpreter, _context_roots
 from ._runner import ModalSubprocessRunner
 
+try:
+    from .._blocks import block
+except ImportError:
+    # dodge: tests load this file under a stub package with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 def _find_domain(context):
     """Resolve the active Domain object (prefer selection, else first in scene).
@@ -63,6 +74,8 @@ def _scene_toml_for(cache_dir: Path) -> Path:
     return cache_dir / "scene.toml"
 
 
+@block("A8.13", "Render operator (sync + modal subprocess to headless "
+                "Blender, ESC abort, reentrance guard, watchdog)")
 class GPUFLUID_OT_render(bpy.types.Operator):
     bl_idname = "gpufluid.render"
     bl_label = "Render Cached Sim"

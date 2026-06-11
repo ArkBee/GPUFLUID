@@ -147,21 +147,36 @@ def _iter_modules(root: Path, package_prefix: str):
         yield mod_name, path
 
 
-def load_all_modules() -> List[str]:
+def load_all_modules() -> Tuple[List[str], List[Tuple[str, str]]]:
     """Import every production module so @block decorators fire.
 
-    Returns the list of module names successfully imported. Modules that
-    fail with ImportError (e.g. addon without bpy) are skipped silently
-    — A8 checks are documented to run only when bpy is on sys.path.
+    Returns ``(loaded, failed)``:
+      * ``loaded`` — module names successfully imported;
+      * ``failed`` — ``(module_name, "ExcType: msg")`` for every module
+        skipped on ImportError.
+
+    audit-20260610 (§9.10 — silent fallback): pre-audit the except
+    clauses were bare silent ``pass``. When the test harness's bpy stub
+    lacked ``mathutils``, all 16 addon modules silently failed to
+    import, ZERO A8 blocks registered, and check 3 reported 17 bogus
+    "impl-row-without-registry" errors with no hint of the real cause
+    (the registry-test failure that exposed this had been latent on
+    main). Failures are now collected and returned so callers can be
+    loud about them; the test fixture hard-fails on addon failures.
     """
     loaded: List[str] = []
+    failed: List[Tuple[str, str]] = []
     # Core package first.
     for mod_name, _ in _iter_modules(SRC_ROOT, "gpufluid"):
         try:
             importlib.import_module(mod_name)
             loaded.append(mod_name)
-        except ImportError:
-            pass
+        except ImportError as e:
+            # dodge: optional heavy deps (warp/torch/trimesh) may be absent
+            # in a minimal environment — core modules needing them are
+            # skipped rather than killing the whole check. Recorded, not
+            # silent (§9.10): the caller decides how loud to be.
+            failed.append((mod_name, f"{type(e).__name__}: {e}"))
     # Addon — only if bpy is available.
     if "bpy" in sys.modules and ADDON_ROOT.exists():
         # Ensure parent dir is on sys.path so `gpufluid_blender` resolves.
@@ -172,9 +187,14 @@ def load_all_modules() -> List[str]:
             try:
                 importlib.import_module(mod_name)
                 loaded.append(mod_name)
-            except ImportError:
-                pass
-    return loaded
+            except ImportError as e:
+                # dodge: an incomplete bpy/mathutils stub must not crash
+                # the check tool itself — but a skipped addon module means
+                # its A8 blocks never register and check 3 then emits
+                # MISLEADING impl-row-without-registry errors. Record so
+                # the harness fails on the real cause instead (§9.10).
+                failed.append((mod_name, f"{type(e).__name__}: {e}"))
+    return loaded, failed
 
 
 # ----------------------------------------------------------- checks 1, 2, 5
@@ -624,7 +644,16 @@ def cli_main(argv: List[str]) -> int:
     p.add_argument("--layer", default=None, help="filter --list by layer prefix")
     args = p.parse_args(argv)
 
-    load_all_modules()
+    _, failed = load_all_modules()
+    if failed:
+        # audit-20260610 (§9.10): surface skipped modules loudly — every
+        # skip is a module whose blocks did NOT register, which skews
+        # check 3/6 results. Not an error by itself (optional deps are
+        # legitimate), but never silent again.
+        print(f"note — {len(failed)} module(s) skipped on ImportError "
+              f"(their @block decorators did NOT fire):")
+        for name, err in failed:
+            print(f"  {name}: {err}")
 
     if args.check:
         report = run_checks()

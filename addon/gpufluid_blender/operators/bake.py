@@ -32,6 +32,17 @@ from ._collect import _export_obj, _output_dict, _safe_obj_name
 from .helpers import subprocess_drain
 from ._runner import ModalSubprocessRunner
 
+try:
+    from .._blocks import block
+except ImportError:
+    # dodge: tests load this file under a stub package with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 # Round-62: match BOTH the FLIP per-frame line ("  frame 0005/40") and
 # the MPM per-frame line ("  [MPM] frame 5/40"), tolerant of spaces around
@@ -562,6 +573,8 @@ def collect_scene(context, domain_obj):
 
 
 # [BLK A8.5]
+@block("A8.5", "Bake operator (sync + modal subprocess, ESC abort, "
+               "reentrance guard, watchdog)")
 class GPUFLUID_OT_bake(bpy.types.Operator):
     bl_idname = "gpufluid.bake"
     bl_label = "Bake gpufluid Simulation"

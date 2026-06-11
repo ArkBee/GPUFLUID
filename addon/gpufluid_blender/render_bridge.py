@@ -27,9 +27,21 @@ from typing import Any
 
 import numpy as np
 
+try:
+    from ._blocks import block
+except ImportError:
+    # dodge: tests load this file STANDALONE via spec_from_file_location
+    # (no parent package → relative import impossible). Registration only
+    # matters on package import (registry check); no-op here. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 # ─── A8.11 mesh rebuild ────────────────────────────────────────────────
 
+@block("A8.11", "rebuild_surface_mesh — bulk vert/face/colour writer")
 def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
                          colors: np.ndarray | None = None) -> None:
     """Replace ``obj.data`` geometry with the given vert/face arrays.
@@ -114,6 +126,7 @@ def rebuild_surface_mesh(obj: Any, verts: np.ndarray, faces: np.ndarray,
 
 # ─── A8.10 frame loader ────────────────────────────────────────────────
 
+@block("A8.10", "FrameMeshLoader — per-frame PLY swap via foreach_set (carries Col attr)")
 class FrameMeshLoader:
     """Frame-change handler: load PLY for current frame into a surface mesh.
 
@@ -167,6 +180,7 @@ class FrameMeshLoader:
 
 # ─── A8.9 Eevee perf preset ────────────────────────────────────────────
 
+@block("A8.9", "Eevee render preset (taa_samples + bloom/ssr off)")
 def apply_eevee_preset(scene: Any, samples: int = 16) -> dict:
     """Configure the Blender scene's Eevee renderer for headless speed.
 

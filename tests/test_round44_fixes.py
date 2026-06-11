@@ -19,6 +19,9 @@ _ADDON_DIR = _REPO / "addon"
 
 
 # ─── 1+2. Pushback kernels gate on selection (source-grep) ─────────────
+# [BLK S2.17.3] guard: test_wall_pushback_skips_held_particles asserts on
+# the body of k_wall_pushback — the S2.17.3 callable (audit-20260610:
+# coverage ref added; the test predates the convention).
 
 def test_cube_pushback_skips_held_particles():
     src = (_REPO / "src" / "gpufluid" / "sim" / "mpm"
@@ -73,6 +76,9 @@ def test_outflow_normal_aabb_unchanged():
 
 
 # ─── 4. apply_eevee_preset skips non-Eevee engine ───────────────────────
+# [BLK A8.9] guard: the two tests below call apply_eevee_preset (the A8.9
+# callable) behaviourally — engine gate + applied-log contract
+# (audit-20260610: coverage ref added; the tests predate the convention).
 
 def _load_render_bridge():
     sys.modules.setdefault("bpy", types.ModuleType("bpy"))

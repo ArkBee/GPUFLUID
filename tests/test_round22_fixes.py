@@ -1,8 +1,8 @@
 """Round-22 regression tests for findings from round-21 reviewer:
 
-  - render_bridge.FrameMeshLoader: frame_current=0 (or negative)
+  - [BLK A8.10] render_bridge.FrameMeshLoader: frame_current=0 (or negative)
     must clamp to idx 0, not silently fall through with idx=-1.
-  - render_bridge.rebuild_surface_mesh: colour-count mismatch must
+  - [BLK A8.11] render_bridge.rebuild_surface_mesh: colour-count mismatch must
     log a warning (not silently drop colours without trace).
   - MpmConfig.seed: configurable, default 42 preserves determinism,
     different seeds produce different inflow distributions.

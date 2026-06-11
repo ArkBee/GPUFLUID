@@ -1,11 +1,24 @@
 """[BLK A8.2/A8.3/A8.4] Property groups for Domain, Fluid, Obstacle."""
 import bpy
 
+try:
+    from ._blocks import block
+except ImportError:
+    # dodge: tests load this file STANDALONE via spec_from_file_location
+    # (no parent package → relative import impossible). Registration only
+    # matters on package import (registry check); no-op here. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
 
-# [BLK A8.2.1] Surface tension sub-group attached to Domain (B1.1)
-# No @block decorator here: addon is loaded inside Blender's bpy process and
-# importing gpufluid.blocks pulls Warp/CUDA. The block is still discoverable via
-# this tag + BLOCKS.md A8.2.1 row.
+
+# [BLK A8.2.1] Surface tension sub-group attached to Domain (B1.1).
+# audit-20260610: now carries a real @block decorator via the _blocks shim
+# (no-op inside Blender). The previous comment claiming "importing
+# gpufluid.blocks pulls Warp/CUDA" was stale — gpufluid/__init__ is
+# numpy-light — and the shim avoids gpufluid inside Blender entirely.
+@block("A8.2.1", "Surface tension property group (B1.1)")
 class GpufluidSurfaceTensionGroup(bpy.types.PropertyGroup):
     surface_tension: bpy.props.FloatProperty(
         name="Surface Tension σ",
@@ -25,6 +38,7 @@ class GpufluidSurfaceTensionGroup(bpy.types.PropertyGroup):
 # Mirrors the TOML `output.whitewater_*` knobs (cli/config.py:199-203) plus
 # class-visibility toggles consumed by the cache loader at import time
 # (cache_loader honors show_* by filtering whitewater_kinds/*.npy on read).
+@block("A8.2.2", "Whitewater property group (B1.5)")
 class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
     enable: bpy.props.BoolProperty(
         name="Whitewater (W7)", default=False,
@@ -79,6 +93,7 @@ class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
 
 
 # [BLK A8.2]
+@block("A8.2", "Domain property group")
 class GpufluidDomainProps(bpy.types.PropertyGroup):
     is_domain: bpy.props.BoolProperty(name="Is gpufluid Domain", default=False)
     resolution: bpy.props.IntProperty(name="Resolution", default=64, min=8, max=512, soft_max=256,
@@ -213,7 +228,9 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     )
 
 
-# [BLK A8.3]
+# [BLK A8.3] (+A8.3.1: the per-source colour fields B1.2 live on this class)
+@block("A8.3", "Fluid source property group")
+@block("A8.3.1", "Per-source colour fields (B1.2)")
 class GpufluidFluidProps(bpy.types.PropertyGroup):
     is_fluid: bpy.props.BoolProperty(name="Is gpufluid Source", default=False)
     ppc: bpy.props.IntProperty(name="Particles per Cell (cubed)", default=8, min=1, max=64,
@@ -266,6 +283,7 @@ class GpufluidFluidProps(bpy.types.PropertyGroup):
 
 
 # [BLK A8.4]
+@block("A8.4", "Obstacle source property group")
 class GpufluidObstacleProps(bpy.types.PropertyGroup):
     is_obstacle: bpy.props.BoolProperty(name="Is gpufluid Obstacle", default=False)
     obstacle_type: bpy.props.EnumProperty(

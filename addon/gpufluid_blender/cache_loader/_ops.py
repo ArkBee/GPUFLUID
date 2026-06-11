@@ -12,6 +12,17 @@ import time as _time
 
 import bpy
 
+try:
+    from .._blocks import block
+except ImportError:
+    # dodge: tests load this file under a stub package with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 from . import (
     _PRELOAD,
     _free_table,
@@ -21,6 +32,7 @@ from . import (
 )
 
 
+@block("A8.6", "Cache import — attach operator (PLY preload bind)")
 class GPUFLUID_OT_attach_cache(bpy.types.Operator):
     bl_idname = "gpufluid.attach_cache"
     bl_label = "Attach gpufluid Cache"
@@ -195,6 +207,7 @@ class GPUFLUID_OT_attach_cache(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.6.1", "Whitewater point-cloud import")
 class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
     bl_idname = "gpufluid.attach_ww_cache"
     bl_label = "Attach gpufluid Whitewater Cache"
@@ -255,6 +268,7 @@ class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@block("A8.6", "Cache import — detach operator")
 class GPUFLUID_OT_detach_cache(bpy.types.Operator):
     bl_idname = "gpufluid.detach_cache"
     bl_label = "Detach gpufluid Cache"

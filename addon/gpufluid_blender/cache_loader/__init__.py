@@ -19,6 +19,17 @@ import numpy as np
 from .. import logger as _addon_logger
 from ._ply import _read_ply_minimal  # noqa: F401 — re-exported for callers
 
+try:
+    from .._blocks import block
+except ImportError:
+    # dodge: tests load this package under a stub parent with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 def _rebuild_mesh(obj, verts, faces, origin):
     """Replace obj.data via Blender's battle-tested `from_pydata` API.
@@ -163,6 +174,7 @@ def _domain_whitewater_visibility(scene):
 # to those names; use the cache instance methods.
 
 
+@block("A8.6", "Cache import — LRU PLY preload table")
 class PreloadCache:
     """Per-addon LRU cache of pre-loaded PLY mesh sequences.
 
@@ -694,6 +706,7 @@ def _on_load_post(_dummy):
                 obj.name, exc)
 
 
+@block("A8.6", "Cache import — frame_change/load_post handler wiring")
 def register_handler():
     """Register frame_change + load_post handlers and strip any orphans
     from past reloads.

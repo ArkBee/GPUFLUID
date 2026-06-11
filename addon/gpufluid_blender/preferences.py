@@ -20,6 +20,17 @@ import sys
 # lookup if `preferences.py` ever moved into a subpackage.
 from . import ADDON_PKG
 
+try:
+    from ._blocks import block
+except ImportError:
+    # dodge: tests load this file under a stub package with no _blocks
+    # (spec_from_file_location harnesses) — registration is irrelevant
+    # there; the real registration happens on package import. See _blocks.py.
+    def block(_bid, _desc=""):
+        def _w(fn):
+            return fn
+        return _w
+
 
 def _has_gpufluid(python_exe: str) -> bool:
     """Return True if the given Python can import gpufluid (quick subprocess)."""
@@ -115,6 +126,8 @@ def _context_roots() -> list:
     return roots
 
 
+@block("A8.8", "Helper operator family — detect_interp member (lives in "
+               "preferences.py, registered with the helpers family)")
 class GPUFLUID_OT_detect_interpreter(bpy.types.Operator):
     bl_idname = "gpufluid.detect_interpreter"
     bl_label = "Detect Python interpreter"

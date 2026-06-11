@@ -185,6 +185,9 @@ def test_unregister_is_defensive():
         "round-61: unregister_class is no longer inside the try block")
 
 
+# [BLK A8.6.1] guard: the whitewater attach operator's frame_offset
+# default is asserted below alongside the surface attach's (audit-20260610 —
+# coverage ref added when A8.6.1 gained a real @block registration).
 def test_attach_frame_offset_defaults_to_zero():
     """Round-61: frame_offset default must be 0 so scene frame 1 shows
     the first SIMULATED frame (frame_0001), not the empty pre-sim
