@@ -7,6 +7,61 @@
 
 ---
 
+## Audit 2026-06-10: 3 независимых ревьюера + fix-wave (branch fix/round61-zero-frame-honesty)
+
+Полный аудит ветки (21 коммит) тремя cold-context ревьюерами (addon / mpm+CLI /
+test-honesty) + fix-wave тёплыми воркерами. Найдено и починено в коммитах
+`0bb181e`, `c919648`, `6238d23` (+ registry-коммит wave-2):
+
+- ✅ **HIGH** UnboundLocalError при MESH-источнике (`bake.py` — `cache_dir` до
+  присваивания); «verified» goal-сцена была сферой, потому не ловилось.
+- ✅ **MED** render считал чужие старые PNG → ложный «render complete» (§9.6
+  дрейф: чистка была в bake, не в render). + render получил interpreter
+  auto-detect зеркально bake.
+- ✅ **MED** sidecar цвет/температура рассинхронизировались при outflow
+  (эвристика round-24 «selection не мутирует» сломана S2.17.8).
+- ✅ Seeding guards: sphere 0-частиц → чистый rc=2; clamp seed'ов в [eps,1-eps]³;
+  honest rc=2 message (не только «not watertight»).
+- ✅ Inflow temperature default 293→300 K (= source default).
+- ✅ Тест-долг: вакуумный assert, тест-локальные копии прод-регексов,
+  `except Exception: pytest.skip` маскировал регрессии на GPU-машине,
+  grep-контракты без вырезания docstrings (§9.12 ужесточён).
+- ✅ **Registry-долг (довоенный, виден после FU-012):** `load_all_modules`
+  молча глотал ImportError (§9.10) — 16 модулей аддона отваливались на
+  отсутствующем `mathutils`-стабе; 17 строк A8.* в BLOCKS.md без декораторов.
+
+Headless default-scene smoke (§9.13, `blender -b` + register() + sync bake,
+сценарии SPHERE и MESH source) поймал ещё два бага, которые все ревьюеры
+пропустили — ровно как предсказывает методичка:
+
+- ✅ **SPHERE-источник через аддон падал** `KeyError: 'lo'` —
+  `config_builder._emit_fluid_body` знал только mesh/box, а S2.17.10 научил
+  `collect_scene` эмитить sphere (round-59 класс: TOML-writer отстаёт от
+  collect_scene). Goal-сцена «verified» гонялась через CLI TOML, минуя
+  этот путь. Фикс + contract-тест.
+- ✅ **`get_prefs` падал голым KeyError** при ручном `register()` (headless
+  batch-скрипты — рекламируемый сценарий sync-бейка). Теперь громкий
+  fallback на session-local дефолты (§9.10) + тест.
+
+Smoke-скрипт: `tmp/audit_20260610_smoke.py` (обе сцены GREEN, 9 кадров каждая).
+
+Новые отложенные:
+
+- 📝 **FU-028** — outflow despawn проверяется раз на raw-step ПОСЛЕ всех
+  substep'ов: быстрая частица может проскочить тонкий drain-box между
+  проверками (tunneling). Фикс = drain-check в substep-цикле; оценить цену.
+  `src/gpufluid/sim/mpm/solver.py` + `outflow.py`.
+- 📝 **FU-029** — `adaptive_cfl` переиспользует FLIP-слайдер `cfl_factor`
+  (max 2.0): значение >1.0 недо-substep'ит MPM stress waves без предупреждения
+  (пока не упрётся в substep cap). Нужен отдельный MPM-диапазон или warning.
+- 📝 **FU-030** — SPHERE/MESH источники на некубическом домене скейлятся
+  скалярным `avg_inv` (теперь хотя бы с warning, audit-20260610). Честный фикс
+  = per-axis scale в `seeding.py` (для mesh — несимметричный transform).
+- 📝 **FU-031** — дефолт солвера flip→mpm (FU-017): старые .blend с нетронутым
+  Solver молча перебейкаются MPM. Рассмотреть one-time INFO при load_post.
+
+---
+
 ## GOAL met: non-cube sources + 5-bowl waterfall, 600 frames, visually tested (2026-06-02)
 
 - ✅ **Non-cube fluid sources** (S2.17.10): "Mark as Source" works on any object;

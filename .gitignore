@@ -36,3 +36,10 @@ examples/scenes/*.obj
 # Claude Code runtime artifacts
 .claude/scheduled_tasks.lock
 .claude/scheduled_tasks.json
+
+# External dependency checkouts (warp-mpm reference clone — has its own .git,
+# never to be committed here; the library code lives in src/gpufluid/sim/mpm)
+third_party/
+
+# Scratch artifacts (smoke caches, scatter plots, one-off probe scripts)
+tmp/
