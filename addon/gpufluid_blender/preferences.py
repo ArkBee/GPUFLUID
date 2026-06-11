@@ -197,8 +197,39 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         col.prop(self, "preload_max_frames")
 
 
+class _FallbackPrefs:
+    """Session-local stand-in for GpufluidPreferences (audit-20260610).
+
+    Used when the addon has no entry in ``context.preferences.addons`` —
+    i.e. a batch script did ``register()`` by hand instead of enabling
+    the addon (``blender -b`` + ``bpy.ops.gpufluid.bake(sync=True)`` is
+    an advertised flow). Exposes ONLY the surface the operators touch.
+    Writes (auto-detected interpreter_path) live for the session; there
+    is no addons[] slot to persist them into, which is fine — the next
+    manual-register run re-detects.
+    """
+    interpreter_path: str = ""
+
+
+_FALLBACK_PREFS = _FallbackPrefs()
+
+
 def get_prefs(context) -> "GpufluidPreferences":
-    return context.preferences.addons[ADDON_PKG].preferences
+    try:
+        return context.preferences.addons[ADDON_PKG].preferences
+    except KeyError:
+        # dodge: manual register() (headless batch scripts) never creates
+        # an addons[] entry, and the bare KeyError crashed bake/render
+        # outright (caught by the audit-20260610 headless smoke). Fall
+        # back to session-local defaults LOUDLY (§9.10 — silent fallback
+        # is how the round-49 prefs bug lived for a year) so the
+        # interpreter auto-detect in the operators can still self-heal.
+        import logging
+        logging.getLogger("gpufluid.addon").warning(
+            "prefs.get_prefs.fallback: addons[%r] missing — manual "
+            "register()? Using session-local default preferences.",
+            ADDON_PKG)
+        return _FALLBACK_PREFS
 
 
 def auto_fill_interpreter_on_first_use() -> None:

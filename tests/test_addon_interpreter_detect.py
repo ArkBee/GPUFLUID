@@ -73,6 +73,30 @@ def test_detect_finds_venv_under_extra_root(tmp_path, monkeypatch):
     assert got == str(vpy), f"should find project .venv via extra root; got {got!r}"
 
 
+def test_get_prefs_falls_back_loudly_without_addons_entry(caplog):
+    """audit-20260610: manual register() (headless batch scripts) leaves
+    context.preferences.addons without our key — get_prefs used to crash
+    with a bare KeyError (caught by the headless default-scene smoke).
+    It must instead return session-local defaults AND log the fallback
+    (§9.10), so the operators' interpreter auto-detect can self-heal."""
+    m = _load_prefs()
+
+    class _Addons(dict):
+        pass  # plain dict: missing key raises KeyError, like bpy's collection
+
+    ctx = types.SimpleNamespace(
+        preferences=types.SimpleNamespace(addons=_Addons()))
+    with caplog.at_level("WARNING", logger="gpufluid.addon"):
+        prefs = m.get_prefs(ctx)
+    assert prefs.interpreter_path == ""
+    assert any("fallback" in r.message for r in caplog.records), \
+        "audit-20260610: the prefs fallback must be LOUD (§9.10)"
+    # session persistence: an auto-detected path written by bake must be
+    # visible to a later render call (same singleton, not a fresh object)
+    prefs.interpreter_path = "X:/venv/python.exe"
+    assert m.get_prefs(ctx).interpreter_path == "X:/venv/python.exe"
+
+
 def test_detect_returns_empty_without_root(tmp_path, monkeypatch):
     """Without the project-adjacent root, detection from a foreign cwd misses
     the venv (the exact pre-fix failure) — proving the extra root is what fixes it."""

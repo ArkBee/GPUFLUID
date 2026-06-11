@@ -216,3 +216,20 @@ def test_a8_5_rejects_unknown_obstacle_type():
     s["obstacles"] = [{"type": "trapezohedron"}]
     with pytest.raises(ValueError, match="trapezohedron"):
         build_toml(s)
+
+
+def test_sphere_fluid_source_emits_sphere_toml():
+    """audit-20260610: collect_scene emits kind="sphere" entries (S2.17.10)
+    but _emit_fluid_body only knew mesh/box -> addon-path SPHERE bake
+    crashed with KeyError 'lo' (found by the headless default-scene smoke,
+    round-59 class: TOML writer drops what collect_scene emits)."""
+    s = _minimal_scene()
+    s.pop("fluid")
+    s["fluids"] = [{"kind": "sphere", "center": (0.5, 0.5, 0.7),
+                    "radius": 0.12, "ppc": 8}]
+    parsed = tomllib.loads(build_toml(s))
+    f = parsed["fluids"][0]
+    assert f["type"] == "sphere", "audit-20260610: sphere source must survive the TOML writer"
+    assert f["center"] == [0.5, 0.5, 0.7]
+    assert f["radius"] == 0.12
+    assert "lo" not in f

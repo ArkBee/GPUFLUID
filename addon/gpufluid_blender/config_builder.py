@@ -120,6 +120,14 @@ def build_toml(scene_dict: SceneDict) -> str:
             prefix_lines.append(f'path = "{esc}"')
             prefix_lines.append(f"scale = {float(f.get('scale', 1.0)):g}")
             prefix_lines.append(f"translate = {_fmt_vec3(f.get('translate', [0,0,0]))}")
+        elif f.get("kind") == "sphere":
+            # audit-20260610: S2.17.10 taught collect_scene to emit sphere
+            # sources but this writer still box-only — addon-path SPHERE
+            # bake crashed with KeyError 'lo' (round-59 class: TOML writer
+            # drops what collect_scene emits; caught by the headless smoke).
+            prefix_lines.append('type = "sphere"')
+            prefix_lines.append(f"center = {_fmt_vec3(f['center'])}")
+            prefix_lines.append(f"radius = {float(f['radius']):g}")
         else:
             prefix_lines.append('type = "box"')
             prefix_lines.append(f"lo = {_fmt_vec3(f['lo'])}")
