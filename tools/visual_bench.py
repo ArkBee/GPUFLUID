@@ -28,16 +28,14 @@ Pipeline per scene:
 
 Known limitations / upstream follow-ups in the prod render path
 (`gpufluid render` -> addon render_bridge + render_fluid_on_cube_eevee):
-  * `--label` silently doubles as the MATERIAL selector: any label other
-    than "water"/"oil" gets the honey material (Transmission 0.6) which
-    renders BLACK under the headless Eevee preset (SSR/refraction off).
-    Bench workaround: always pass --label water.
+  * (FIXED — FU-032) `--label` used to silently double as the MATERIAL
+    selector with a honey catch-all that rendered BLACK headlessly. The
+    renderer now takes an explicit `--material`; the bench passes the
+    real scene name as the label + `--material water`.
   * Lighting is hardcoded dim (SUN 4.0, AREA 70, world 0.6) with no
     light/world/exposure CLI knob — only --color and --samples reach
     the scene. Bench compensation: bright default --color + per-tile
     auto-levels/brightness normalisation in the PIL sheet (_tile_pop).
-The real fix is a material/lighting knob in the prod render bridge,
-decoupled from the overlay label.
 
 Exit code is non-zero if any selected scene fails to bake or render.
 """
@@ -112,14 +110,10 @@ def render_keyframes(name: str, toml: Path, blender: str, samples: int) -> list[
     out_dir.mkdir(parents=True)
     cmd = [blender, "--background", "--python", str(RENDERER), "--",
            "--cache", str(cache), "--scene", str(toml),
-           # --label doubles as the MATERIAL selector in the renderer:
-           # anything other than "water"/"oil" takes the honey branch
-           # (Transmission 0.6), which renders BLACK because the headless
-           # Eevee preset disables SSR/refraction. Passing the scene name
-           # here made all bench water near-black. Always render as
-           # "water" (Transmission 0, bright diffuse); scene names are
-           # drawn on the contact sheet itself.
-           "--out", str(out_dir), "--label", "water",
+           # FU-032: material is now explicit — the scene name can be the
+           # label again (it used to trigger the honey catch-all and
+           # render near-black; the bench worked around with --label water).
+           "--out", str(out_dir), "--label", name, "--material", "water",
            # Bright cyan-blue: the renderer's hardcoded lighting is dim
            # (see module docstring) — a "physically nice" dark water color
            # renders near-black. Pop > realism for a regression sheet.

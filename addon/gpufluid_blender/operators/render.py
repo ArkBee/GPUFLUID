@@ -97,7 +97,10 @@ class GPUFLUID_OT_render(bpy.types.Operator):
     )
     label: bpy.props.StringProperty(
         name="Label",
-        description="Overlay text drawn into each frame (also drives material preset)",
+        # FU-032: the label no longer secretly selects the shader — any
+        # custom text renders the water preset (legacy: literal
+        # water/oil/honey labels still infer the matching preset).
+        description="Overlay text drawn into each frame",
         default="Water",
     )
     blender_path: bpy.props.StringProperty(

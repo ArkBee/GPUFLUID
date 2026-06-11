@@ -1084,6 +1084,9 @@ def cmd_render(args: argparse.Namespace) -> int:
         "samples": args.samples,
         "fps":    args.fps,
         "frames": args.frames,
+        # FU-032: optional — absent/None means "legacy label inference"
+        # downstream; the headless wrapper only forwards it when set.
+        "material": args.material,
     })
     cmd = [blender, "--background", "--python", str(driver), "--", payload]
     print(f"[render] launching: {' '.join(cmd[:3])} ... ({len(payload)} bytes config)")
@@ -1208,7 +1211,13 @@ def main(argv=None) -> int:
     p_render.add_argument("scene", help="path to scene.toml (read for cube obstacle geometry)")
     p_render.add_argument("--out", required=True, help="output directory for PNG frames")
     p_render.add_argument("--label", default="gpufluid",
-        help="overlay label drawn into each frame")
+        help="overlay label drawn into each frame (FU-032: no longer "
+             "selects the material — see --material)")
+    p_render.add_argument("--material", choices=["water", "oil", "honey"],
+        default=None,
+        help="fluid material preset (FU-032). Omitted: the renderer infers "
+             "it from --label only when the label is literally "
+             "water/oil/honey (legacy demos); anything else renders water")
     p_render.add_argument("--color", nargs=3, type=float, default=[0.20, 0.50, 0.70],
         metavar=("R", "G", "B"), help="fluid surface RGB in [0,1]")
     p_render.add_argument("--samples", type=int, default=16,

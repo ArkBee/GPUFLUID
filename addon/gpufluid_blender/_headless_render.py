@@ -59,6 +59,12 @@ def build_renderer_argv(payload: dict) -> list[str]:
     samples = int(payload.get("samples", 0) or 0)
     if samples > 0:
         argv += ["--samples", str(samples)]
+    # FU-032: optional material preset. NOT in the round-28 required-keys
+    # list on purpose — a missing/None key means "legacy label inference"
+    # in the renderer (old payloads keep working byte-identically).
+    material = payload.get("material")
+    if material:
+        argv += ["--material", str(material)]
     return argv
 
 

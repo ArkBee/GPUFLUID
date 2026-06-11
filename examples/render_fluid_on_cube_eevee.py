@@ -140,7 +140,7 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
                 fps: int, n_frames: int,
                 sim_s: float, mesh_s: float,
                 cube_center: tuple, cube_half: tuple,
-                samples: int = 16):
+                samples: int = 16, material: str = "water"):
     sc = bpy.data.scenes.get("fluidcube_render") or bpy.data.scenes.new("fluidcube_render")
     bpy.context.window.scene = sc
     for o in list(sc.objects):
@@ -269,17 +269,23 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             fbsdf.inputs["Base Color"].default_value = (*fluid_color, 1.0)
             nt.nodes.remove(mix)
             nt.nodes.remove(attr)
-        # Per-fluid look: honey is glossy + transmissive, oil is half-glossy,
-        # water is highly transmissive.
-        if label.lower() == "water":
-            fbsdf.inputs["Roughness"].default_value = 0.05
-            trans = 0.0  # TEMP for B16.2 visibility eval
-        elif label.lower() == "oil":
+        # Per-fluid look — FU-032: keyed on the EXPLICIT `material` arg,
+        # never on the overlay label. Pre-FU-032 this if/else keyed on
+        # `label`, with a honey catch-all `else` — any custom label (the
+        # CLI default is "gpufluid"!) silently rendered honey
+        # (Transmission 0.6), which is near-BLACK under the headless
+        # Eevee preset (SSR/refraction off). main() resolves the
+        # precedence: --material wins; else legacy label inference; else
+        # water.
+        if material == "oil":
             fbsdf.inputs["Roughness"].default_value = 0.15
             trans = 0.4
-        else:  # honey
+        elif material == "honey":
             fbsdf.inputs["Roughness"].default_value = 0.20
             trans = 0.6
+        else:  # water (the honest default — bright diffuse, trans 0)
+            fbsdf.inputs["Roughness"].default_value = 0.05
+            trans = 0.0  # TEMP for B16.2 visibility eval
         if "Transmission Weight" in fbsdf.inputs:
             fbsdf.inputs["Transmission Weight"].default_value = trans
         elif "Transmission" in fbsdf.inputs:
@@ -366,7 +372,16 @@ def main():
                     help="Path to the scene TOML — read for obstacle geometry")
     ap.add_argument("--out", required=True)
     ap.add_argument("--label", required=True,
-                    help="Water / Oil / Honey — drives fluid material + overlay text")
+                    help="Overlay text drawn into each frame. Legacy: a "
+                         "label of water/oil/honey ALSO infers --material "
+                         "when that flag is absent (step30-32 demo flows); "
+                         "any other label no longer touches the shader "
+                         "(FU-032 — it used to fall through to honey).")
+    ap.add_argument("--material", choices=["water", "oil", "honey"],
+                    default=None,
+                    help="Fluid material preset. Precedence (FU-032): this "
+                         "flag wins; else inferred from --label when the "
+                         "label IS one of water/oil/honey; else water.")
     ap.add_argument("--color", nargs=3, type=float, required=True,
                     metavar=("R", "G", "B"),
                     help="Fluid colour (RGB in [0,1])")
@@ -408,11 +423,18 @@ def main():
           f"sim={sim_s:.1f}s mesh={mesh_s:.1f}s  "
           f"cube={cube_center} half={cube_half}  frames={n_frames} samples={args.samples}")
 
+    # FU-032 precedence: explicit --material > legacy label inference
+    # (back-compat for the step30-32 demo flows where the label WAS the
+    # material) > water. The old behaviour fell through to HONEY for any
+    # custom label — near-black with the headless Eevee preset.
+    material = args.material or (
+        args.label.lower()
+        if args.label.lower() in ("water", "oil", "honey") else "water")
     sc, surf, sim_time_text = build_scene(
         cache, args.label, tuple(args.color),
         args.fps, n_frames, sim_s, mesh_s,
         cube_center, cube_half,
-        samples=args.samples,
+        samples=args.samples, material=material,
     )
     loader = FrameLoader(cache, surf, sim_time_text, args.fps)
     bpy.app.handlers.frame_change_pre.clear()

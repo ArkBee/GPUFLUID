@@ -195,6 +195,73 @@ def test_label_passed_through():
     assert argv[argv.index("--label") + 1] == "Honey"
 
 
+# ─── FU-032: explicit material passthrough ────────────────────────────────
+
+def test_material_passed_through_when_set():
+    """FU-032: payload material must reach the renderer as --material."""
+    argv = _headless_render.build_renderer_argv(
+        _base_payload(material="water"))
+    assert "--material" in argv
+    assert argv[argv.index("--material") + 1] == "water"
+
+
+def test_material_omitted_when_unset():
+    """FU-032: absent/None material = legacy label inference downstream —
+    the flag must NOT be emitted (old payloads stay byte-identical)."""
+    argv = _headless_render.build_renderer_argv(_base_payload())
+    assert "--material" not in argv
+    argv = _headless_render.build_renderer_argv(_base_payload(material=None))
+    assert "--material" not in argv
+
+
+# ─── FU-032: renderer-side contracts (§9.12 — comment/docstring stripped) ──
+
+def _renderer_code() -> str:
+    import ast
+    path = (Path(__file__).resolve().parents[1] / "examples"
+            / "render_fluid_on_cube_eevee.py")
+    text = path.read_text(encoding="utf-8")
+    doc_lines = set()
+    for node in ast.walk(ast.parse(text)):
+        body = getattr(node, "body", None)
+        if (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                              ast.AsyncFunctionDef))
+                and body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            doc_lines.update(range(body[0].lineno, body[0].end_lineno + 1))
+    return "\n".join(l for i, l in enumerate(text.splitlines(), 1)
+                     if i not in doc_lines
+                     and not l.lstrip().startswith("#"))
+
+
+def test_fu032_label_keyed_material_selector_gone():
+    """FU-032: the shader branch must key on the explicit `material`, not
+    on the label — the old label-keyed if/else fell through to HONEY for
+    any custom label (near-black under the headless Eevee preset)."""
+    code = _renderer_code()
+    assert 'if label.lower() == "water"' not in code, (
+        "FU-032 regressed: material selection is keyed on label again")
+    assert 'if material == "oil"' in code, (
+        "FU-032: shader branch must key on the material arg")
+    assert 'elif material == "honey"' in code, (
+        "FU-032: honey must require the EXPLICIT token, never a catch-all")
+
+
+def test_fu032_material_flag_and_precedence_exist():
+    """--material exists; precedence = explicit flag > legacy label
+    inference (water/oil/honey labels — keeps the step30-32 demo flows,
+    e.g. label='oil' without --material still renders oil) > water."""
+    code = _renderer_code()
+    assert '"--material"' in code
+    assert 'choices=["water", "oil", "honey"]' in code
+    assert "args.material or" in code, (
+        "FU-032: explicit --material must take precedence")
+    assert 'in ("water", "oil", "honey") else "water")' in code, (
+        "FU-032: legacy label inference must cover water/oil/honey and "
+        "fall back to WATER (not honey) for any other label")
+
+
 # ─── Stage 3: end-to-end shape sanity ─────────────────────────────────────
 
 def test_full_payload_roundtrips_to_renderer_argv():
