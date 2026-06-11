@@ -63,11 +63,12 @@ Smoke-скрипт: `tmp/audit_20260610_smoke.py` (обе сцены GREEN, 9 к
 - ✅ **FU-031** (закрыт 2026-06-11, `b22340c`) — one-time notice в load_post:
   только при `not is_property_set("solver")` И существующем кэше (свежие сцены
   молчат); латч на filepath.
-- 📝 **FU-032** — render bridge: `--label` ТАЙНО выбирает материал воды
-  (label≠"water" → honey-ветка с Transmission 0.6 → чёрная вода при выключенном
-  SSR/refraction headless-пресета), а шейдер предпочитает mesh-атрибут "Col"
-  флагу `--color`. Нужен явный `--material`/lighting-knob, развязанный с label.
-  Найдено bench-агентом 2026-06-11; bench обходит (`--label water` + autocontrast).
+- ✅ **FU-032** (закрыт 2026-06-11, `c65dd56`) — явный `--material
+  {water,oil,honey}` через renderer→CLI→headless-драйвер; precedence: флаг >
+  legacy-инференс по literal label > water (honey catch-all убит). Label —
+  только overlay-текст. Live-проверено: кастомный label без --material →
+  голубая вода (раньше — чёрный honey). Col-vs-color оказался не багом:
+  чернота шла целиком от honey-ветки.
 
 ---
 
