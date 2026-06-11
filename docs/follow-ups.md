@@ -54,9 +54,12 @@ Smoke-скрипт: `tmp/audit_20260610_smoke.py` (обе сцены GREEN, 9 к
 - 📝 **FU-029** — `adaptive_cfl` переиспользует FLIP-слайдер `cfl_factor`
   (max 2.0): значение >1.0 недо-substep'ит MPM stress waves без предупреждения
   (пока не упрётся в substep cap). Нужен отдельный MPM-диапазон или warning.
-- 📝 **FU-030** — SPHERE/MESH источники на некубическом домене скейлятся
-  скалярным `avg_inv` (теперь хотя бы с warning, audit-20260610). Честный фикс
-  = per-axis scale в `seeding.py` (для mesh — несимметричный transform).
+- ✅ **FU-030** (закрыт 2026-06-11, ветка fix/fu030-per-axis-sources) —
+  per-axis скейл SPHERE/MESH источников: схема `radii=[rx,ry,rz]` (ellipsoid)
+  + vec3 `scale` для mesh, scalar back-compat; addon эмитит per-axis из
+  inv_size, anisotropy-warning снят. GPU-тест: world-сфера на домене 4×4×2
+  round-trip'ится per-axis. Коммиты `94651c5` (addon) + `e0c216f` (CLI).
+  21 новый тест, suite 615 green.
 - 📝 **FU-031** — дефолт солвера flip→mpm (FU-017): старые .blend с нетронутым
   Solver молча перебейкаются MPM. Рассмотреть one-time INFO при load_post.
 
