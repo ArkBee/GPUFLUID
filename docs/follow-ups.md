@@ -47,21 +47,27 @@ Smoke-скрипт: `tmp/audit_20260610_smoke.py` (обе сцены GREEN, 9 к
 
 Новые отложенные:
 
-- 📝 **FU-028** — outflow despawn проверяется раз на raw-step ПОСЛЕ всех
-  substep'ов: быстрая частица может проскочить тонкий drain-box между
-  проверками (tunneling). Фикс = drain-check в substep-цикле; оценить цену.
-  `src/gpufluid/sim/mpm/solver.py` + `outflow.py`.
-- 📝 **FU-029** — `adaptive_cfl` переиспользует FLIP-слайдер `cfl_factor`
-  (max 2.0): значение >1.0 недо-substep'ит MPM stress waves без предупреждения
-  (пока не упрётся в substep cap). Нужен отдельный MPM-диапазон или warning.
+- ✅ **FU-028** (закрыт 2026-06-11, `5b64777`) — drain-check теперь в
+  substep-цикле (`_apply_outflows` после каждого substep'а), окно осталось
+  raw-step-indexed; туннелирование доказано тестом (старая проверка пропускает,
+  новая ловит). §9.5-обоснование цены inline.
+- ✅ **FU-029** (закрыт 2026-06-11, `5b64777` + `b22340c`) — one-time warning
+  в `_cfl_substeps` при factor >1.0 (не клампим) + alert-строка в панели и
+  MPM-guidance в description слайдера.
 - ✅ **FU-030** (закрыт 2026-06-11, ветка fix/fu030-per-axis-sources) —
   per-axis скейл SPHERE/MESH источников: схема `radii=[rx,ry,rz]` (ellipsoid)
   + vec3 `scale` для mesh, scalar back-compat; addon эмитит per-axis из
   inv_size, anisotropy-warning снят. GPU-тест: world-сфера на домене 4×4×2
   round-trip'ится per-axis. Коммиты `94651c5` (addon) + `e0c216f` (CLI).
   21 новый тест, suite 615 green.
-- 📝 **FU-031** — дефолт солвера flip→mpm (FU-017): старые .blend с нетронутым
-  Solver молча перебейкаются MPM. Рассмотреть one-time INFO при load_post.
+- ✅ **FU-031** (закрыт 2026-06-11, `b22340c`) — one-time notice в load_post:
+  только при `not is_property_set("solver")` И существующем кэше (свежие сцены
+  молчат); латч на filepath.
+- 📝 **FU-032** — render bridge: `--label` ТАЙНО выбирает материал воды
+  (label≠"water" → honey-ветка с Transmission 0.6 → чёрная вода при выключенном
+  SSR/refraction headless-пресета), а шейдер предпочитает mesh-атрибут "Col"
+  флагу `--color`. Нужен явный `--material`/lighting-knob, развязанный с label.
+  Найдено bench-агентом 2026-06-11; bench обходит (`--label water` + autocontrast).
 
 ---
 
