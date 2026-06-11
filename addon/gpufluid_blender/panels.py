@@ -86,6 +86,16 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
         if d.use_cfl:
             sub.prop(d, "cfl_factor")
             sub.prop(d, "cfl_max_substeps")
+            # FU-029: MPM stress waves travel faster than the advection CFL
+            # accounts for — cfl_factor > 1.0 under-substeps them (possible
+            # divergence/aliasing at rigid contacts). Honest UI: alert row
+            # only; the value is NOT clamped (back-compat with saved scenes).
+            if d.solver == "mpm" and d.cfl_factor > 1.0:
+                warn = sub.row()
+                warn.alert = True
+                warn.label(icon="ERROR",
+                           text="CFL > 1.0 under-substeps MPM stress waves "
+                                "— keep <= 1.0 for stable bakes")
         # Surface tension (B1.1)
         st = box.box()
         st.label(text="Surface Tension (S2.14)")

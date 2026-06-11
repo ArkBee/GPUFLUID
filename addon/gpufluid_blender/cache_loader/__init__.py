@@ -704,6 +704,64 @@ def _on_load_post(_dummy):
             _addon_logger.warning(
                 "cache_loader: load_post auto-reattach failed for '%s': %s",
                 obj.name, exc)
+    # FU-031: one-time notice when this file predates the FU-017 solver
+    # default flip→mpm. Event-driven (load_post), O(objects) — §9.5 OK.
+    _msg = _fu031_migration_notice(bpy.data.objects, bpy.data.filepath)
+    if _msg:
+        # warning level on purpose: the addon logger ships a NullHandler,
+        # and warning is the established level for load_post user-visible
+        # signals (round-28 LRU-cap notice above uses it too).
+        _addon_logger.warning(_msg)
+
+
+# FU-031: once-per-file latch (module-level). Keyed by filepath so a
+# revert/re-open of the SAME file within a session doesn't repeat the
+# notice, but each distinct legacy file still gets one.
+_FU031_NOTICE_DONE: set = set()
+
+
+def _fu031_migration_notice(objects, filepath):
+    """FU-031: build the flip→mpm migration notice, or None.
+
+    .blend files saved before FU-017 (solver default was 'flip') where
+    the user NEVER touched Solver now silently re-bake with MPM. Flag
+    domains where the solver property is still AT DEFAULT
+    (``is_property_set("solver") == False``) AND there is evidence of a
+    previous bake (cache_dir set and exists on disk). A fresh scene also
+    has the property unset — but with no bake cache there is nothing to
+    "reproduce", MPM is simply the correct default, so it stays silent.
+
+    Pure-ish (operates on the passed iterable; touches the disk for the
+    cache-dir evidence) so it is unit-testable with stub objects.
+    Returns the message ONCE per filepath per session; None otherwise.
+    """
+    key = filepath or "<unsaved>"
+    if key in _FU031_NOTICE_DONE:
+        return None
+    legacy = []
+    for o in objects:
+        d = getattr(o, "gpufluid_domain", None)
+        if d is None or not getattr(d, "is_domain", False):
+            continue
+        try:
+            if d.is_property_set("solver"):
+                continue  # user made an explicit choice — nothing changed
+        except (AttributeError, TypeError):
+            # dodge: exotic stubs / very old Blender without
+            # is_property_set — we can't tell default from explicit, so
+            # NEVER false-warn (silence beats crying wolf here).
+            continue
+        cd = str(getattr(d, "cache_dir", "") or "").strip()
+        if cd and os.path.isdir(bpy.path.abspath(cd)):
+            legacy.append(o.name)
+    if not legacy:
+        return None
+    _FU031_NOTICE_DONE.add(key)
+    return (
+        f"gpufluid: the default solver changed from FLIP to MPM (FU-017). "
+        f"Domain(s) {', '.join(sorted(legacy))} carry an existing bake "
+        f"cache but no explicit Solver choice — a re-bake now uses MPM. "
+        f"Set Solver=FLIP on the Domain to reproduce the old bakes.")
 
 
 @block("A8.6", "Cache import — frame_change/load_post handler wiring")

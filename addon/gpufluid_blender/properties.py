@@ -125,7 +125,16 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     )
     use_cfl: bpy.props.BoolProperty(name="CFL Substepping", default=False,
                                     description="Auto-split dt when particles move too fast")
-    cfl_factor: bpy.props.FloatProperty(name="CFL", default=0.5, min=0.05, max=2.0)
+    # FU-029: range deliberately unchanged (max=2.0 back-compat, no silent
+    # clamping) — the >1.0 MPM caveat is guidance only (description + a
+    # panel alert row in panels.py).
+    cfl_factor: bpy.props.FloatProperty(
+        name="CFL", default=0.5, min=0.05, max=2.0,
+        description="Courant factor for adaptive substepping. "
+                    "MPM note (FU-029): values > 1.0 under-substep stress "
+                    "waves — the elastic wave speed exceeds the advection "
+                    "CFL, so the bake may diverge or alias at rigid "
+                    "contacts; keep <= 1.0 for MPM (0.5 default is safe)")
     cfl_max_substeps: bpy.props.IntProperty(name="Max Substeps / Frame", default=16, min=1, max=128)
 
     # meshing
