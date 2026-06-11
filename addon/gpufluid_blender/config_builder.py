@@ -118,7 +118,16 @@ def build_toml(scene_dict: SceneDict) -> str:
             prefix_lines.append('type = "mesh"')
             esc = f["path"].replace("\\", "\\\\").replace('"', '\\"')
             prefix_lines.append(f'path = "{esc}"')
-            prefix_lines.append(f"scale = {float(f.get('scale', 1.0)):g}")
+            # FU-030: `scale` may be a scalar (legacy uniform) OR a vec3
+            # (per-axis, exact on non-cubic domains — what collect_scene
+            # now emits). Both forms are in the CLI schema; emit whichever
+            # the dict carries so the writer can't drop the per-axis form
+            # (round-59 class: writer drops what collect_scene emits).
+            sc = f.get("scale", 1.0)
+            if isinstance(sc, (list, tuple)):
+                prefix_lines.append(f"scale = {_fmt_vec3(sc)}")
+            else:
+                prefix_lines.append(f"scale = {float(sc):g}")
             prefix_lines.append(f"translate = {_fmt_vec3(f.get('translate', [0,0,0]))}")
         elif f.get("kind") == "sphere":
             # audit-20260610: S2.17.10 taught collect_scene to emit sphere
@@ -127,7 +136,13 @@ def build_toml(scene_dict: SceneDict) -> str:
             # drops what collect_scene emits; caught by the headless smoke).
             prefix_lines.append('type = "sphere"')
             prefix_lines.append(f"center = {_fmt_vec3(f['center'])}")
-            prefix_lines.append(f"radius = {float(f['radius']):g}")
+            # FU-030: per-axis `radii = [rx, ry, rz]` preferred (exact on
+            # non-cubic domains); scalar `radius` kept for back-compat
+            # dicts/hand-written TOMLs. Exactly one of the two is emitted.
+            if f.get("radii") is not None:
+                prefix_lines.append(f"radii = {_fmt_vec3(f['radii'])}")
+            else:
+                prefix_lines.append(f"radius = {float(f['radius']):g}")
         else:
             prefix_lines.append('type = "box"')
             prefix_lines.append(f"lo = {_fmt_vec3(f['lo'])}")

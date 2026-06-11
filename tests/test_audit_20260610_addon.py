@@ -235,25 +235,38 @@ def test_legacy_fill_mesh_promotion_no_crash(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Fix 5 — SPHERE/MESH sources warn on non-cubic domains (§9.6 vs obstacles)
+# Fix 5 — was: SPHERE/MESH sources warn on non-cubic domains.
+# FU-030 superseded the warning: sources now emit EXACT per-axis
+# radii / vec3 scale, so there is nothing to warn about. These two tests
+# flipped from "must warn" to "must emit per-axis + must NOT warn" —
+# they remain the regression guard for the same underlying defect
+# (silent scalar-averaged scaling on non-cubic domains). The deep
+# numeric checks live in tests/test_fu030_addon_emit.py.
 # ---------------------------------------------------------------------------
 
-def test_sphere_source_warns_on_noncubic_domain(tmp_path):
+def test_sphere_source_per_axis_on_noncubic_domain(tmp_path):
     mods = _load_addon()
-    _, _, _, warnings = _collect(mods, tmp_path, dom_hi=(2.0, 1.0, 1.0),
-                                 source_type="SPHERE")
-    assert any("SPHERE" in w and "non-cubic" in w for w in warnings), \
-        ("audit-20260610 fix-5 regressed: SPHERE fluid source on a "
-         "non-cubic domain must warn (obstacles do; sources drifted §9.6)")
+    scene_dict, _, _, warnings = _collect(
+        mods, tmp_path, dom_hi=(2.0, 1.0, 1.0), source_type="SPHERE")
+    entry = scene_dict["fluids"][0]
+    assert "radii" in entry and "radius" not in entry, \
+        ("FU-030 regressed: SPHERE source must emit per-axis radii "
+         "(scalar radius is back-compat input only)")
+    assert not any("non-cubic" in w for w in warnings), \
+        "FU-030: per-axis radii are exact — the anisotropy warning must be gone"
 
 
-def test_mesh_source_warns_on_noncubic_domain(tmp_path):
+def test_mesh_source_per_axis_on_noncubic_domain(tmp_path):
     mods = _load_addon()
-    _, _, _, warnings = _collect(mods, tmp_path, dom_hi=(2.0, 1.0, 1.0),
-                                 source_type="MESH", exported=[])
-    assert any("MESH" in w and "non-cubic" in w for w in warnings), \
-        ("audit-20260610 fix-5 regressed: MESH fluid source on a non-cubic "
-         "domain must warn about uniform single-scalar scaling")
+    scene_dict, _, _, warnings = _collect(
+        mods, tmp_path, dom_hi=(2.0, 1.0, 1.0),
+        source_type="MESH", exported=[])
+    entry = scene_dict["fluids"][0]
+    assert isinstance(entry["scale"], tuple) and len(entry["scale"]) == 3, \
+        ("FU-030 regressed: MESH source must emit vec3 per-axis scale "
+         "(scalar avg_inv squashed the mesh on non-cubic domains)")
+    assert not any("non-cubic" in w for w in warnings), \
+        "FU-030: per-axis scale is exact — the anisotropy warning must be gone"
 
 
 def test_no_anisotropy_warning_on_cubic_domain(tmp_path):

@@ -94,8 +94,9 @@ def collect_scene(context, domain_obj):
         if w:
             warnings.append(w)
 
-    # S2.17.10: avg inverse domain size for uniform (sphere/mesh) sim scaling.
-    avg_inv = (inv_size[0] + inv_size[1] + inv_size[2]) / 3.0
+    # (FU-030: the S2.17.10 `avg_inv` that lived here is gone — fluid
+    # sources now use per-axis inv_size; obstacles compute their own
+    # avg_inv inside the obstacle loop where uniform shapes still need it.)
     # Round-53: hoist cache_dir once — the obstacle MESH branch and the
     # round-53 BBOX→MESH auto-promote need it before any obstacle is
     # written. Idempotent makedirs.
@@ -123,40 +124,36 @@ def collect_scene(context, domain_obj):
         if stype == "SPHERE":
             centre_w = ((flow[0] + fhiw[0]) * 0.5, (flow[1] + fhiw[1]) * 0.5,
                         (flow[2] + fhiw[2]) * 0.5)
-            r_w = max((fhiw[0] - flow[0]), (fhiw[1] - flow[1]),
-                      (fhiw[2] - flow[2])) * 0.5
+            # FU-030: per-axis radii (world half-extent per axis × that
+            # axis's inv_size) — exact on non-cubic domains. The previous
+            # scalar `radius = max(half_extents) * avg_inv` only matched the
+            # visible sphere on a ~cubic domain (audit-20260610 added a
+            # warning for that; the warning is now obsolete and removed —
+            # the CLI schema carries `radii = [rx, ry, rz]`, scalar `radius`
+            # stays as back-compat for hand-written TOMLs only).
             entry = {"kind": "sphere", "center": tuple(to_sim(centre_w)),
-                     "radius": float(r_w * avg_inv), "ppc": int(fprops.ppc)}
-            # audit-20260610 (§9.6): SPHERE/CYL/MESH obstacles all warn when
-            # their scalar avg-radius is used on a non-cubic domain — fluid
-            # sources carried the SAME approximation silently. Mirror the
-            # obstacle wording so the seeded ball mismatch isn't a surprise.
-            if max(inv_size) / min(inv_size) > 1.05:
-                warnings.append(
-                    f"fluid source '{fobj.name}' is a SPHERE on a non-cubic "
-                    f"domain — its radius is averaged across axes, so the "
-                    f"seeded ball won't match the visible sphere. Make the "
-                    f"domain cubic for an exact fit.")
+                     "radii": tuple(
+                         float((fhiw[i] - flow[i]) * 0.5 * inv_size[i])
+                         for i in range(3)),
+                     "ppc": int(fprops.ppc)}
         elif stype == "MESH":
             mesh_path = os.path.join(
                 cache_dir, f"fluid_{_safe_obj_name(fobj.name)}.obj")
             _export_obj(fobj, mesh_path)
+            # FU-030: per-axis scale/translate. The world→sim map is
+            # sim[i] = (v[i] - origin[i]) * inv_size[i]
+            #        = v[i]*inv_size[i] + (-origin[i]*inv_size[i]),
+            # so scale = inv_size (vec3) and translate = -origin*inv_size
+            # PER AXIS — exact on non-cubic domains. The previous uniform
+            # avg_inv squashed/offset the mesh on the short axis
+            # (audit-20260610 warned about it; warning now obsolete and
+            # removed — schema accepts scale as scalar OR [sx, sy, sz]).
             entry = {"kind": "mesh", "path": mesh_path,
-                     "scale": float(avg_inv),
-                     "translate": (-origin.x * avg_inv, -origin.y * avg_inv,
-                                   -origin.z * avg_inv),
+                     "scale": tuple(float(s) for s in inv_size),
+                     "translate": (-origin.x * inv_size[0],
+                                   -origin.y * inv_size[1],
+                                   -origin.z * inv_size[2]),
                      "ppc": int(fprops.ppc)}
-            # audit-20260610 (§9.6): mirror of the FU-019 MESH-obstacle
-            # warning — `scale` is a single scalar, so on a non-cubic domain
-            # the source mesh is uniformly scaled into a per-axis sim space:
-            # the seeded fluid is squashed/offset on the short domain axis.
-            if max(inv_size) / min(inv_size) > 1.05:
-                warnings.append(
-                    f"fluid source '{fobj.name}' is a MESH on a non-cubic "
-                    f"domain — the mesh is scaled uniformly (single-scalar "
-                    f"limitation), so the seeded fluid won't match the "
-                    f"visible mesh. Make the domain cubic for an exact fit "
-                    f"(per-axis mesh scaling is a known follow-up).")
         else:  # BBOX
             entry = {"kind": "box", "lo": tuple(flo_sim), "hi": tuple(fhi_sim),
                      "ppc": int(fprops.ppc)}
