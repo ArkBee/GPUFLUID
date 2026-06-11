@@ -155,14 +155,19 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         n_z = max(20, int((z_hi - z_lo) / scene.dx))
         column = make_column((cx, cy), half, z_lo, z_hi, n_xy, n_z)
     elif isinstance(f0, FluidSphereCfg):
-        column = seed_sphere(f0.center, f0.radius, scene.dx)
+        # FU-030: per-axis radii (ellipsoid in sim space) when the addon /
+        # TOML provides them; scalar radius otherwise (back-compat).
+        column = seed_sphere(f0.center, f0.radius, scene.dx, radii=f0.radii)
+        r_desc = (f"radii={tuple(round(float(r), 4) for r in f0.radii)}"
+                  if f0.radii is not None else f"r={f0.radius}")
         if column.shape[0] == 0:
             # audit-20260610: mirror the mesh branch's clean rc=2 exit.
             # Pre-fix a degenerate sphere (radius <= 0) fell through to
             # MpmSolver and died with a raw ValueError traceback.
-            print(f"[mpm] fluid sphere source r={f0.radius} "
+            print(f"[mpm] fluid sphere source {r_desc} "
                   f"@ {tuple(round(c, 3) for c in f0.center)} seeded 0 "
-                  f"particles (radius must be > 0)", file=sys.stderr)
+                  f"particles (radius/radii must all be > 0)",
+                  file=sys.stderr)
             return 2
         # dodge: sphere seeds bypass the addon's box-path eps clamp; points
         # outside [0,1]^3 are slip-flattened onto the walls at the first
@@ -171,8 +176,13 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         # addon applies to box sources (audit-20260610).
         column = clamp_to_unit_box(column, 1.5 * scene.dx)
         cx, cy = float(f0.center[0]), float(f0.center[1])
-        half = max(0.005, float(f0.radius))
-        print(f"[mpm] fluid source: sphere r={f0.radius} "
+        # Tap zone XY half-extent: cover the source footprint — max of the
+        # per-axis xy radii for an ellipsoid, the radius for a sphere.
+        if f0.radii is not None:
+            half = max(0.005, float(max(f0.radii[0], f0.radii[1])))
+        else:
+            half = max(0.005, float(f0.radius))
+        print(f"[mpm] fluid source: sphere {r_desc} "
               f"@ {tuple(round(c,3) for c in f0.center)} -> {column.shape[0]} particles")
     elif isinstance(f0, FluidMeshCfg):
         mp = f0.path
@@ -187,8 +197,9 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             print(f"[mpm] fluid mesh source '{mp}' seeded 0 particles — "
                   f"either the mesh is not watertight/degenerate, OR the "
                   f"source lies outside [0,1]^3 after scale/translate "
-                  f"(non-cubic domains scale mesh sources uniformly, which "
-                  f"can push them out of the domain; check the transform)",
+                  f"(a uniform scalar scale on a non-cubic domain can push "
+                  f"it out of the domain; use per-axis "
+                  f"scale = [sx, sy, sz], FU-030)",
                   file=sys.stderr)
             return 2
         # dodge: same OOB-seed clamp as the sphere branch — mesh sources

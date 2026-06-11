@@ -63,10 +63,27 @@ def clamp_to_unit_box(pts: np.ndarray, eps: float) -> np.ndarray:
     return np.clip(pts, eps, 1.0 - eps).astype(np.float32, copy=False)
 
 
-def seed_sphere(center: Vec3, radius: float, spacing: float) -> np.ndarray:
-    """Fill a sphere by grid-sampling its bounding box and keeping points
-    within ``radius`` of ``center``."""
+def seed_sphere(center: Vec3, radius: float, spacing: float,
+                radii: Optional[Vec3] = None) -> np.ndarray:
+    """Fill a sphere (or, FU-030, an axis-aligned ellipsoid) by grid-sampling
+    its bounding box and keeping points inside the surface.
+
+    ``radii`` (rx, ry, rz), when given, wins over the scalar ``radius`` — a
+    world-space sphere on a non-cubic domain normalises to an ellipsoid in
+    the solver's per-axis [0,1]³ space, so per-axis radii are what the addon
+    emits there. The scalar path is byte-identical to pre-FU-030. Grid
+    spacing is uniform per axis (same density as the box/cube path); any
+    non-positive radius yields an empty cloud (caller guards 0-particle).
+    """
     c = np.asarray(center, dtype=np.float64)
+    if radii is not None:
+        r3 = np.asarray(radii, dtype=np.float64)
+        if np.any(r3 <= 0.0):
+            return np.empty((0, 3), dtype=np.float32)
+        pts = _grid_points(c - r3, c + r3, spacing)
+        # Ellipsoid inside-test: sum((p-c)_i / r_i)^2 <= 1.
+        keep = (((pts.astype(np.float64) - c) / r3) ** 2).sum(axis=1) <= 1.0
+        return pts[keep]
     r = float(radius)
     pts = _grid_points(c - r, c + r, spacing)
     keep = np.linalg.norm(pts.astype(np.float64) - c, axis=1) <= r
@@ -74,16 +91,21 @@ def seed_sphere(center: Vec3, radius: float, spacing: float) -> np.ndarray:
 
 
 def seed_mesh(mesh_path: str, spacing: float,
-              scale: float = 1.0,
+              scale: "float | Vec3" = 1.0,
               translate: Vec3 = (0.0, 0.0, 0.0),
               rotate_deg: Optional[Vec3] = None) -> np.ndarray:
     """Fill an arbitrary watertight mesh: load it, apply rotate→scale→translate
-    (the same order/convention as a MESH obstacle), then keep grid points that
-    fall INSIDE the mesh (trimesh ray-cast containment).
+    (the same order/convention as a MESH obstacle / mesh_sdf.py), then keep
+    grid points that fall INSIDE the mesh (trimesh ray-cast containment).
 
     ``scale``/``translate`` map the OBJ's own coordinates into the solver's
     normalised space (the addon exports the mesh in world metres and supplies
-    scale = avg inverse domain size + translate, exactly like a mesh obstacle).
+    the inverse domain size + translate, exactly like a mesh obstacle).
+    FU-030: ``scale`` accepts a scalar (uniform) or per-axis (sx, sy, sz) —
+    non-cubic domains normalise per axis, so a uniform scale would distort
+    the source. The transform ORDER stays rotate → scale → translate in both
+    cases (rotation happens in the mesh's own metric BEFORE the anisotropic
+    squeeze, matching mesh_sdf.py).
     """
     import trimesh  # local import: heavy, only needed for mesh sources
     mesh = trimesh.load(mesh_path, force="mesh", process=False)
@@ -91,8 +113,18 @@ def seed_mesh(mesh_path: str, spacing: float,
         from trimesh.transformations import euler_matrix
         rx, ry, rz = (float(np.deg2rad(a)) for a in rotate_deg)
         mesh.apply_transform(euler_matrix(rx, ry, rz, "sxyz"))
-    if scale != 1.0:
-        mesh.apply_scale(float(scale))
+    sc = np.asarray(scale, dtype=np.float64).ravel()
+    if sc.size == 1:
+        if float(sc[0]) != 1.0:
+            mesh.apply_scale(float(sc[0]))
+    elif sc.size == 3:
+        if np.any(sc != 1.0):
+            # trimesh.apply_scale accepts a (3,) vector → anisotropic scale.
+            mesh.apply_scale(sc)
+    else:
+        raise ValueError(
+            f"seed_mesh: scale must be a scalar or 3-vector, got {scale!r} "
+            f"(FU-030)")
     if any(t != 0.0 for t in translate):
         mesh.apply_translation(np.asarray(translate, dtype=np.float64))
     lo, hi = mesh.bounds  # post-transform AABB

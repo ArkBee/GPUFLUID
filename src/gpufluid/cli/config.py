@@ -90,6 +90,11 @@ class FluidSphereCfg:
     type: Literal["sphere"] = "sphere"
     center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     radius: float = 0.1
+    # FU-030: optional per-axis radii (sim units) — a world-space sphere on a
+    # non-cubic domain is an ELLIPSOID in normalised [0,1]³ space (per-axis
+    # position normalisation). When set, `radii` wins over the scalar
+    # `radius`; the TOML parser rejects configs that set both.
+    radii: Optional[Tuple[float, float, float]] = None
     ppc: int = 8
     color: Optional[Tuple[float, float, float]] = None
     temperature: Optional[float] = None
@@ -99,7 +104,10 @@ class FluidSphereCfg:
 class FluidMeshCfg:
     type: Literal["mesh"] = "mesh"
     path: str = ""
-    scale: float = 1.0
+    # FU-030: scalar (uniform, back-compat) OR (sx, sy, sz) per-axis scale —
+    # needed because a non-cubic domain normalises world→sim per axis, so a
+    # uniform avg scale lands the mesh at the wrong shape/position.
+    scale: Union[float, Tuple[float, float, float]] = 1.0
     translate: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     rotate_deg: Optional[Tuple[float, float, float]] = None
     ppc: int = 8
@@ -468,19 +476,45 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
                 temperature=temperature,
             )
         if ftype == "sphere":
+            # FU-030: per-axis radii (ellipsoid in sim space). Exclusive with
+            # the scalar `radius` — both set is almost certainly an emitter
+            # bug (which one did the author mean?), so fail loudly.
+            if "radii" in fl and "radius" in fl:
+                raise BlockError(
+                    "C7.1",
+                    "fluid sphere: set either scalar 'radius' or per-axis "
+                    "'radii', not both (FU-030)")
+            radii = (
+                tuple(float(v) for v in _tuple(fl["radii"], 3, "fluid.radii"))
+                if "radii" in fl else None)
             return FluidSphereCfg(
                 type="sphere",
                 center=_tuple(fl.get("center", [0.5, 0.5, 0.5]), 3, "fluid.center"),
                 radius=float(fl.get("radius", 0.1)),
+                radii=radii,
                 ppc=int(fl.get("ppc", 8)),
                 color=color,
                 temperature=temperature,
             )
         if ftype == "mesh":
+            # FU-030: `scale` accepts a scalar (uniform, back-compat) or a
+            # 3-list (per-axis). Anything else (string, wrong length) fails
+            # loudly here rather than deep inside trimesh.
+            sc_raw = fl.get("scale", 1.0)
+            if isinstance(sc_raw, (list, tuple)):
+                mesh_scale: Union[float, Tuple[float, float, float]] = tuple(
+                    float(v) for v in _tuple(sc_raw, 3, "fluid.scale"))
+            elif isinstance(sc_raw, bool) or not isinstance(sc_raw, (int, float)):
+                raise BlockError(
+                    "C7.1",
+                    f"fluid.scale: expected number or list of 3, got "
+                    f"{sc_raw!r} (FU-030)")
+            else:
+                mesh_scale = float(sc_raw)
             return FluidMeshCfg(
                 type="mesh",
                 path=str(fl.get("path", "")),
-                scale=float(fl.get("scale", 1.0)),
+                scale=mesh_scale,
                 translate=_tuple(fl.get("translate", [0, 0, 0]), 3, "fluid.translate"),
                 rotate_deg=_tuple(fl["rotate_deg"], 3, "fluid.rotate_deg") if "rotate_deg" in fl else None,
                 ppc=int(fl.get("ppc", 8)),
