@@ -9,6 +9,8 @@ import stat
 import time
 import bpy
 
+from ._animation import _bbox_world
+
 try:
     from .._blocks import block
 except ImportError:
@@ -83,14 +85,60 @@ def subprocess_drain(proc, q):
 class GPUFLUID_OT_add_domain(bpy.types.Operator):
     bl_idname = "gpufluid.add_domain"
     bl_label = "Add gpufluid Domain"
-    bl_description = "Create a 1x1x1 empty cube as the simulation domain"
+    bl_description = ("Create the simulation domain Empty: sized to enclose "
+                      "the selected objects (+10% margin), or a 2 m cube "
+                      "resting on the floor when nothing is selected")
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        bpy.ops.object.empty_add(type="CUBE", radius=0.5, location=(0.5, 0.5, 0.5))
+        # §9.13 (live-MCP 2026-06-11): the old fixed 1×1×1 m Empty at
+        # (0.5, 0.5, 0.5) sat invisibly INSIDE Blender's default 2 m Cube
+        # with zero feedback — users baked a domain that contained none of
+        # their scene. New default: enclose the current selection (the
+        # thing the user is looking at) with ~10% margin; with no
+        # selection, a 2 m cube resting on z=0 at the 3D cursor.
+        # Capture the selection BEFORE empty_add (it replaces selection);
+        # exclude pre-existing domain Empties (they're frames, not content).
+        sel = [o for o in getattr(context, "selected_objects", []) or []
+               if not o.gpufluid_domain.is_domain]
+        if sel:
+            boxes = [_bbox_world(o) for o in sel]
+            lo = [min(b[0][i] for b in boxes) for i in range(3)]
+            hi = [max(b[1][i] for b in boxes) for i in range(3)]
+            size = [hi[i] - lo[i] for i in range(3)]
+            ref = max(max(size), 1e-3)
+            # dodge: a flat selection (plane: size_z == 0) would produce a
+            # zero-thickness domain that DomainTransform rejects — pad
+            # degenerate axes by 10% of the LARGEST extent instead.
+            pad = [0.10 * size[i] if size[i] > 1e-6 else 0.10 * ref
+                   for i in range(3)]
+            dom_lo = [lo[i] - pad[i] for i in range(3)]
+            dom_hi = [hi[i] + pad[i] for i in range(3)]
+        else:
+            cursor = getattr(getattr(context.scene, "cursor", None),
+                             "location", (0.0, 0.0, 0.0))
+            # 2 m cube RESTING ON the floor (z ∈ [0, 2]) — not centred on
+            # it — so default-gravity fluid has somewhere to fall.
+            dom_lo = [cursor[0] - 1.0, cursor[1] - 1.0, 0.0]
+            dom_hi = [cursor[0] + 1.0, cursor[1] + 1.0, 2.0]
+        centre = tuple((dom_lo[i] + dom_hi[i]) * 0.5 for i in range(3))
+        extent = tuple(dom_hi[i] - dom_lo[i] for i in range(3))
+
+        # Empty+scale semantics the TOML pipeline expects: _bbox_world
+        # reads empty_display_size (half-extent 0.5) × matrix_world scale,
+        # so world size == scale. Keep display size at 0.5, size via scale.
+        bpy.ops.object.empty_add(type="CUBE", radius=0.5, location=centre)
         obj = context.active_object
         obj.name = "gpufluid_Domain"
+        obj.scale = extent
+        # Draw the wireframe over scene geometry — the old domain was
+        # routinely hidden inside meshes it was supposed to contain.
+        obj.show_in_front = True
         obj.gpufluid_domain.is_domain = True
+        self.report({"INFO"},
+                    f"Domain '{obj.name}' created: {extent[0]:.2f}×"
+                    f"{extent[1]:.2f}×{extent[2]:.2f} m — fluids/obstacles "
+                    f"must be inside it")
         # default cache folder: next to the .blend if saved, otherwise temp.
         # NB: Blender 5.x extensions reject the "//" relative prefix on
         # StringProperty assignment until the file has been saved.
@@ -135,7 +183,25 @@ class GPUFLUID_OT_mark_fluid(bpy.types.Operator):
         return context.active_object is not None
 
     def execute(self, context):
-        _set_single_role(context.active_object, "is_fluid")
+        obj = context.active_object
+        _set_single_role(obj, "is_fluid")
+        # §9.13 / round-53 precedent (obstacle BBOX→MESH auto-promote):
+        # source_type=BBOX on a non-box mesh seeds a CUBE of water where
+        # the user sees a sphere/suzanne (live-MCP 2026-06-11: UV-sphere
+        # source produced a cube of fluid). Cheap box heuristic: exactly
+        # 8 vertices. Anything else auto-promotes to MESH so the visible
+        # shape is what gets filled. Only promotes from the BBOX default —
+        # an explicit SPHERE/MESH choice on a re-mark is left alone.
+        me = getattr(obj, "data", None)
+        n_verts = (len(me.vertices)
+                   if me is not None and hasattr(me, "vertices") else None)
+        if (obj.gpufluid_fluid.source_type == "BBOX"
+                and n_verts is not None and n_verts != 8):
+            obj.gpufluid_fluid.source_type = "MESH"
+            self.report({"INFO"},
+                        f"'{obj.name}' is not a box ({n_verts} verts) — "
+                        f"non-box source → shape will be filled exactly "
+                        f"(Source Shape=Mesh Volume)")
         return {"FINISHED"}
 
 

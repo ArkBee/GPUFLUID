@@ -182,6 +182,24 @@ def collect_scene(context, domain_obj):
         hx = hx_w * inv_size[0]
         hy = hy_w * inv_size[1]
         hz = hz_w * inv_size[2]
+        # §9.13 (live-MCP 2026-06-11): the OOTB flow marks Blender's default
+        # 2 m Cube as obstacle around a domain it completely engulfs — the
+        # solver then has ~no free volume, fluid freezes into nonsense
+        # plates, and every operator still reported plain FINISHED. Warn
+        # when this obstacle's sim-space bbox covers ≥90% of the domain
+        # volume (intersection with the [0,1]³ unit cube, so an obstacle
+        # bigger than the domain still reads as 100%, not >100%).
+        _olo_s = to_sim(olow)
+        _ohi_s = to_sim(ohiw)
+        _covered = 1.0
+        for _i in range(3):
+            _covered *= max(0.0, min(_ohi_s[_i], 1.0) - max(_olo_s[_i], 0.0))
+        if _covered >= 0.9:
+            warnings.append(
+                f"obstacle '{o.name}' covers ~the whole domain "
+                f"({_covered * 100.0:.0f}% of its volume) — fluid has "
+                f"nowhere to flow; did you mean a floor/container? Shrink "
+                f"the obstacle or enlarge the Domain.")
         # Uniform-radius shapes (sphere/cylinder) need a single scalar — use
         # the dominant axis after normalisation so the obstacle stays inside
         # the unit cube even when the domain is anisotropic.
