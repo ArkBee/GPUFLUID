@@ -14,6 +14,8 @@ type = "box"
 lo = [0.05, 0.05, 0.05]
 hi = [0.30, 0.85, 0.95]
 ppc = 8
+# Bright per-vertex color — see bench_dam_break.toml note.
+color = [0.35, 0.80, 1.00]
 
 # Full-depth (z) box step at mid-domain; crest at y = 0.40.
 [[obstacle]]

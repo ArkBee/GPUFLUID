@@ -26,6 +26,19 @@ Pipeline per scene:
   3. sheet     — PIL grid (preferred), else matplotlib, else a folder of
                  per-cell PNGs + printed paths (graceful degradation).
 
+Known limitations / upstream follow-ups in the prod render path
+(`gpufluid render` -> addon render_bridge + render_fluid_on_cube_eevee):
+  * `--label` silently doubles as the MATERIAL selector: any label other
+    than "water"/"oil" gets the honey material (Transmission 0.6) which
+    renders BLACK under the headless Eevee preset (SSR/refraction off).
+    Bench workaround: always pass --label water.
+  * Lighting is hardcoded dim (SUN 4.0, AREA 70, world 0.6) with no
+    light/world/exposure CLI knob — only --color and --samples reach
+    the scene. Bench compensation: bright default --color + per-tile
+    auto-levels/brightness normalisation in the PIL sheet (_tile_pop).
+The real fix is a material/lighting knob in the prod render bridge,
+decoupled from the overlay label.
+
 Exit code is non-zero if any selected scene fails to bake or render.
 """
 from __future__ import annotations
@@ -99,8 +112,18 @@ def render_keyframes(name: str, toml: Path, blender: str, samples: int) -> list[
     out_dir.mkdir(parents=True)
     cmd = [blender, "--background", "--python", str(RENDERER), "--",
            "--cache", str(cache), "--scene", str(toml),
-           "--out", str(out_dir), "--label", name,
-           "--color", "0.20", "0.50", "0.70",
+           # --label doubles as the MATERIAL selector in the renderer:
+           # anything other than "water"/"oil" takes the honey branch
+           # (Transmission 0.6), which renders BLACK because the headless
+           # Eevee preset disables SSR/refraction. Passing the scene name
+           # here made all bench water near-black. Always render as
+           # "water" (Transmission 0, bright diffuse); scene names are
+           # drawn on the contact sheet itself.
+           "--out", str(out_dir), "--label", "water",
+           # Bright cyan-blue: the renderer's hardcoded lighting is dim
+           # (see module docstring) — a "physically nice" dark water color
+           # renders near-black. Pop > realism for a regression sheet.
+           "--color", "0.35", "0.80", "1.00",
            "--fps", "24", "--samples", str(samples),
            "--test-frames", str(N_KEY)]
     t0 = time.time()
@@ -191,6 +214,24 @@ def build_contact_sheet(rows: dict[str, list[Path]], out: Path) -> str:
     return "folder"
 
 
+def _tile_pop(im):
+    """Per-tile auto-levels + brightness floor so near-black water (the
+    prod renderer's dim hardcoded lighting, see module docstring) becomes
+    judgeable at thumbnail size. autocontrast stretches the histogram;
+    the ImageEnhance pass then lifts tiles whose mean luminance is still
+    below a readable floor (dark frames stay relatively darker — we
+    normalise readability, not absolute exposure)."""
+    from PIL import ImageEnhance, ImageOps, ImageStat
+    # preserve_tone: per-channel stretch shifts hues (grey floor turned
+    # pink in testing) — hue drift is poison for a regression sheet.
+    im = ImageOps.autocontrast(im, cutoff=1, preserve_tone=True)
+    mean = sum(ImageStat.Stat(im.convert("L")).mean) or 1.0
+    floor = 90.0  # target mean luminance for a readable thumbnail
+    if mean < floor:
+        im = ImageEnhance.Brightness(im).enhance(min(floor / mean, 2.5))
+    return im
+
+
 def _sheet_pil(rows: dict[str, list[Path]], out: Path) -> str:
     from PIL import Image, ImageDraw
     cell_w, label_h = 360, 22
@@ -198,7 +239,7 @@ def _sheet_pil(rows: dict[str, list[Path]], out: Path) -> str:
     for scene, pngs in rows.items():
         imgs = []
         for p in pngs:
-            im = Image.open(p).convert("RGB")
+            im = _tile_pop(Image.open(p).convert("RGB"))
             im = im.resize((cell_w, max(1, round(im.height * cell_w / im.width))))
             imgs.append((p.stem, im))
         tiles[scene] = imgs

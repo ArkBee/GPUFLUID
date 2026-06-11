@@ -14,6 +14,10 @@ type = "box"
 lo = [0.05, 0.05, 0.05]
 hi = [0.35, 0.75, 0.95]
 ppc = 8
+# Bright per-vertex color: the headless renderer's material prefers the
+# mesh "Col" attribute over --color; without a colored source the fluid
+# renders near-black (contact-sheet readability fix, 2026-06-11).
+color = [0.35, 0.80, 1.00]
 
 [[obstacle]]
 type = "box"
