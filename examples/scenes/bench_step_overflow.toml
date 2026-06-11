@@ -1,0 +1,41 @@
+# Visual-regression bench scene 3/3: water column overflows a box weir/step.
+# Tall column on the left releases and pours OVER a full-width box step —
+# physically distinct from bench_dam_break (flow AROUND a pillar) and
+# bench_waterfall (continuous source): here a finite volume sheets over a
+# crest and forms a plunging nappe + downstream pool.
+#
+# Physics exercised: weir overflow, thin-sheet crest flow, plunge splash.
+
+[domain]
+resolution = [64, 64, 64]
+
+[fluid]
+type = "box"
+lo = [0.05, 0.05, 0.05]
+hi = [0.30, 0.85, 0.95]
+ppc = 8
+
+# Full-depth (z) box step at mid-domain; crest at y = 0.40.
+[[obstacle]]
+type = "box"
+center = [0.50, 0.20, 0.50]
+half_size = [0.08, 0.20, 0.50]
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+pressure_solver = "jacobi"
+flip_blend = 0.95
+gravity = -9.81
+frames = 72
+fps = 24
+
+[output]
+cache_dir = "../../tmp/bench/step_overflow"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2
+particles = true   # scatter fallback for visual_bench --skip-render

@@ -1,0 +1,40 @@
+# Visual-regression bench scene 1/3: dam-break collapse around a box pillar.
+# Derived from dam_break_128.toml (trimmed to 64^3 / 60 frames) +
+# dam_break_obstacle.toml's "flow around an obstacle" idea, but with a BOX
+# pillar because the headless renderer (render_fluid_on_cube_eevee.py)
+# only draws box obstacles.
+#
+# Physics exercised: gravity collapse, wave front impact, splash-around-pillar.
+
+[domain]
+resolution = [64, 64, 64]
+
+[fluid]
+type = "box"
+lo = [0.05, 0.05, 0.05]
+hi = [0.35, 0.75, 0.95]
+ppc = 8
+
+[[obstacle]]
+type = "box"
+center = [0.60, 0.15, 0.50]
+half_size = [0.06, 0.15, 0.06]
+
+[simulation]
+dt = 0.005
+pressure_iters = 60
+pressure_solver = "jacobi"
+flip_blend = 0.95
+gravity = -9.81
+frames = 60
+fps = 24
+
+[output]
+cache_dir = "../../tmp/bench/dam_break"
+mesh = true
+iso_level = 0.6
+smooth_passes = 2
+mesh_smooth_passes = 4
+mesh_smooth_method = "taubin"
+wall_margin_cells = 2
+particles = true   # scatter fallback for visual_bench --skip-render
