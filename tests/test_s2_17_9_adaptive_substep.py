@@ -100,6 +100,10 @@ def _spy_solver(adaptive, n_sub, saturated=False):
     s.mpm = SimpleNamespace(
         p2g2p=lambda *a, **k: counts.__setitem__("p2g2p", counts["p2g2p"] + 1))
     s._cfl_warned = False
+    # FU-028: the adaptive loop now drains per sub-step via the REAL
+    # _apply_outflows — give the spy an empty drain list so it no-ops
+    # (§9.7 mock fidelity: expose the surface production code touches).
+    s._outflow_params = []
     s._pre_step = lambda si: counts.__setitem__("pre", counts["pre"] + 1)
     s._post_step = lambda si: counts.__setitem__("post", counts["post"] + 1)
     s._apply_pushback = lambda: counts.__setitem__(

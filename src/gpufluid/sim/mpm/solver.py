@@ -472,6 +472,10 @@ class MpmSolver:
             ))
         # S2.17.9: one-shot guard so the CFL-saturation warning prints once.
         self._cfl_warned = False
+        # FU-029: one-shot guard for the cfl_factor>1.0 misuse warning
+        # (knob shared with FLIP whose slider allows 2.0; >1.0 silently
+        # under-substeps the MPM stress-wave bound).
+        self._cfl_factor_warned = False
         # S2.17.8: per-particle "drained" flag (1 = removed by an outflow,
         # never to be re-released by the inflow gate). Always allocated; stays
         # all-zero when there are no outflows, so the inflow gate behaves
@@ -533,17 +537,40 @@ class MpmSolver:
                   inputs=[self.mpm.mpm_state, *self._wall_lo, *self._wall_hi],
                   device=cfg.device)
 
-    def _post_step(self, step_index: int = 0) -> None:
+    def _apply_outflows(self, step_index: int) -> None:
+        """S2.17.8 drain launches. FU-028: also runs PER SUB-STEP in the
+        adaptive loop (was: once per raw step, after all sub-steps) — a fast
+        particle, the very reason n_sub > 1, could cross a THIN drain box
+        between two end-of-step checks and escape out the far side.
+
+        §9.5 hot-loop cost: one O(N) kernel launch per configured drain per
+        sub-step, each thread doing a selection check + frame-window compare
+        + AABB containment (early-exit, no atomics, no GPU→CPU sync). With
+        the default cap of 16 sub-steps and typical 1-2 drains that is ≤32
+        extra launches per raw step — the same order as the cube/wall
+        pushback launches already bracketing every sub-step, and far cheaper
+        than the p2g2p they accompany. This cannot live on an event hook:
+        "particle entered the drain" IS the per-sub-step advection event.
+
+        The frame window stays clocked in RAW steps: ``step_index`` is
+        constant across a raw step's sub-steps, so `[frame_start,
+        frame_end] * dump_every` gating is bit-identical to pre-FU-028.
+        """
         cfg = self.cfg
-        self._apply_pushback()
-        # S2.17.8: drain AFTER physics has moved particles this step, so a
-        # particle that crossed into the drain box this frame is caught before
-        # the next dump.
         for of in self._outflow_params:
             wp.launch(k_outflow_despawn, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state, int(step_index), *of,
                               self._despawned],
                       device=cfg.device)
+
+    def _post_step(self, step_index: int = 0) -> None:
+        """Per-raw-step tail for the NON-adaptive path: pushback, then drain
+        (S2.17.8: drain AFTER physics has moved particles this step, so a
+        particle that crossed into the drain box is caught before the next
+        dump). The adaptive path does NOT call this — its sub-step loop
+        already runs the same pair after every sub-step (FU-028)."""
+        self._apply_pushback()
+        self._apply_outflows(step_index)
 
     def _cfl_substeps(self) -> tuple[int, bool]:
         """S2.17.9: (n_substeps, saturated) for this frame from the CFL bound.
@@ -564,6 +591,22 @@ class MpmSolver:
         """
         cfg = self.cfg
         import math
+        # FU-029: `adaptive_cfl` reuses the [simulation] cfl_factor knob,
+        # whose FLIP-oriented UI slider allows up to 2.0. For the explicit
+        # MPM stress-wave bound here, factor > 1.0 means dt_sub exceeds the
+        # stability limit — silent under-substepping that surfaces as a
+        # late NaN/CUDA fault. Warn ONCE (latched), do NOT clamp: the
+        # configured value is honoured (user intent wins; clamping would
+        # silently change bake results).
+        if cfg.adaptive_cfl > 1.0 and not self._cfl_factor_warned:
+            self._cfl_factor_warned = True
+            print(f"[mpm] WARN: cfl_factor={cfg.adaptive_cfl:g} > 1.0 — the "
+                  f"MPM stress-wave CFL bound needs <= 1.0 (typical 0.5-0.6); "
+                  f"sub-steps will be too large and the bake may diverge "
+                  f"late. The value is honoured as configured — lower "
+                  f"cfl_factor to <= 1.0 to fix. (FU-029: this knob is "
+                  f"shared with FLIP, whose slider allows up to 2.0.)",
+                  file=sys.stderr)
         c_sound = math.sqrt(max(cfg.fluid.bulk_modulus, 0.0)
                             / max(cfg.fluid.density, 1e-9))
         vel = self.mpm.mpm_state.particle_v.numpy()
@@ -586,10 +629,14 @@ class MpmSolver:
         particles; if a fast particle tunnels through a cube/wall and isn't
         pushed back before the next sub-step's P2G, it lands outside the grid →
         out-of-bounds node index → CUDA illegal-access (error 700), NOT a clean
-        NaN. So the inner loop brackets each p2g2p with pushback. The inflow
-        gate + outflow drain stay frame-clocked (they key off step_index, which
-        is constant across the frame's sub-steps) and run once in
-        _pre_step/_post_step.
+        NaN. So the inner loop brackets each p2g2p with pushback.
+
+        FU-028: the outflow drain ALSO runs per sub-step (same tunnelling
+        argument, see _apply_outflows). Both drain and inflow gate stay
+        frame-window-clocked — they key off step_index, which is constant
+        across a raw step's sub-steps. The inflow gate runs once in
+        _pre_step (releasing twice within a step would be a no-op anyway:
+        the release branch is selection-guarded).
         """
         self._pre_step(step_index)
         cfg = self.cfg
@@ -607,11 +654,18 @@ class MpmSolver:
             for _ in range(n_sub):
                 self.mpm.p2g2p(step_index, sub_dt, device=cfg.device)
                 # Bracket each sub-step with the pushbacks so tunnelling
-                # particles are clamped before the next sub-step's P2G.
+                # particles are clamped before the next sub-step's P2G,
+                # then drain (FU-028: catch a fast particle inside a thin
+                # drain box BEFORE the next sub-step advects it out).
                 self._apply_pushback()
+                self._apply_outflows(step_index)
+            # No _post_step here: the loop tail already ran the identical
+            # pushback+drain pair after the final sub-step. Re-running it
+            # was the redundant idempotent double-launch flagged in
+            # audit-20260610 — dropped with FU-028.
         else:
             self.mpm.p2g2p(step_index, cfg.dt, device=cfg.device)
-        self._post_step(step_index)
+            self._post_step(step_index)
 
     # ── output -------------------------------------------------------
 
