@@ -719,71 +719,57 @@ class MpmSolver:
         out_frame = int(frame_index // max(1, self.cfg.dump_every))
         mask = (np.asarray(sel).ravel() == 0)
         sidecar_dir = out_dir.parent
-        # Round-24: pre-round-24 we wrote the entire attribute array
-        # (whole-particle, never mutated post-init) every frame —
-        # an MPM bake with 200k particles × 300 frames × 2 attrs
-        # produced ~120 MB of literally-identical data on disk.
-        # Now: write each sidecar once (when out_frame == 0 OR file
-        # absent — covers the case where someone restarts mid-bake)
-        # and mesh-pass reads frame 0 for every frame's lookup.
+        # Per-frame attribute sidecars (colour / temperature), masked to the
+        # SAME live set as the PLY (selection==0) so row indices align with
+        # read_points_ply downstream.
         #
-        # audit-20260610 — PRECISE dedup invariant (§9.11): the
-        # frame-0-only write is valid ONLY while the selection mask's
-        # row identity is a pure function of its row count. That holds
-        # for inflow-only bakes (selection flips 1→0 monotonically:
-        # the live count strictly grows, so equal count ⇒ identical
-        # mask). An S2.17.8 outflow BREAKS it: a drain flips arbitrary
-        # rows 0→1, so a later frame can return to an earlier live
-        # COUNT with a different row IDENTITY — the mesher's
-        # shape-equality fallback would then apply frame-0 attribute
-        # rows to the wrong particles (silently wrong vertex colours /
-        # temperatures). So: when any outflow is configured, write the
-        # per-frame snapshot unconditionally; keep the count-diff
-        # dedup only for drain-free bakes.
-        sel_identity_from_count = not self.cfg.outflows
+        # Round-24 wrote frame 0 once and let the mesher fall back to it for
+        # every frame, to dodge ~120 MB of identical data when the attribute
+        # array never mutates. That dedup was the source of TWO production
+        # bugs (§9.8 order-of-operations):
+        #   - audit-20260610: an outflow flips selection row-IDENTITY without
+        #     changing row COUNT, so the count-equality fallback fed frame-0
+        #     attribute rows to the wrong particles.
+        #   - demo30 2026-06-13: the `if not target.exists()` skip meant a
+        #     RE-BAKE into an existing cache dir reused STALE sidecars from
+        #     the previous bake — the freshly-written PLYs then had a
+        #     different live count, the mesher's `loaded.shape[0] ==
+        #     pts.shape[0]` guard failed, and ALL per-vertex colour was
+        #     dropped (coloured inflow water rendered grey).
+        #
+        # Robust scheme: write the per-frame sidecar EVERY dump, ALWAYS
+        # overwriting, so it is byte-aligned with this bake's own PLY for
+        # this frame. The dedup is kept ONLY for the genuinely-static case
+        # (no inflows AND no outflows → selection never mutates, so frame 0
+        # is identical to every frame and the fallback is safe); there the
+        # disk-saving actually applies. For any inflow/outflow bake the live
+        # set changes per frame anyway, so per-frame writes were happening in
+        # practice regardless — we just make them correct and re-bake-safe.
+        # §9.11 dodge: the `not _attrs_static` write is unconditional (no
+        # existence check) on purpose — that check is exactly what let a
+        # stale sidecar from a prior bake survive.
+        attrs_static = not self.cfg.inflows and not self.cfg.outflows
+
+        def _write_sidecar(attr_arr, subdir: str) -> None:
+            d = sidecar_dir / subdir
+            d.mkdir(parents=True, exist_ok=True)
+            target = d / f"frame_{out_frame:04d}.npy"
+            cur = attr_arr.numpy().astype(np.float32)[mask]
+            if attrs_static:
+                # Static bake: selection never changes → one shared file,
+                # written once (mesher falls back to frame_0000.npy).
+                once = d / "frame_0000.npy"
+                if not once.exists():
+                    np.save(once, cur)
+            else:
+                # Dynamic bake: always (over)write this frame's own sidecar
+                # so it stays aligned with this frame's PLY, even on re-bake.
+                np.save(target, cur)
+
         if self.attr_color is not None:
-            colors_dir = sidecar_dir / "colors"
-            colors_dir.mkdir(parents=True, exist_ok=True)
-            target = colors_dir / f"frame_{out_frame:04d}.npy"
-            once = colors_dir / "frame_0000.npy"
-            if not once.exists():
-                cols = self.attr_color.numpy().astype(np.float32)
-                np.save(once, cols[mask])
-            if target != once and not target.exists():
-                # Per-frame snapshot: unconditional when a drain can
-                # mutate selection (see invariant above); otherwise
-                # only when the live count differs from frame 0.
-                try:
-                    cols = self.attr_color.numpy().astype(np.float32)
-                    cur = cols[mask]
-                    if not sel_identity_from_count:
-                        np.save(target, cur)
-                    else:
-                        base = np.load(once)
-                        if base.shape != cur.shape:
-                            np.save(target, cur)
-                except Exception:
-                    pass
+            _write_sidecar(self.attr_color, "colors")
         if self.attr_temperature is not None:
-            temps_dir = sidecar_dir / "temperatures"
-            temps_dir.mkdir(parents=True, exist_ok=True)
-            target = temps_dir / f"frame_{out_frame:04d}.npy"
-            once = temps_dir / "frame_0000.npy"
-            if not once.exists():
-                temps = self.attr_temperature.numpy().astype(np.float32)
-                np.save(once, temps[mask])
-            if target != once and not target.exists():
-                try:
-                    temps = self.attr_temperature.numpy().astype(np.float32)
-                    cur = temps[mask]
-                    if not sel_identity_from_count:
-                        np.save(target, cur)
-                    else:
-                        base = np.load(once)
-                        if base.shape != cur.shape:
-                            np.save(target, cur)
-                except Exception:
-                    pass
+            _write_sidecar(self.attr_temperature, "temperatures")
         return n_written
 
     # ── high-level entry point --------------------------------------

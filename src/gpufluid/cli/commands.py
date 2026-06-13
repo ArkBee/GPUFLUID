@@ -496,16 +496,14 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             # the regular colour sidecar.
             vc_u8 = None
             cols_np = None  # (P, 3) float32 in [0,1] for whichever source
-            # Round-24: sidecars de-duplicated — frame 0 written once;
-            # fall back to frame_0000.npy when the per-frame file is
-            # absent. audit-20260610: the solver now ALWAYS writes a
-            # per-frame sidecar when an outflow is configured (a drain
-            # mutates selection row-IDENTITY without necessarily
-            # changing the row COUNT, so the frame-0 fallback + the
-            # shape-equality check below would silently apply attribute
-            # rows to the wrong particles). The fallback is therefore
-            # only ever taken on drain-free bakes, where equal count
-            # implies an identical mask (inflow spawns are monotonic).
+            # Sidecar lookup: the solver writes a per-frame sidecar for
+            # every dumped frame on any inflow/outflow bake (aligned to that
+            # frame's own PLY, re-bake-safe — demo30 2026-06-13 fix). Only a
+            # fully-static bake (no inflow + no outflow) dedups to
+            # frame_0000.npy, where selection never mutates so the fallback
+            # is exact. The shape-equality guard below stays as a belt-and-
+            # braces check; with the fix it should now hold for every frame
+            # of a coloured inflow/outflow bake.
             if use_temp_color and v.shape[0] > 0:
                 temp_path = temps_dir / f"frame_{frame_idx:04d}.npy"
                 if not temp_path.exists():

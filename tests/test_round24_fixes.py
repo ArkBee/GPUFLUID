@@ -21,11 +21,13 @@ def _build_solver_with_attrs(tmp_path: Path):
     exercises the sidecar branch. Skips warp/h5py heavy __init__."""
     from gpufluid.sim.mpm.solver import MpmSolver
     sol = object.__new__(MpmSolver)
-    # audit-20260610: save_frame_ply now reads cfg.outflows (sidecar dedup
-    # is only valid for drain-free bakes); §9.7 mock fidelity — the spy must
-    # expose the full surface the production code touches. Empty tuple =
-    # drain-free, preserving the round-24 dedup semantics under test.
-    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20, outflows=())
+    # demo30 2026-06-13: save_frame_ply now reads cfg.inflows AND
+    # cfg.outflows (a bake is "static" — dedup-eligible — only when BOTH are
+    # empty, i.e. selection never mutates); §9.7 mock fidelity — the spy must
+    # expose the full surface. Both empty = static, preserving the round-24
+    # dedup semantics under test here.
+    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20,
+                              inflows=(), outflows=())
 
     n_part = 8
     pos = np.tile(np.array([[0.1, 0.2, 0.3]], dtype=np.float32), (n_part, 1))
@@ -63,11 +65,18 @@ def test_sidecar_skipped_on_unchanged_shape(tmp_path: Path):
 
 def test_sidecar_written_when_particle_count_changes(tmp_path: Path):
     """Round-24: if the live particle count drifts (mid-bake spawn /
-    death), a per-frame snapshot IS written so colours stay aligned."""
+    death), a per-frame snapshot IS written so colours stay aligned.
+
+    demo30 2026-06-13: a count change only happens on a DYNAMIC bake
+    (inflow or outflow present); a fully-static bake's count never moves.
+    So the spy now carries an inflow — under the new scheme a dynamic bake
+    writes its own per-frame sidecar every dump (re-bake-safe)."""
     from gpufluid.sim.mpm.solver import MpmSolver
     sol = object.__new__(MpmSolver)
-    # audit-20260610: outflows=() — see _build_solver_with_attrs (§9.7).
-    sol.cfg = SimpleNamespace(dump_every=5, n_frames=20, outflows=())
+    sol.cfg = SimpleNamespace(
+        dump_every=5, n_frames=20,
+        inflows=(SimpleNamespace(color=None, temperature=None),),
+        outflows=())
 
     state = {"count": 8}
     cols_full = np.tile(np.array([[0.5, 0.5, 0.5]], dtype=np.float32),

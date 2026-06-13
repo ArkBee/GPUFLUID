@@ -38,14 +38,17 @@ def _code(relpath: str) -> str:
 
 # ── Fix 1: sidecar/outflow alignment ────────────────────────────────────
 
-def _spy_sidecar_solver(outflows, sel_holder, colors, temps):
+def _spy_sidecar_solver(outflows, sel_holder, colors, temps, inflows=()):
     """Real MpmSolver instance with no GPU state (object.__new__), wired
     with attribute-strict stubs covering exactly the surface save_frame_ply
-    touches (§9.7 mock fidelity): cfg.dump_every/outflows, selection(),
-    positions(), attr_color.numpy(), attr_temperature.numpy()."""
+    touches (§9.7 mock fidelity): cfg.dump_every/inflows/outflows,
+    selection(), positions(), attr_color.numpy(), attr_temperature.numpy().
+
+    demo30 2026-06-13: a bake is dedup-eligible ("static") only when BOTH
+    inflows and outflows are empty; the spy must expose inflows too."""
     from gpufluid.sim.mpm.solver import MpmSolver
     s = object.__new__(MpmSolver)
-    s.cfg = SimpleNamespace(dump_every=1, outflows=outflows)
+    s.cfg = SimpleNamespace(dump_every=1, inflows=inflows, outflows=outflows)
     s.selection = lambda: np.asarray(sel_holder["sel"], dtype=int)
     s.positions = lambda: np.zeros(
         (len(sel_holder["sel"]), 3), dtype=np.float32)
@@ -102,13 +105,15 @@ def test_dedup_preserved_without_outflow(tmp_path):
 
 
 def test_dedup_still_snapshots_on_count_change_without_outflow(tmp_path):
-    """Drain-free bake where an inflow spawn grows the live count: the
-    pre-existing count-diff snapshot must keep working (regression net for
-    the round-24 behaviour the fix deliberately preserved)."""
+    """Inflow (no outflow) bake where a spawn grows the live count: a
+    per-frame snapshot carrying the CURRENT rows must be written. demo30
+    2026-06-13: an inflow alone makes the bake dynamic, so per-frame
+    sidecars are written every dump (re-bake-safe)."""
     colors = np.arange(18, dtype=np.float32).reshape(6, 3)
     holder = {"sel": [0, 0, 0, 0, 1, 1]}
     s = _spy_sidecar_solver(
-        outflows=(), sel_holder=holder, colors=colors, temps=None)
+        outflows=(), inflows=(SimpleNamespace(color=None, temperature=None),),
+        sel_holder=holder, colors=colors, temps=None)
     out_dir = tmp_path / "particles_raw"
     s.save_frame_ply(out_dir, 0)
     holder["sel"] = [0, 0, 0, 0, 0, 1]  # row 4 spawned -> count 4 -> 5
@@ -119,11 +124,14 @@ def test_dedup_still_snapshots_on_count_change_without_outflow(tmp_path):
 
 
 def test_solver_sidecar_invariant_contract():
-    """§9.12 grep: the dedup decision must key off cfg.outflows."""
+    """§9.12 grep: the dedup must be gated on a fully-static bake (no inflow
+    AND no outflow). demo30 2026-06-13 widened the trigger from
+    outflow-only to any selection-mutating source."""
     code = _code("src/gpufluid/sim/mpm/solver.py")
-    assert "sel_identity_from_count = not self.cfg.outflows" in code, (
-        "audit-20260610: sidecar dedup must be disabled whenever an "
-        "outflow can mutate selection identity")
+    assert "attrs_static = not self.cfg.inflows and not self.cfg.outflows" \
+        in code, (
+        "demo30: sidecar dedup must apply ONLY to a fully-static bake "
+        "(inflow OR outflow makes it dynamic -> per-frame sidecars)")
 
 
 # ── Fix 2: sphere source 0-particle clean exit ──────────────────────────
