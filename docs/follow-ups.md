@@ -35,10 +35,12 @@
   теперь есть), но defensive fallback всё равно сломан: меш без Col обязан
   краситься в `--color`, не в дефолтный серый. `render_fluid_on_cube_eevee.py`
   material Mix-node / `render_bridge.rebuild_surface_mesh`.
-- 📝 **FU-035** — камера рендерера жёстко зашита под старую cube-демку
-  (`cam.location=(2.5,-2.5,1.5)`→`(0,0,0.25)`, pivot `(-0.5,0,0)`). Любая сцена,
-  не подогнанная под эту позу, кадрируется криво (demo30 hero v1 вылез в угол).
-  Камера должна кадрировать bbox домена/кэша. `render_fluid_on_cube_eevee.py`.
+- ✅ **FU-035** (закрыт 2026-06-13) — камера авто-кадрирует весь домен [0,1]³
+  (8 углов через pivot-матрицу → bounding-sphere в лимитирующий half-FOV с
+  запасом 1.18), сохраняя канонический 3/4-ракурс. Высокий водопад больше не
+  обрезается. Чистая геометрия вынесена в `examples/_render_camera.py`
+  (`frame_pose_for_box`, без bpy) → 5 unit-тестов `test_fu035_camera_framing.py`
+  (инвариант «каждый угол внутри FOV-конуса»). Live-verified.
 
 ---
 

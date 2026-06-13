@@ -45,7 +45,9 @@ import numpy as np
 # Make gpufluid + the addon importable when running inside Blender. The
 # example lives next to addon/ and src/, so walk up to the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-for p in (_REPO_ROOT / "src", _REPO_ROOT / "addon"):
+# Include examples/ (this script's own dir) so sibling `_render_camera`
+# resolves whether run via the headless driver OR `blender --python` directly.
+for p in (_REPO_ROOT / "src", _REPO_ROOT / "addon", _REPO_ROOT / "examples"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -56,6 +58,7 @@ from gpufluid_blender.render_bridge import (  # noqa: E402
     FrameMeshLoader,
     rebuild_surface_mesh,
 )
+from _render_camera import frame_pose_for_box  # noqa: E402  pure FU-035 maths
 
 
 def _load_obstacles_from_scene(scene_toml: Path) -> list[dict]:
@@ -183,6 +186,34 @@ def _parse_wallclock_from_cache_json(cache: Path) -> tuple[float, float]:
         return 0.0, 0.0
 
 
+def _frame_camera_to_domain(cam, pivot, sc, margin: float = 1.18):
+    """FU-035: aim + pull the camera back so the whole sim [0,1]^3 domain
+    (mapped to world by ``pivot``) fits the frame, from the canonical high
+    3/4 view.
+
+    The target/distance used to be hardcoded for a typical centred scene, so
+    a tall or off-centre body (e.g. a waterfall column reaching sim y~0.95)
+    clipped the top edge — every non-tuned scene framed wrong (demo30 hero v1
+    spilled into the corner). Deriving the frame from the domain box fixes
+    any scene with no per-scene tuning. Thin bpy wrapper over
+    :func:`_render_camera.frame_pose_for_box`.
+    """
+    import itertools
+    # An unparented empty's world matrix == its basis (translate @ rotate);
+    # compute it explicitly so we don't depend on a depsgraph update yet.
+    pivot_mw = (mathutils.Matrix.Translation(pivot.location)
+                @ pivot.rotation_euler.to_matrix().to_4x4())
+    corners = [tuple(pivot_mw @ mathutils.Vector(c))
+               for c in itertools.product((0.0, 1.0), repeat=3)]
+    pose = frame_pose_for_box(
+        corners, (2.5, -2.5, 1.25), cam.data.sensor_width, cam.data.lens,
+        max(1, sc.render.resolution_x), max(1, sc.render.resolution_y), margin)
+    cam.location = mathutils.Vector(pose["location"])
+    cam.rotation_euler = (
+        mathutils.Vector(pose["centroid"]) - cam.location
+    ).to_track_quat('-Z', 'Y').to_euler()
+
+
 def build_scene(cache: Path, label: str, fluid_color: tuple,
                 fps: int, n_frames: int,
                 sim_s: float, mesh_s: float,
@@ -211,15 +242,19 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     # A8.9 Eevee perf preset (single line — library handles the version drift)
     apply_eevee_preset(sc, samples=samples)
 
+    # Pivot maps the sim's Y-up [0,1]^3 to Blender's Z-up world. Created here
+    # (before the camera) so the camera can be framed to the domain box.
+    pivot = bpy.data.objects.new("fluidcube_pivot", None)
+    pivot.rotation_euler = (math.radians(90), 0, 0)
+    pivot.location = (-0.5, 0.0, 0.0)
+    sc.collection.objects.link(pivot)
+
     cam_data = bpy.data.cameras.new("Cam"); cam = bpy.data.objects.new("Cam", cam_data)
     sc.collection.objects.link(cam)
-    # Pull back so the full vertical trajectory is in frame: inflow zone
-    # at the top, cube in the middle, floor at the bottom. 35mm wide enough
-    # to keep the overlay text visible at the edges.
-    cam.location = (2.5, -2.5, 1.5)
-    target = mathutils.Vector((0.0, 0.0, 0.25))
-    cam.rotation_euler = (target - cam.location).to_track_quat('-Z', 'Y').to_euler()
     cam.data.lens = 35
+    # FU-035: frame the whole domain from the canonical high 3/4 angle instead
+    # of a hardcoded target/distance (which clipped tall/off-centre scenes).
+    _frame_camera_to_domain(cam, pivot, sc)
     sc.camera = cam
 
     key = bpy.data.lights.new("Key", "SUN"); key.energy = 4.0
@@ -254,12 +289,6 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
         bg.inputs["Color"].default_value = (0.06, 0.11, 0.18, 1.0)
         bg.inputs["Strength"].default_value = 1.6
     sc.world = world
-
-    # Pivot rotates the mesh so the sim's Y-up matches Blender's Z-up.
-    pivot = bpy.data.objects.new("fluidcube_pivot", None)
-    pivot.rotation_euler = (math.radians(90), 0, 0)
-    pivot.location = (-0.5, 0.0, 0.0)
-    sc.collection.objects.link(pivot)
 
     # Surface mesh — coloured per-fluid.
     surf_me = bpy.data.meshes.new("fluidcube_surface")
