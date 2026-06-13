@@ -1,0 +1,76 @@
+# GOAL: validate IDEAL water BEHAVIOUR on the GPU MPM solver (2026-06-14).
+# Not scene-tuning — this scene EXERCISES the solver: free-fall, impact on
+# varied shapes at varied positions/heights, flow-around, cascade, pooling,
+# and (closed system, no inflow/outflow) MASS CONSERVATION: the water that
+# starts up top must all end up pooled on the floor — start volume == bottom
+# volume. Validated from 4 camera sides (no "nice from one side, horror from
+# another").
+#
+# Z-up (MPM gravity is -Z): the elevated block is the "tipped bucket" of water
+# released under gravity. It falls onto a cascade of a SPHERE, a BOX, and a
+# CYLINDER at three different positions/heights, then drains to the floor.
+
+[domain]
+resolution = [128, 128, 128]
+size_world = [2.0, 2.0, 2.0]
+
+# The "bucket of water": an elevated block, offset to -x, released under -Z.
+[[fluids]]
+type = "box"
+lo = [0.08, 0.26, 0.60]
+hi = [0.36, 0.74, 0.92]
+ppc = 8
+color = [0.10, 0.40, 0.75]
+
+# VARIED shapes at VARIED x/y positions, ALL GROUNDED (sitting ON the floor,
+# z-base ~0) so the falling water cascades over them and pools AROUND their
+# bases — none floats above the waterline (the 4-side validation must be fair
+# from every angle; a sphere stacked high above a shallow pool reads as a
+# floating solid from the side). Different heights still (tall log vs low box).
+[[obstacle]]
+type = "sphere"
+center = [0.26, 0.46, 0.13]
+radius = 0.13
+
+[[obstacle]]
+type = "box"
+center = [0.52, 0.50, 0.09]
+half_size = [0.13, 0.13, 0.09]
+
+[[obstacle]]
+type = "cylinder_y"
+center = [0.74, 0.50, 0.11]
+radius = 0.11
+half_height = 0.28
+
+[simulation]
+solver = "mpm"
+dt = 0.0015
+pressure_iters = 0
+pressure_solver = "pcg"
+gravity = -9.81
+frames = 170
+fps = 24
+cfl = true
+cfl_factor = 0.6
+cfl_max_substeps = 16
+
+[simulation.mpm]
+bulk_modulus = 1000.0
+cube_friction = 0.3
+
+[output]
+cache_dir = "tmp/demo30/bucket"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.0
+sdf_search_radius_cells = 6.0
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+decimate_ratio = 1.0
+wall_margin_cells = 2
+particles = true
+usd = false
+color_mix_mode = "off"

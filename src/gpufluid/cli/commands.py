@@ -114,7 +114,8 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     import json
     from ..sim.mpm import MpmSolver
     from ..sim.mpm.solver import (
-        MpmConfig, MpmCubeCollider, MpmTap, MpmAntiSplash, make_column,
+        MpmConfig, MpmCubeCollider, MpmSphereCollider, MpmCylinderCollider,
+        MpmTap, MpmAntiSplash, make_column,
     )
     from ..sim.mpm.inflow import MpmInflow
     from ..sim.mpm.outflow import MpmOutflow
@@ -293,8 +294,13 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         for out in scene.outflow
     )
 
-    # Each [[obstacle]] of type box becomes a slip-with-top-friction cube
+    # Each [[obstacle]] becomes a rigid collider. Goal 2026-06-14: previously
+    # ONLY box obstacles collided — sphere/cylinder were rendered (FU-033) but
+    # NEVER simulated, so water fell straight THROUGH them. Now all three
+    # collide via their own SDF grid kernels.
     cubes = []
+    spheres = []
+    cylinders = []
     for ob in scene.obstacle:
         if isinstance(ob, ObstacleBoxCfg):
             # Round-57: forward optional OBB rotation (None ⇒ AABB).
@@ -304,6 +310,13 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                 tangential_friction=sim.mpm_cube_friction,
                 rotation=ob.rotation,
             ))
+        elif isinstance(ob, ObstacleSphereCfg):
+            spheres.append(MpmSphereCollider(
+                centre=tuple(ob.center), radius=float(ob.radius)))
+        elif isinstance(ob, ObstacleCylinderYCfg):
+            cylinders.append(MpmCylinderCollider(
+                centre=tuple(ob.center), radius=float(ob.radius),
+                half_height=float(ob.half_height)))
     # Place tap zone just above the highest cube top; if no cube, above floor
     if cubes:
         tap_z_min = max(c.centre[2] + c.half_size[2] + 0.005 for c in cubes)
@@ -376,6 +389,8 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         outflows=outflows,
         fps=int(sim.fps),
         cubes=tuple(cubes),
+        spheres=tuple(spheres),
+        cylinders=tuple(cylinders),
         gravity=g_norm,
         tap=MpmTap(
             lo_x=cx - half - 0.005, hi_x=cx + half + 0.005,

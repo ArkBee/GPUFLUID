@@ -62,7 +62,9 @@ additionally has at least one `test_*` matching the block ID slug;
 | S2.15.2 | Normalize grid color by deposited weight | S2 | `?` | impl |
 | S2.15.3 | G2P gather grid color back to particle | S2 | `?` | impl |
 | S2.16 | Active-block bitmask builder (8³ tiles with any fluid cell) | S2 | `?` | impl,test |
-| S2.17.1 | SDF axis-aligned-box grid collider: separate-surface boundary + deep-interior zeroing + optional top-face tangential friction | S2 | `?` | impl |
+| S2.17.1 | SDF axis-aligned-box grid collider: separate-surface boundary + deep-interior zeroing + optional top-face tangential friction | S2 | `src/gpufluid/sim/mpm/colliders.py` | impl |
+| S2.17.1.SPH | SDF sphere grid collider (non-box obstacles were ghosts — water fell through; goal 2026-06-14) | S2 | `src/gpufluid/sim/mpm/colliders.py` | impl |
+| S2.17.1.CYL | SDF cylinder-Y grid collider (axis +Y) | S2 | `src/gpufluid/sim/mpm/colliders.py` | impl |
 | S2.17.2 | Particle pushback inside cube body: snap to nearest face, zero inward normal velocity, reset F/F_trial/C | S2 | `?` | impl |
 | S2.17.3 | Particle pushback at domain walls: slip-clamp to [lo, hi]³, zero normal velocity, preserve tangential, reset F/C | S2 | `?` | impl |
 | S2.17.4 | Tap-zone terminal velocity cap (downward only): mimics air drag on a laminar stream | S2 | `?` | impl |

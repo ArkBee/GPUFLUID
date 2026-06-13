@@ -116,3 +116,89 @@ def k_sdf_box_collide(
         v_tangent = v - v_normal
         v = v_normal + param.friction * v_tangent
     state.grid_v_out[gx, gy, gz] = v
+
+
+@block("S2.17.1.SPH",
+       "SDF sphere grid collider: separate-surface boundary + deep zeroing. "
+       "Goal 2026-06-14: non-box obstacles were GHOSTS (only box collided); "
+       "water fell straight through spheres. point=centre, size[0]=radius.")
+@wp.kernel
+def k_sdf_sphere_collide(
+    time: float,
+    dt: float,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    param: Dirichlet_collider,
+):
+    """Sphere collider — mirror of :func:`k_sdf_box_collide`. SDF of a sphere
+    is ``|grid - centre| - radius``; the outward normal is the unit radial."""
+    gx, gy, gz = wp.tid()
+    rel = wp.vec3(
+        float(gx) * model.dx - param.point[0],
+        float(gy) * model.dx - param.point[1],
+        float(gz) * model.dx - param.point[2],
+    )
+    radius = param.size[0]
+    dist = wp.length(rel)
+    d = dist - radius
+    if d >= model.dx:
+        return  # outside influence shell
+    if d < -1.5 * model.dx:
+        state.grid_v_out[gx, gy, gz] = wp.vec3(0.0, 0.0, 0.0)
+        return
+    n = wp.vec3(0.0, 0.0, 1.0)
+    if dist > 1.0e-8:
+        n = rel / dist
+    v = state.grid_v_out[gx, gy, gz]
+    vn = wp.dot(v, n)
+    if vn < 0.0:
+        v = v - vn * n
+    state.grid_v_out[gx, gy, gz] = v
+
+
+@block("S2.17.1.CYL",
+       "SDF cylinder-Y grid collider: separate-surface boundary + deep "
+       "zeroing. point=centre, size[0]=radius, size[1]=half_height; axis +Y.")
+@wp.kernel
+def k_sdf_cylinder_collide(
+    time: float,
+    dt: float,
+    state: MPMStateStruct,
+    model: MPMModelStruct,
+    param: Dirichlet_collider,
+):
+    """Cylinder collider (axis = world Y). SDF combines the radial distance in
+    the X-Z plane with the axial distance along Y, exactly like the box's
+    out/in split; the normal is radial on the side, axial on the caps."""
+    gx, gy, gz = wp.tid()
+    rx = float(gx) * model.dx - param.point[0]
+    ry = float(gy) * model.dx - param.point[1]
+    rz = float(gz) * model.dx - param.point[2]
+    radius = param.size[0]
+    half_h = param.size[1]
+    radial = wp.sqrt(rx * rx + rz * rz)
+    dr = radial - radius
+    dy = wp.abs(ry) - half_h
+    d_out = wp.sqrt(wp.max(dr, 0.0) * wp.max(dr, 0.0)
+                    + wp.max(dy, 0.0) * wp.max(dy, 0.0))
+    d_in = wp.min(wp.max(dr, dy), 0.0)
+    d = d_out + d_in
+    if d >= model.dx:
+        return
+    if d < -1.5 * model.dx:
+        state.grid_v_out[gx, gy, gz] = wp.vec3(0.0, 0.0, 0.0)
+        return
+    n = wp.vec3(0.0, 0.0, 1.0)
+    if dr >= dy:
+        if radial > 1.0e-8:
+            n = wp.vec3(rx / radial, 0.0, rz / radial)
+    else:
+        if ry > 0.0:
+            n = wp.vec3(0.0, 1.0, 0.0)
+        else:
+            n = wp.vec3(0.0, -1.0, 0.0)
+    v = state.grid_v_out[gx, gy, gz]
+    vn = wp.dot(v, n)
+    if vn < 0.0:
+        v = v - vn * n
+    state.grid_v_out[gx, gy, gz] = v

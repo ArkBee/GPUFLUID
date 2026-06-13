@@ -73,7 +73,11 @@ from ._warp_mpm_imports import (
     Dirichlet_collider,
     MPM_Simulator_WARP,
 )
-from .colliders import k_sdf_box_collide
+from .colliders import (
+    k_sdf_box_collide,
+    k_sdf_sphere_collide,
+    k_sdf_cylinder_collide,
+)
 from .inflow import MpmInflow, k_inflow_gate, seed_inflow_particles
 from .outflow import MpmOutflow, k_outflow_despawn
 from .pushback import k_cube_pushback, k_wall_pushback
@@ -112,6 +116,23 @@ class MpmCubeCollider:
         tuple[float, float, float],
         tuple[float, float, float],
     ] | None = None
+
+
+@dataclass
+class MpmSphereCollider:
+    """A rigid sphere obstacle. Goal 2026-06-14: before this, sphere
+    obstacles were rendered but NEVER collided — water fell through them."""
+    centre: tuple[float, float, float]
+    radius: float
+
+
+@dataclass
+class MpmCylinderCollider:
+    """A rigid cylinder obstacle, axis along world +Y (matches the
+    ObstacleCylinderYCfg / FU-033 render convention)."""
+    centre: tuple[float, float, float]
+    radius: float
+    half_height: float
 
 
 @dataclass
@@ -166,6 +187,9 @@ class MpmConfig:
     gravity: tuple[float, float, float] = (0.0, 0.0, -9.81)
     fluid: MpmFluidParams = field(default_factory=MpmFluidParams)
     cubes: Sequence[MpmCubeCollider] = field(default_factory=tuple)
+    # Goal 2026-06-14: sphere/cylinder obstacles now collide too (were ghosts).
+    spheres: Sequence[MpmSphereCollider] = field(default_factory=tuple)
+    cylinders: Sequence[MpmCylinderCollider] = field(default_factory=tuple)
     walls: MpmDomainWalls = field(default_factory=MpmDomainWalls)
     tap: MpmTap | None = field(default_factory=MpmTap)
     anti_splash: MpmAntiSplash | None = field(default_factory=MpmAntiSplash)
@@ -424,6 +448,39 @@ class MpmSolver:
             param.start_time = 0.0
             param.end_time = 1.0e9
             self.mpm.grid_postprocess.append(k_sdf_box_collide)
+            self.mpm.collider_params.append(param)
+            self.mpm.modify_bc.append(None)
+        # Sphere colliders (goal 2026-06-14): point=centre, size[0]=radius.
+        # surface_type=2 (pure slip — water sheets off a sphere, no top-face
+        # friction convention). The other size/axis fields are unused by
+        # k_sdf_sphere_collide but filled for struct hygiene.
+        for sph in cfg.spheres:
+            param = Dirichlet_collider()
+            param.point = wp.vec3(*sph.centre)
+            param.size = wp.vec3(sph.radius, 0.0, 0.0)
+            param.x_unit = wp.vec3(1.0, 0.0, 0.0)
+            param.y_unit = wp.vec3(0.0, 1.0, 0.0)
+            param.direction = wp.vec3(0.0, 0.0, 1.0)
+            param.surface_type = 2
+            param.friction = 1.0
+            param.start_time = 0.0
+            param.end_time = 1.0e9
+            self.mpm.grid_postprocess.append(k_sdf_sphere_collide)
+            self.mpm.collider_params.append(param)
+            self.mpm.modify_bc.append(None)
+        # Cylinder colliders (axis +Y): size[0]=radius, size[1]=half_height.
+        for cyl in cfg.cylinders:
+            param = Dirichlet_collider()
+            param.point = wp.vec3(*cyl.centre)
+            param.size = wp.vec3(cyl.radius, cyl.half_height, 0.0)
+            param.x_unit = wp.vec3(1.0, 0.0, 0.0)
+            param.y_unit = wp.vec3(0.0, 1.0, 0.0)
+            param.direction = wp.vec3(0.0, 0.0, 1.0)
+            param.surface_type = 2
+            param.friction = 1.0
+            param.start_time = 0.0
+            param.end_time = 1.0e9
+            self.mpm.grid_postprocess.append(k_sdf_cylinder_collide)
             self.mpm.collider_params.append(param)
             self.mpm.modify_bc.append(None)
         # Cube geometry caches for pushback launches (avoid re-allocating).
