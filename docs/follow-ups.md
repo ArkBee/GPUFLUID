@@ -12,9 +12,17 @@
 Перезаход на застрявшую demo30 после MPM-pivot. Метод: judge-panel workflow
 (4 кандидата × 3 независимые линзы) честно оценил кадры → diagnose → fix → re-judge.
 
-- ✅ **Шипнут** `out/videos/demo30_waterfall.mp4` — MPM-водопад 96³, 121 кадр @
-  24fps, поток на ледж + пул. Сцена `examples/scenes/demo30_hero_waterfall.toml`.
+- ✅ **Шипнут** `out/videos/demo30_waterfall.mp4` — MPM-водопад, поток на ледж +
+  пул. Сцена `examples/scenes/demo30_hero_waterfall.toml`.
   Запасной кандидат: `demo30_dam_break_mpm.toml` (коллапс вокруг колонны).
+- ✅ **Качество воды — SDF-мешер (важно):** блобовый «cottage cheese» был
+  ДЕФОЛТНЫМ `trilinear` (M5.1). M5.11 Bridson SDF **уже GPU-построен и провязан**
+  (`surface.py` `k_sdf_field` + GPU HashGrid + GPU MC; TOML `mesh_method="sdf"`).
+  Память «GPU port не сделан» была устаревшей — это правка флага, не дни порта.
+  Финал: 192³ + `mesh_method="sdf"` + `sdf_particle_radius_cells=3.6` /
+  `sdf_search_radius_cells=7.0` → стена не утоплена, детальная вода с брызгами
+  (sweep 96/128/192 подтвердил: 192³ = детальная мембрана, память права).
+  Остаток (брызгливость, односторонний splash) — физика сцены, не мешер.
 - ✅ **Вердикт панели подтвердил память 2026-05-18:** полив на блокирующий куб
   даёт кучу-на-препятствии, не ламинар — вне зависимости от солвера. Рескоуп на
   поток-на-ледж читается как поток.

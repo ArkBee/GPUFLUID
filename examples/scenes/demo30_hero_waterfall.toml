@@ -16,7 +16,7 @@
 [domain]
 # v3 (2026-06-13): 80 -> 96 for water cohesion (the same bump cleaned up the
 # dam_break candidate's metaball/voxel surface; the judge panel's #1 fix).
-resolution = [96, 96, 96]
+resolution = [192, 192, 192]
 # FU-016: real-world extent so gravity/velocities scale by metres, not aspect.
 size_world = [2.0, 2.0, 2.0]
 
@@ -76,8 +76,15 @@ bulk_modulus = 1000.0
 cube_friction = 0.3
 
 [output]
-cache_dir = "tmp/demo30/hero_waterfall"
+cache_dir = "tmp/demo30/hero_final"
 mesh = true
+# v4 (2026-06-13): the blobby "cottage cheese" water was the DEFAULT trilinear
+# mesher (M5.1). The Bridson SDF mesher (M5.11) is already GPU-built + wired —
+# it makes a smooth union-of-spheres membrane instead of summed density bumps.
+# iso_level is ignored for sdf (the zero level set is the surface).
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.6
+sdf_search_radius_cells = 7.0
 iso_level = 0.5
 smooth_passes = 2
 mesh_smooth_passes = 2
