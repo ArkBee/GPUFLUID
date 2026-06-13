@@ -69,6 +69,16 @@ Smoke-скрипт: `tmp/audit_20260610_smoke.py` (обе сцены GREEN, 9 к
   только overlay-текст. Live-проверено: кастомный label без --material →
   голубая вода (раньше — чёрный honey). Col-vs-color оказался не багом:
   чернота шла целиком от honey-ветки.
+- ✅ **FU-033** (закрыт 2026-06-12, `686e0ed`, ветка fix/fu033-render-all-obstacles)
+  — headless-рендер рисовал ТОЛЬКО первое препятствие и ТОЛЬКО box
+  (`_load_obstacle_from_scene` бросал ValueError на не-box): после FU-019/030
+  sphere/cylinder/mesh-препятствие не просто невидимо — РОНЯЛО рендер.
+  Теперь `_load_obstacles_from_scene` отдаёт все entries любого типа; box (+OBB
+  round-57 rotation) / sphere / cylinder_y / mesh (импорт OBJ, missing→warn+skip)
+  спавнятся через тот же pivot+counter-rotation. Cylinder-ось: (-90° X)
+  counter-rotation сам маппит local-Z→sim-Y, лишний поворот убран (поймано
+  live — лежал на боку). Live-verify: сфера+цилиндр нарисованы, без краша.
+  8 новых тестов, suite 649 green.
 
 ---
 
