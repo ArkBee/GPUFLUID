@@ -186,16 +186,82 @@ def _parse_wallclock_from_cache_json(cache: Path) -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def _frame_camera_to_domain(cam, pivot, sc, margin: float = 1.18):
-    """FU-035: aim + pull the camera back so the whole sim [0,1]^3 domain
-    (mapped to world by ``pivot``) fits the frame, from the canonical high
-    3/4 view.
+def _scene_is_zup(scene_toml) -> bool:
+    """True if the scene's solver is MPM (Z-up, gravity -Z); False for the
+    legacy FLIP solver (Y-up, gravity -Y). The renderer orients the pivot to
+    match — a mismatch renders a flat MPM pool as a vertical wall (demo30
+    root cause, 2026-06-14)."""
+    try:
+        data = tomllib.loads(Path(scene_toml).read_text())
+        solver = data.get("simulation", {}).get("solver", "flip")
+        return str(solver).lower() == "mpm"
+    except Exception:
+        return False
 
-    The target/distance used to be hardcoded for a typical centred scene, so
-    a tall or off-centre body (e.g. a waterfall column reaching sim y~0.95)
-    clipped the top edge — every non-tuned scene framed wrong (demo30 hero v1
-    spilled into the corner). Deriving the frame from the domain box fixes
-    any scene with no per-scene tuning. Thin bpy wrapper over
+
+def _content_sim_bbox(cache, obstacles, n_sample=6):
+    """Sim-space [(lo),(hi)] of the actual CONTENT — the fluid mesh extent
+    over a few sampled frames ∪ the obstacles — or None if nothing found.
+
+    demo30 2026-06-14: framing the whole empty [0,1]^3 domain (FU-035) left
+    the water small + off-centre in a big empty stage ("I don't see water").
+    Framing the content instead makes the water fill the frame.
+    """
+    import glob
+    lo = [1e9, 1e9, 1e9]
+    hi = [-1e9, -1e9, -1e9]
+    seen = False
+    meshfiles = sorted(glob.glob(str(Path(cache) / "mesh" / "*.ply")))
+    if meshfiles:
+        idxs = sorted(set(int(i) for i in
+                          np.linspace(0, len(meshfiles) - 1,
+                                      min(n_sample, len(meshfiles)))))
+        for i in idxs:
+            try:
+                v = read_ply(meshfiles[i])[0]
+            except Exception:
+                continue
+            if v is not None and len(v):
+                seen = True
+                for k in range(3):
+                    lo[k] = min(lo[k], float(np.min(v[:, k])))
+                    hi[k] = max(hi[k], float(np.max(v[:, k])))
+    for o in (obstacles or []):
+        c = o.get("center")
+        if not c:
+            continue
+        t = o.get("type", "box")
+        if t == "box":
+            h = o.get("half_size", (0.05, 0.05, 0.05))
+        elif t == "sphere":
+            r = float(o.get("radius", 0.05)); h = (r, r, r)
+        elif t == "cylinder_y":
+            r = float(o.get("radius", 0.05))
+            h = (r, float(o.get("half_height", 0.1)), r)
+        else:
+            h = (0.05, 0.05, 0.05)
+        seen = True
+        for k in range(3):
+            lo[k] = min(lo[k], float(c[k]) - float(h[k]))
+            hi[k] = max(hi[k], float(c[k]) + float(h[k]))
+    if not seen:
+        return None
+    # clamp into the domain (mesh verts can poke a hair past walls)
+    lo = [max(0.0, x) for x in lo]
+    hi = [min(1.0, x) for x in hi]
+    return lo, hi
+
+
+def _frame_camera_to_domain(cam, pivot, sc, margin=1.18,
+                            cache=None, obstacles=None):
+    """Aim + pull the camera back from the canonical high 3/4 view so the
+    content fills the frame.
+
+    FU-035 framed the whole [0,1]^3 domain (fixes clipping vs the old
+    hardcoded pose). demo30 2026-06-14 narrows it to the CONTENT bbox (fluid
+    mesh ∪ obstacles) when a ``cache`` is given — framing the empty domain
+    left the water tiny in a big empty stage. Falls back to the full domain
+    when there's no cache/content. Thin bpy wrapper over
     :func:`_render_camera.frame_pose_for_box`.
     """
     import itertools
@@ -203,8 +269,15 @@ def _frame_camera_to_domain(cam, pivot, sc, margin: float = 1.18):
     # compute it explicitly so we don't depend on a depsgraph update yet.
     pivot_mw = (mathutils.Matrix.Translation(pivot.location)
                 @ pivot.rotation_euler.to_matrix().to_4x4())
-    corners = [tuple(pivot_mw @ mathutils.Vector(c))
-               for c in itertools.product((0.0, 1.0), repeat=3)]
+    box = _content_sim_bbox(cache, obstacles) if cache is not None else None
+    if box is None:
+        box = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    lo, hi = box
+    corners = [tuple(pivot_mw @ mathutils.Vector(
+                   (lo[0] if x == 0 else hi[0],
+                    lo[1] if y == 0 else hi[1],
+                    lo[2] if z == 0 else hi[2])))
+               for x, y, z in itertools.product((0, 1), repeat=3)]
     pose = frame_pose_for_box(
         corners, (2.5, -2.5, 1.25), cam.data.sensor_width, cam.data.lens,
         max(1, sc.render.resolution_x), max(1, sc.render.resolution_y), margin)
@@ -218,7 +291,8 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
                 fps: int, n_frames: int,
                 sim_s: float, mesh_s: float,
                 obstacles: list,
-                samples: int = 16, material: str = "water"):
+                samples: int = 16, material: str = "water",
+                refractive: bool = False, up_z: bool = False):
     sc = bpy.data.scenes.get("fluidcube_render") or bpy.data.scenes.new("fluidcube_render")
     bpy.context.window.scene = sc
     for o in list(sc.objects):
@@ -241,11 +315,23 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
 
     # A8.9 Eevee perf preset (single line — library handles the version drift)
     apply_eevee_preset(sc, samples=samples)
+    if refractive and hasattr(sc.eevee, "use_raytracing"):
+        # demo30 2026-06-14: opt-in Eevee Next raytracing so the water
+        # material's transmission actually refracts (otherwise it renders
+        # black). Off by default — the bench/preset stays fast + opaque.
+        sc.eevee.use_raytracing = True
 
     # Pivot maps the sim's Y-up [0,1]^3 to Blender's Z-up world. Created here
     # (before the camera) so the camera can be framed to the domain box.
     pivot = bpy.data.objects.new("fluidcube_pivot", None)
-    pivot.rotation_euler = (math.radians(90), 0, 0)
+    # demo30 2026-06-14 ROOT-CAUSE FIX: the MPM solver is Z-UP (gravity is
+    # (0,0,-9.81) — see sim/mpm/solver.py), but the legacy FLIP solver is
+    # Y-UP (gravity on y). This pivot maps the sim's up-axis → Blender Z-up.
+    # For MPM it must be IDENTITY (sim-Z already = world-Z); the old
+    # hardcoded +90°X (Y-up) rotated every MPM scene onto its side, so a flat
+    # pool rendered as a vertical wall — the reason MPM water never read as
+    # water. FLIP keeps the +90°X mapping.
+    pivot.rotation_euler = (0, 0, 0) if up_z else (math.radians(90), 0, 0)
     pivot.location = (-0.5, 0.0, 0.0)
     sc.collection.objects.link(pivot)
 
@@ -254,7 +340,7 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     cam.data.lens = 35
     # FU-035: frame the whole domain from the canonical high 3/4 angle instead
     # of a hardcoded target/distance (which clipped tall/off-centre scenes).
-    _frame_camera_to_domain(cam, pivot, sc)
+    _frame_camera_to_domain(cam, pivot, sc, cache=cache, obstacles=obstacles)
     sc.camera = cam
 
     key = bpy.data.lights.new("Key", "SUN"); key.energy = 4.0
@@ -367,21 +453,37 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
         # Eevee preset (SSR/refraction off). main() resolves the
         # precedence: --material wins; else legacy label inference; else
         # water.
+        ior = 1.45
         if material == "oil":
             fbsdf.inputs["Roughness"].default_value = 0.15
             trans = 0.4
         elif material == "honey":
             fbsdf.inputs["Roughness"].default_value = 0.20
             trans = 0.6
-        else:  # water (the honest default — bright diffuse, trans 0)
+        elif refractive:
+            # demo30 2026-06-14: OPAQUE blue water never reads as water (it
+            # looks like blue foam/plastic). Eevee Next raytraced refraction
+            # (scene use_raytracing + these material flags — probed on
+            # Blender 5.1) makes it actually transparent + refractive, the
+            # real "physically accurate" look. Needs the raytracing-enabled
+            # preset (set in build_scene below); without it transmission
+            # renders black (the FU-032 failure mode).
+            fbsdf.inputs["Roughness"].default_value = 0.02
+            trans = 1.0
+            ior = 1.33  # water
+            if hasattr(fluid_mat, "use_raytrace_refraction"):
+                fluid_mat.use_raytrace_refraction = True
+            if hasattr(fluid_mat, "use_screen_refraction"):
+                fluid_mat.use_screen_refraction = True
+        else:  # water, fast preset (no refraction) — opaque bright diffuse
             fbsdf.inputs["Roughness"].default_value = 0.05
-            trans = 0.0  # TEMP for B16.2 visibility eval
+            trans = 0.0
         if "Transmission Weight" in fbsdf.inputs:
             fbsdf.inputs["Transmission Weight"].default_value = trans
         elif "Transmission" in fbsdf.inputs:
             fbsdf.inputs["Transmission"].default_value = trans
         if "IOR" in fbsdf.inputs:
-            fbsdf.inputs["IOR"].default_value = 1.45
+            fbsdf.inputs["IOR"].default_value = ior
     surf.data.materials.append(fluid_mat)
 
     # Obstacles — read from the scene TOML so the rendered geometry tracks
@@ -404,7 +506,11 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
         cbsdf.inputs["Base Color"].default_value = (0.55, 0.45, 0.35, 1.0)
         cbsdf.inputs["Roughness"].default_value = 0.7
 
-    _counter = mathutils.Euler((math.radians(-90), 0, 0)).to_quaternion()
+    # Counter-rotation cancels the pivot so obstacles stay axis-aligned in
+    # world. Z-up (MPM): pivot is identity → no counter needed. Y-up (FLIP):
+    # cancel the +90°X pivot with -90°X. (demo30 2026-06-14, matches pivot.)
+    _counter = (mathutils.Quaternion() if up_z
+                else mathutils.Euler((math.radians(-90), 0, 0)).to_quaternion())
 
     def _finish_obstacle(ob, idx, extra_rot=None):
         """Parent + counter-rotate (+ optional extra rotation) + material."""
@@ -493,8 +599,22 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     gmat.use_nodes = True
     gb = gmat.node_tree.nodes.get("Principled BSDF")
     if gb:
-        gb.inputs["Base Color"].default_value = (0.07, 0.07, 0.09, 1.0)
-        gb.inputs["Roughness"].default_value = 0.9
+        if refractive:
+            # demo30 2026-06-14: refraction/reflection only READ as water if
+            # there's detail behind/below to distort. A checker floor + mild
+            # gloss gives the water a pattern to bend through — the classic
+            # "looking through water at the floor" cue. Gated on --refractive
+            # so the fast bench keeps its plain dark floor.
+            checker = gmat.node_tree.nodes.new("ShaderNodeTexChecker")
+            checker.inputs["Scale"].default_value = 16.0
+            checker.inputs["Color1"].default_value = (0.16, 0.18, 0.22, 1.0)
+            checker.inputs["Color2"].default_value = (0.05, 0.06, 0.08, 1.0)
+            gmat.node_tree.links.new(
+                checker.outputs["Color"], gb.inputs["Base Color"])
+            gb.inputs["Roughness"].default_value = 0.35
+        else:
+            gb.inputs["Base Color"].default_value = (0.07, 0.07, 0.09, 1.0)
+            gb.inputs["Roughness"].default_value = 0.9
     ground.data.materials.append(gmat)
 
     # ---------- Title + sim-time overlay (top of frame).
@@ -570,11 +690,17 @@ def main():
                          "are test_fXXXX.png so the sim-frame index stays "
                          "visible. ~25x faster than a full render for picking "
                          "between tuning iterations.")
+    ap.add_argument("--refractive", action="store_true",
+                    help="Render water with Eevee Next raytraced refraction "
+                         "(transparent + IOR 1.33) instead of opaque blue. "
+                         "Slower; for hero shots where it must read as real "
+                         "water. Only affects material 'water'.")
     args = ap.parse_args(_argv_after_doubledash())
     cache = Path(args.cache).resolve()
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
 
     obstacles = _load_obstacles_from_scene(Path(args.scene).resolve())
+    up_z = _scene_is_zup(Path(args.scene).resolve())
     sim_s, mesh_s = _parse_wallclock_from_cache_json(cache)
 
     # Frame count fallback: if --frames was omitted (or 0) read cache.json's
@@ -610,6 +736,7 @@ def main():
         args.fps, n_frames, sim_s, mesh_s,
         obstacles,
         samples=args.samples, material=material,
+        refractive=args.refractive, up_z=up_z,
     )
     loader = FrameLoader(cache, surf, sim_time_text, args.fps)
     bpy.app.handlers.frame_change_pre.clear()

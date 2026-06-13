@@ -1,0 +1,65 @@
+# GOAL: quality physically-realistic water (2026-06-14).
+#
+# Verified diagnosis: Eevee Next raytraced refraction renders water perfectly
+# for a COHESIVE surface (a glass sphere refracts the checker floor flawlessly),
+# but a splashing waterfall is an inherently dispersed spray -> the SDF mesh is
+# fragmented speckle -> screen-space refraction can't read it -> opaque blob.
+# So the scene must produce a COHESIVE body with a roughly flat surface.
+#
+# This scene: a slab of water is released (dam-break), floods the floor, flows
+# AROUND a sphere sitting on the floor, and SETTLES into a calm pool. Closed
+# basin (no inflow/outflow) so volume is conserved and the surface flattens.
+# The settled flat pool refracts the floor -> reads as real water.
+
+[domain]
+resolution = [192, 192, 192]
+size_world = [2.0, 2.0, 2.0]
+
+# A tall slab of water on the left that collapses and floods the basin.
+[[fluids]]
+type = "box"
+lo = [0.06, 0.05, 0.12]
+hi = [0.46, 0.62, 0.88]
+ppc = 8
+color = [0.10, 0.42, 0.78]
+
+# A sphere sitting on the floor — the flood flows around it and it pokes out
+# of the settled pool (a clear "object half-submerged in water" cue).
+[[obstacle]]
+type = "sphere"
+center = [0.72, 0.10, 0.50]
+radius = 0.13
+
+[simulation]
+solver = "mpm"
+dt = 0.0015
+pressure_iters = 0
+pressure_solver = "pcg"
+gravity = -9.81
+frames = 150
+fps = 24
+cfl = true
+cfl_factor = 0.6
+cfl_max_substeps = 16
+
+[simulation.mpm]
+# Stiffer water + mild damping so it settles to a flat pool rather than
+# staying choppy/foamy (choppy => fragmented surface => no refraction).
+bulk_modulus = 1000.0
+cube_friction = 0.3
+
+[output]
+cache_dir = "tmp/demo30/pool"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.6
+sdf_search_radius_cells = 7.0
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+decimate_ratio = 1.0
+wall_margin_cells = 2
+particles = true
+usd = false
+color_mix_mode = "off"
