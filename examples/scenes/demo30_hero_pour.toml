@@ -1,0 +1,72 @@
+# GOAL: quality physically-realistic water — Z-up hero (2026-06-14).
+#
+# Designed Z-UP from the start (the MPM solver is Z-up: gravity -Z). Down is
+# -Z, sources sit high in +Z, the pour velocity is -Z. (My earlier scenes were
+# accidentally Y-up — inflow velocity (0,-3,0) was horizontal, not "down".)
+#
+# Recipe verified this session: a COHESIVE water body (not a violent splash)
+# + Eevee Next raytraced refraction (--refractive) + a checker floor = water
+# that reads as water. So: a basin with a starting pool (cohesive from frame 0)
+# + a gentle off-centre pour that ripples it + a sphere half-submerged as the
+# focal point. Render with --refractive.
+
+[domain]
+resolution = [192, 192, 192]
+size_world = [2.0, 2.0, 2.0]
+
+# Starting pool covering the basin floor — cohesive body from frame 0.
+[[fluids]]
+type = "box"
+lo = [0.06, 0.06, 0.05]
+hi = [0.94, 0.94, 0.26]
+ppc = 8
+color = [0.09, 0.38, 0.70]
+
+# Gentle pour from high up (+Z), straight DOWN (-Z), OFF to one corner so it
+# ripples the pool instead of exploding on the sphere.
+[[inflow]]
+lo = [0.18, 0.20, 0.82]
+hi = [0.30, 0.32, 0.90]
+velocity = [0.0, 0.0, -2.5]
+rate_per_sec = 7000.0
+color = [0.09, 0.38, 0.70]
+frame_start = 0
+frame_end = 95
+
+# Sphere half-submerged in the pool — the focal "object in water" cue.
+[[obstacle]]
+type = "sphere"
+center = [0.56, 0.55, 0.14]
+radius = 0.15
+
+[simulation]
+solver = "mpm"
+dt = 0.0015
+pressure_iters = 0
+pressure_solver = "pcg"
+gravity = -9.81
+frames = 140
+fps = 24
+cfl = true
+cfl_factor = 0.6
+cfl_max_substeps = 16
+
+[simulation.mpm]
+bulk_modulus = 1000.0
+cube_friction = 0.3
+
+[output]
+cache_dir = "tmp/demo30/hero_pour"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.6
+sdf_search_radius_cells = 7.0
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+decimate_ratio = 1.0
+wall_margin_cells = 2
+particles = true
+usd = false
+color_mix_mode = "off"

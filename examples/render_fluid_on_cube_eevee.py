@@ -253,7 +253,7 @@ def _content_sim_bbox(cache, obstacles, n_sample=6):
 
 
 def _frame_camera_to_domain(cam, pivot, sc, margin=1.18,
-                            cache=None, obstacles=None):
+                            cache=None, obstacles=None, cam_angle_deg=0.0):
     """Aim + pull the camera back from the canonical high 3/4 view so the
     content fills the frame.
 
@@ -278,8 +278,15 @@ def _frame_camera_to_domain(cam, pivot, sc, margin=1.18,
                     lo[1] if y == 0 else hi[1],
                     lo[2] if z == 0 else hi[2])))
                for x, y, z in itertools.product((0, 1), repeat=3)]
+    # Canonical high 3/4 view, rotated by cam_angle_deg AROUND the world up
+    # axis (Z) — gives the 4-side validation views (0/90/180/270°) without
+    # changing the elevation, so each side is judged from the same height.
+    a = math.radians(cam_angle_deg)
+    vx, vy, vz = 2.5, -2.5, 1.25
+    view_dir = (vx * math.cos(a) - vy * math.sin(a),
+                vx * math.sin(a) + vy * math.cos(a), vz)
     pose = frame_pose_for_box(
-        corners, (2.5, -2.5, 1.25), cam.data.sensor_width, cam.data.lens,
+        corners, view_dir, cam.data.sensor_width, cam.data.lens,
         max(1, sc.render.resolution_x), max(1, sc.render.resolution_y), margin)
     cam.location = mathutils.Vector(pose["location"])
     cam.rotation_euler = (
@@ -292,7 +299,8 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
                 sim_s: float, mesh_s: float,
                 obstacles: list,
                 samples: int = 16, material: str = "water",
-                refractive: bool = False, up_z: bool = False):
+                refractive: bool = False, up_z: bool = False,
+                cam_angle: float = 0.0):
     sc = bpy.data.scenes.get("fluidcube_render") or bpy.data.scenes.new("fluidcube_render")
     bpy.context.window.scene = sc
     for o in list(sc.objects):
@@ -340,7 +348,8 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     cam.data.lens = 35
     # FU-035: frame the whole domain from the canonical high 3/4 angle instead
     # of a hardcoded target/distance (which clipped tall/off-centre scenes).
-    _frame_camera_to_domain(cam, pivot, sc, cache=cache, obstacles=obstacles)
+    _frame_camera_to_domain(cam, pivot, sc, cache=cache, obstacles=obstacles,
+                            cam_angle_deg=cam_angle)
     sc.camera = cam
 
     key = bpy.data.lights.new("Key", "SUN"); key.energy = 4.0
@@ -445,6 +454,15 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             fbsdf.inputs["Base Color"].default_value = (*fluid_color, 1.0)
             nt.nodes.remove(mix)
             nt.nodes.remove(attr)
+        if refractive:
+            # demo30 2026-06-14 (judge panel): a DARK base colour + full
+            # transmission absorbs all light and renders OPAQUE — the dark
+            # per-vertex Col (navy) was killing the refraction. Clear water
+            # wants a near-white glass tint, not the Col. Drop the Col link
+            # and set a light tint so the floor refracts through.
+            for _lnk in list(fbsdf.inputs["Base Color"].links):
+                nt.links.remove(_lnk)
+            fbsdf.inputs["Base Color"].default_value = (0.83, 0.91, 1.0, 1.0)
         # Per-fluid look — FU-032: keyed on the EXPLICIT `material` arg,
         # never on the overlay label. Pre-FU-032 this if/else keyed on
         # `label`, with a honey catch-all `else` — any custom label (the
@@ -690,6 +708,10 @@ def main():
                          "are test_fXXXX.png so the sim-frame index stays "
                          "visible. ~25x faster than a full render for picking "
                          "between tuning iterations.")
+    ap.add_argument("--cam-angle", type=float, default=0.0,
+                    help="Azimuth (deg) to rotate the camera around the scene "
+                         "for multi-side validation: 0/90/180/270 give the "
+                         "4 sides from the same elevation.")
     ap.add_argument("--refractive", action="store_true",
                     help="Render water with Eevee Next raytraced refraction "
                          "(transparent + IOR 1.33) instead of opaque blue. "
@@ -737,6 +759,7 @@ def main():
         obstacles,
         samples=args.samples, material=material,
         refractive=args.refractive, up_z=up_z,
+        cam_angle=args.cam_angle,
     )
     loader = FrameLoader(cache, surf, sim_time_text, args.fps)
     bpy.app.handlers.frame_change_pre.clear()
