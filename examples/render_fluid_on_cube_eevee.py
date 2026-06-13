@@ -58,22 +58,69 @@ from gpufluid_blender.render_bridge import (  # noqa: E402
 )
 
 
-def _load_obstacle_from_scene(scene_toml: Path) -> tuple[tuple[float, float, float],
-                                                          tuple[float, float, float]]:
-    """Read the first [[obstacle]] from a scene TOML and return (center, half_size)
-    in sim coords. Renderer authoritative source: TOML, never hardcoded — otherwise
-    bake collides with an invisible obstacle at sim coords while the renderer draws
-    the cube at a different (hardcoded) location, producing a positional desync that
-    looks like "chaotic" fluid behaviour to the viewer.
+def _load_obstacles_from_scene(scene_toml: Path) -> list[dict]:
+    """Read EVERY [[obstacle]] from a scene TOML and return the raw dicts
+    (sim-space geometry, untouched). Renderer authoritative source: TOML,
+    never hardcoded — otherwise bake collides with invisible obstacles at
+    sim coords while the renderer draws something elsewhere, producing a
+    positional desync that looks like "chaotic" fluid to the viewer.
+
+    FU-033: pre-fix this read only ``obs_list[0]`` and RAISED
+    ``"only box obstacles are renderable here"`` on anything non-box — so
+    after FU-019/FU-030 a sphere/cylinder/mesh obstacle baked correctly
+    but CRASHED the render, and multi-obstacle scenes only ever drew
+    obstacle #0. Now: return ALL entries of ANY type, no raise.
+    ``build_scene`` spawns the matching primitive for each. An
+    obstacle-free scene legitimately returns ``[]``.
     """
     data = tomllib.loads(scene_toml.read_text())
-    obs_list = data.get("obstacle", [])
-    if not obs_list:
-        raise ValueError(f"{scene_toml}: no [[obstacle]] section")
-    obs = obs_list[0]
-    if obs.get("type", "box") != "box":
-        raise ValueError(f"{scene_toml}: only box obstacles are renderable here")
-    return tuple(obs["center"]), tuple(obs["half_size"])
+    return list(data.get("obstacle", []))
+
+
+def _obb_rows_to_quat(rows):
+    """FU-033: convert an OBB rotation matrix (3 row-vectors, sim space,
+    orthonormal — round-57 schema) to a mathutils.Quaternion.
+
+    `bake.py` emits ``rotation`` as the rows of the world→local rotation R
+    such that a sim-axis-aligned half-box rotated by R is the visible box.
+    mathutils.Matrix() takes ROW vectors, matching that layout, so we
+    build it directly and read its quaternion. Returns identity for a None
+    / malformed value (defensive — a box with no rotation is a plain AABB).
+
+    Pure (no bpy beyond mathutils, which is CPU-importable) so the
+    conversion is unit-testable without Blender.
+    """
+    if not rows:
+        return mathutils.Quaternion()
+    try:
+        m = mathutils.Matrix((tuple(rows[0]), tuple(rows[1]), tuple(rows[2])))
+        return m.to_quaternion()
+    except (TypeError, ValueError, IndexError):
+        return mathutils.Quaternion()
+
+
+def _import_obstacle_obj(path: Path, idx: int):
+    """FU-033: import a mesh-obstacle OBJ, tolerant of the operator rename.
+
+    Blender 4.0+ ships ``bpy.ops.wm.obj_import``; older builds only have
+    ``bpy.ops.import_scene.obj``. Returns the imported object (the single
+    new selected object), or None on any failure (caller skips + warns).
+    """
+    before = set(bpy.data.objects)
+    try:
+        if hasattr(bpy.ops.wm, "obj_import"):
+            bpy.ops.wm.obj_import(filepath=str(path))
+        else:  # pragma: no cover — legacy Blender
+            bpy.ops.import_scene.obj(filepath=str(path))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] FU-033: obj_import raised for obstacle {idx}: {exc}")
+        return None
+    new = [o for o in bpy.data.objects if o not in before]
+    if not new:
+        return None
+    # The OBJ may import as multiple objects; if so, the first mesh is the
+    # body. Keep it simple — return the first new object.
+    return new[0]
 
 
 def _argv_after_doubledash():
@@ -139,7 +186,7 @@ def _parse_wallclock_from_cache_json(cache: Path) -> tuple[float, float]:
 def build_scene(cache: Path, label: str, fluid_color: tuple,
                 fps: int, n_frames: int,
                 sim_s: float, mesh_s: float,
-                cube_center: tuple, cube_half: tuple,
+                obstacles: list,
                 samples: int = 16, material: str = "water"):
     sc = bpy.data.scenes.get("fluidcube_render") or bpy.data.scenes.new("fluidcube_render")
     bpy.context.window.scene = sc
@@ -294,26 +341,106 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             fbsdf.inputs["IOR"].default_value = 1.45
     surf.data.materials.append(fluid_mat)
 
-    # Cube obstacle — position + size read from the scene TOML so the rendered
-    # cube tracks whatever the bake actually collided with. (Past bug: hardcoded
-    # location had Y/Z swapped, so the visible cube was 10cm off from where the
-    # solver placed the invisible obstacle — fluid behaviour looked chaotic.)
-    edge = 2.0 * cube_half[0]
-    bpy.ops.mesh.primitive_cube_add(size=edge, location=(0.0, 0.0, 0.0))
-    cube = bpy.context.active_object
-    cube.name = "fluidcube_obstacle"
-    cube.parent = pivot
-    # Cancel the pivot's Y-up rotation on the cube so it stays axis-aligned
-    # in world frame regardless of the pivot transform.
-    cube.rotation_euler = (math.radians(-90), 0, 0)
-    cube.location = tuple(cube_center)  # sim coords, pivot-local
+    # Obstacles — read from the scene TOML so the rendered geometry tracks
+    # whatever the bake actually collided with. (Past bug: hardcoded
+    # location had Y/Z swapped, so the visible cube was 10cm off from where
+    # the solver placed the invisible obstacle — fluid behaviour looked
+    # chaotic.) FU-033: render EVERY obstacle of ANY type, not just box #0.
+    #
+    # Pivot/rotation contract (round-57/59 §9.6): every primitive is
+    # parented to `pivot` (which maps sim Y-up → Blender Z-up) and gets the
+    # counter-rotation rot_euler=(-90°,0,0) so it stays axis-aligned in the
+    # WORLD frame regardless of the pivot. Any OBB rotation composes ON TOP
+    # of that counter-rotation.
+    #
+    # One shared tan material for all obstacle primitives (minimal).
     cmat = bpy.data.materials.new("fluidcube_cube_mat")
     cmat.use_nodes = True
     cbsdf = cmat.node_tree.nodes.get("Principled BSDF")
     if cbsdf:
         cbsdf.inputs["Base Color"].default_value = (0.55, 0.45, 0.35, 1.0)
         cbsdf.inputs["Roughness"].default_value = 0.7
-    cube.data.materials.append(cmat)
+
+    _counter = mathutils.Euler((math.radians(-90), 0, 0)).to_quaternion()
+
+    def _finish_obstacle(ob, idx, extra_rot=None):
+        """Parent + counter-rotate (+ optional extra rotation) + material."""
+        ob.name = f"fluidcube_obstacle_{idx}"
+        ob.parent = pivot
+        ob.rotation_mode = "QUATERNION"
+        # extra_rot is applied in the obstacle's pre-counter sim frame, so
+        # compose counter * extra (counter on the left = outermost).
+        ob.rotation_quaternion = (
+            _counter @ extra_rot if extra_rot is not None else _counter)
+        ob.data.materials.append(cmat)
+
+    for idx, obs in enumerate(obstacles):
+        otype = obs.get("type", "box")
+        if otype == "box":
+            bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0, 0, 0))
+            ob = bpy.context.active_object
+            # unit cube has half-extent 1.0 (size=2) → scale to half_size.
+            hs = obs.get("half_size", (0.05, 0.05, 0.05))
+            ob.scale = (float(hs[0]), float(hs[1]), float(hs[2]))
+            ob.location = tuple(obs.get("center", (0, 0, 0)))  # pivot-local sim
+            # round-57 OBB: rotate the box if a rotation matrix is present.
+            extra = _obb_rows_to_quat(obs.get("rotation"))
+            _finish_obstacle(ob, idx, extra_rot=extra)
+        elif otype == "sphere":
+            bpy.ops.mesh.primitive_uv_sphere_add(
+                radius=float(obs.get("radius", 0.05)), location=(0, 0, 0))
+            ob = bpy.context.active_object
+            ob.location = tuple(obs.get("center", (0, 0, 0)))
+            _finish_obstacle(ob, idx)
+        elif otype == "cylinder_y":
+            # FU-033 cylinder-axis resolution: primitive_cylinder_add builds
+            # the cylinder along its LOCAL Z. The solver's cylinder_y axis is
+            # sim-Y. The counter-rotation (-90° about X) ALONE already maps
+            # local-Z → sim-Y, which the pivot (+90° about X) then maps to
+            # world-Z (vertical) — exactly what cylinder_y wants. So NO
+            # extra rotation is needed: the cylinder follows the same
+            # parent+counter pattern as the box/sphere. (Verified live: an
+            # added Z→Y rotation laid the cylinder on its side; plain
+            # counter-rotation stands it upright. Computed: counter@local-Z
+            # = sim-Y, pivot@sim-Y = world-Z.)
+            bpy.ops.mesh.primitive_cylinder_add(
+                radius=float(obs.get("radius", 0.05)),
+                depth=2.0 * float(obs.get("half_height", 0.1)),
+                location=(0, 0, 0))
+            ob = bpy.context.active_object
+            ob.location = tuple(obs.get("center", (0, 0, 0)))
+            _finish_obstacle(ob, idx)
+        elif otype == "mesh":
+            path = obs.get("path", "")
+            if not path or not Path(path).exists():
+                # dodge: the bake writes the obstacle OBJ next to scene.toml;
+                # a cache copied/moved WITHOUT its sidecar .obj (or an old
+                # cache) leaves a dangling path. Skip with a warning rather
+                # than crash the whole render — the other obstacles + fluid
+                # still draw. (FU-033: pre-fix any non-box raised here.)
+                print(f"[warn] FU-033: obstacle {idx} mesh path missing, "
+                      f"skipping: {path!r}")
+                continue
+            ob = _import_obstacle_obj(Path(path), idx)
+            if ob is None:
+                print(f"[warn] FU-033: obstacle {idx} OBJ import failed, "
+                      f"skipping: {path!r}")
+                continue
+            # OBJ verts are in WORLD METRES (see addon _export_obj); the bake
+            # maps them to sim space via scale (scalar OR per-axis vec3) +
+            # translate. Apply the SAME map here so the drawn mesh lands
+            # where the solver sampled it.
+            scale = obs.get("scale", 1.0)
+            if isinstance(scale, (list, tuple)):
+                ob.scale = (float(scale[0]), float(scale[1]), float(scale[2]))
+            else:
+                ob.scale = (float(scale),) * 3
+            ob.location = tuple(obs.get("translate", (0, 0, 0)))
+            _finish_obstacle(ob, idx)
+        else:
+            print(f"[warn] FU-033: unknown obstacle type {otype!r} "
+                  f"(obstacle {idx}) — skipping")
+            continue
 
     # Ground plane.
     bpy.ops.mesh.primitive_plane_add(size=4.0, location=(0, 0, 0))
@@ -404,7 +531,7 @@ def main():
     cache = Path(args.cache).resolve()
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
 
-    cube_center, cube_half = _load_obstacle_from_scene(Path(args.scene).resolve())
+    obstacles = _load_obstacles_from_scene(Path(args.scene).resolve())
     sim_s, mesh_s = _parse_wallclock_from_cache_json(cache)
 
     # Frame count fallback: if --frames was omitted (or 0) read cache.json's
@@ -419,9 +546,14 @@ def main():
             print(f"[warn] could not read frame_count from cache.json: {e}")
         if n_frames <= 0:
             n_frames = 600  # last-ditch fallback matches the old hardcoded default
+    # FU-033: summarise count + types instead of a single cube's geometry.
+    from collections import Counter as _Counter
+    _types = _Counter(o.get("type", "box") for o in obstacles)
+    _obs_summary = (", ".join(f"{n}×{t}" for t, n in sorted(_types.items()))
+                    if obstacles else "none")
     print(f"[render] {args.label}: cache={cache}  "
           f"sim={sim_s:.1f}s mesh={mesh_s:.1f}s  "
-          f"cube={cube_center} half={cube_half}  frames={n_frames} samples={args.samples}")
+          f"obstacles=[{_obs_summary}]  frames={n_frames} samples={args.samples}")
 
     # FU-032 precedence: explicit --material > legacy label inference
     # (back-compat for the step30-32 demo flows where the label WAS the
@@ -433,7 +565,7 @@ def main():
     sc, surf, sim_time_text = build_scene(
         cache, args.label, tuple(args.color),
         args.fps, n_frames, sim_s, mesh_s,
-        cube_center, cube_half,
+        obstacles,
         samples=args.samples, material=material,
     )
     loader = FrameLoader(cache, surf, sim_time_text, args.fps)
