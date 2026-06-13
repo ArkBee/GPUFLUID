@@ -1,0 +1,89 @@
+# demo30 rescope HERO candidate — MPM waterfall (the production solver path).
+#
+# Why MPM not FLIP: FU-017 made MPM the default solver; the visual bench
+# scenes are still FLIP (jacobi/flip_blend), so they don't show what a user
+# actually gets. This scene exercises the PRODUCTION water on the original
+# demo30 intent — a continuous laminar-ish stream — rescoped per the
+# 2026-05-18 finding: water-on-a-blocking-cube can't make a laminar stream
+# (the cube dams it into a tower); a stream onto a LEDGE that deflects then
+# pools reads as flow, not accumulation.
+#
+# Iteration discipline (HANDOFF §0.5 + memory): get WATER right at this
+# length first; only then lengthen / add a tilted (OBB) ledge — FU-033 now
+# renders non-AABB obstacles, so the slope rescope is unblocked, but that's
+# step 2, not step 1.
+
+[domain]
+# v3 (2026-06-13): 80 -> 96 for water cohesion (the same bump cleaned up the
+# dam_break candidate's metaball/voxel surface; the judge panel's #1 fix).
+resolution = [96, 96, 96]
+# FU-016: real-world extent so gravity/velocities scale by metres, not aspect.
+size_world = [2.0, 2.0, 2.0]
+
+# Tiny seed at the floor so the first MPM step has material before the inflow
+# ramps (same trick as cascade5_bowls / bench_waterfall).
+[[fluids]]
+type = "box"
+lo = [0.05, 0.05, 0.05]
+hi = [0.15, 0.10, 0.15]
+ppc = 8
+color = [0.20, 0.55, 0.90]
+
+# Continuous source pouring down -Y from the top-left.
+# v2 (2026-06-13): velocity was [0,0,0] — the judge panel proved the MPM mass
+# then just inflated as a compressible puff at the emitter (mean-Y 0.78->0.67,
+# never descended). Give it real downward momentum so it falls as a stream.
+[[inflow]]
+lo = [0.18, 0.86, 0.42]
+hi = [0.30, 0.94, 0.58]
+velocity = [0.0, -3.0, 0.0]
+rate_per_sec = 9000.0
+color = [0.20, 0.55, 0.90]
+frame_start = 0
+# v3: ran to 110 before -> the [[outflow]] drained the pool to an EMPTY/black
+# frame by 120 (judge panel + eyeball caught it). Pour for the WHOLE clip so
+# the stream + pool are present at the final frame; inflow vs drain reaches a
+# visible steady state instead of emptying.
+frame_end = 120
+
+# Flat ledge the stream lands on and sheets off (step 1 = AABB; step 2 tilts it).
+[[obstacle]]
+type = "box"
+center = [0.40, 0.45, 0.50]
+half_size = [0.18, 0.03, 0.25]
+
+# Floor drain on the far side so mass reaches steady state (no infinite fill).
+[[outflow]]
+lo = [0.80, 0.00, 0.00]
+hi = [1.00, 0.10, 1.00]
+frame_start = 0
+frame_end = 120
+
+[simulation]
+solver = "mpm"
+dt = 0.0015
+pressure_iters = 0
+pressure_solver = "pcg"
+gravity = -9.81
+frames = 120
+fps = 24
+cfl = true
+cfl_factor = 0.6
+cfl_max_substeps = 16
+
+[simulation.mpm]
+bulk_modulus = 1000.0
+cube_friction = 0.3
+
+[output]
+cache_dir = "tmp/demo30/hero_waterfall"
+mesh = true
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 2
+mesh_smooth_method = "taubin"
+decimate_ratio = 1.0
+wall_margin_cells = 2
+particles = true
+usd = false
+color_mix_mode = "off"

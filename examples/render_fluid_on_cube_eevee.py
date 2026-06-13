@@ -226,19 +226,33 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
     key_obj = bpy.data.objects.new("Key", key)
     key_obj.rotation_euler = (math.radians(45), math.radians(15), math.radians(-25))
     sc.collection.objects.link(key_obj)
-    fill_d = bpy.data.lights.new("Fill", "AREA"); fill_d.energy = 70.0
+    fill_d = bpy.data.lights.new("Fill", "AREA"); fill_d.energy = 110.0
     fill_d.size = 2.0
     fill = bpy.data.objects.new("Fill", fill_d)
     fill.location = (-2.5, -2.0, 2.0)
     fill.rotation_euler = (math.radians(60), 0, math.radians(45))
     sc.collection.objects.link(fill)
+    # demo30 (2026-06-13): a TALL water body (e.g. the waterfall curtain) casts
+    # itself into shadow and the camera sees the unlit back face — with the old
+    # single key + weak ambient it rendered NEAR-BLACK (caught reading the v3
+    # frames). A camera-side fill lights the face the camera actually sees.
+    fill2_d = bpy.data.lights.new("Fill2", "AREA"); fill2_d.energy = 90.0
+    fill2_d.size = 3.0
+    fill2 = bpy.data.objects.new("Fill2", fill2_d)
+    fill2.location = (2.5, -2.5, 2.2)
+    fill2.rotation_euler = (math.radians(55), 0, math.radians(-30))
+    sc.collection.objects.link(fill2)
 
     world = bpy.data.worlds.get("fluidcube_world") or bpy.data.worlds.new("fluidcube_world")
     world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
     if bg:
-        bg.inputs["Color"].default_value = (0.03, 0.06, 0.10, 1.0)
-        bg.inputs["Strength"].default_value = 0.6
+        # demo30: ambient was (0.03,0.06,0.10)*0.6 — almost no sky fill, so any
+        # self-shadowed surface crushed to black. Lift it (brighter + bluer)
+        # so shadow sides read as dim water, not holes. Kept low enough not to
+        # wash out the lit bench scenes.
+        bg.inputs["Color"].default_value = (0.06, 0.11, 0.18, 1.0)
+        bg.inputs["Strength"].default_value = 1.6
     sc.world = world
 
     # Pivot rotates the mesh so the sim's Y-up matches Blender's Z-up.
