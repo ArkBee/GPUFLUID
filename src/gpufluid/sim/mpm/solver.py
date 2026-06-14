@@ -531,6 +531,18 @@ class MpmSolver:
         self._wall_hi = cfg.walls.hi
         # Mesh obstacle colliders (goal 2026-06-14): upload each precomputed
         # SDF grid to the device once; the per-step pushback samples it.
+        #
+        # KNOWN LIMITATION (audit-2026-06-14 #4, tracked as FU-036): unlike
+        # box/sphere/cylinder above, the mesh obstacle registers NO
+        # grid_postprocess collider — it acts ONLY via the particle-level
+        # k_mesh_sdf_pushback launched after p2g2p. The grid velocity field is
+        # therefore never told the mesh is solid, so a deep hydrostatic column
+        # leaks through over many substeps (the pushback only repositions
+        # particles already inside). A grid-level mesh collider can't fit the
+        # warp-mpm grid_postprocess machinery (it passes only a Dirichlet_collider
+        # struct per kernel — no room for an SDF array; see mpm_solver_warp.py
+        # ~480). Workaround for deep pools: box-collider walls (see
+        # examples/scenes/demo30_stairs.toml). Shallow flow over a mesh is fine.
         self._mesh_sdfs = []
         for mc in cfg.meshes:
             sdf_wp = wp.from_numpy(
@@ -885,19 +897,20 @@ class MpmSolver:
         self.save_frame_ply(out_dir, 0)
         for k in range(1, cfg.n_frames + 1):
             self.step(k)
-            if k % cfg.dump_every == 0:
-                self.save_frame_ply(out_dir, k)
-            # NaN check — every step. The positions() call is a
-            # GPU→CPU copy; cheap enough at typical particle counts
-            # (~10⁴-10⁵) and the failure-mode protection is critical.
-            # If profiling later shows this is a hot-path cost,
-            # demote to every-N-steps with N tuned by total step count.
+            # NaN check — every step, and BEFORE the dump (audit-2026-06-14 #1).
+            # The old order dumped sim_{k}.ply FIRST, so a divergence landing
+            # exactly on a dump boundary (k % dump_every == 0) wrote a
+            # NaN-poisoned PLY to disk AND reported last_dumped == k as the
+            # "last good frame" — violating the round-20 truthful-truncation
+            # contract. Checking first means the diverged frame is never
+            # written. The positions() GPU→CPU copy is cheap at typical
+            # particle counts (~10⁴-10⁵); it ran every step before too.
             pos = self.positions()
             if pos.size and np.any(np.isnan(pos)):
-                # Compute how many full dump_every frames actually
-                # landed on disk so caller can write a truthful
-                # cache.json with truncated_at_frame.
-                last_dumped = (k // cfg.dump_every) * cfg.dump_every
+                # The last CLEAN dump is the previous boundary. (k-1)//... so
+                # that a diverging boundary step (k % dump_every == 0) excludes
+                # itself; for a non-boundary k it equals the prior dump.
+                last_dumped = ((k - 1) // cfg.dump_every) * cfg.dump_every
                 raise MpmDivergenceError(
                     step=k,
                     last_dumped_frame=last_dumped,
@@ -906,6 +919,8 @@ class MpmSolver:
                            f"(last successfully dumped frame: {last_dumped} "
                            f"/ {cfg.n_frames} requested)",
                 )
+            if k % cfg.dump_every == 0:
+                self.save_frame_ply(out_dir, k)
             if progress and k % cfg.dump_every == 0:
                 # Round-62: emit progress on the DUMP cadence in OUTPUT-
                 # FRAME units ("frame N/M"), not every 200 raw steps in

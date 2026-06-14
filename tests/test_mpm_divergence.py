@@ -92,15 +92,18 @@ def test_nan_mid_run_reports_last_completed_dump_frame(tmp_path: Path):
     assert sol.saved_frames == [0, 5, 10]
 
 
-def test_nan_exactly_on_dump_step_reports_that_frame(tmp_path: Path):
-    """NaN at step 15 (which IS a dump step) → save runs first, NaN
-    check fires after, last_dumped_frame == 15."""
+def test_nan_exactly_on_dump_step_excludes_the_diverged_frame(tmp_path: Path):
+    """audit-2026-06-14 #1: NaN at step 15 (which IS a dump boundary) must NOT
+    write the NaN frame to disk nor report it as the last good frame. The NaN
+    check now runs BEFORE the dump, so frame 15 is never saved and last_dumped
+    is the previous CLEAN boundary (10), not 15. (This test previously asserted
+    the BUG — dump-first then NaN-check — claiming the garbage frame as good.)"""
     sol = _make_fake_solver(n_frames=20, dump_every=5, nan_at_step=15)
     with pytest.raises(MpmDivergenceError) as ei:
         sol.run(tmp_path)
     assert ei.value.step == 15
-    assert ei.value.last_dumped_frame == 15
-    assert sol.saved_frames == [0, 5, 10, 15]
+    assert ei.value.last_dumped_frame == 10  # NOT 15 (the diverged boundary)
+    assert sol.saved_frames == [0, 5, 10]    # frame 15 was NEVER written
 
 
 def test_error_message_contains_step_and_frame_counts(tmp_path: Path):

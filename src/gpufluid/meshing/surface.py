@@ -308,7 +308,11 @@ class MeshExtractor:
                 d, level=iso_level, spacing=(self.dx, self.dx, self.dx))
         except (ValueError, RuntimeError):
             return None, None
-        return verts.astype(np.float32), faces.astype(np.int32)
+        # audit-2026-06-14 #12: cell-centred grid -> world = (g+0.5)*dx. skimage
+        # `spacing` gives g*dx, so add the half-cell to match the GPU path and
+        # the cell-centred obstacle SDFs / raw particles.
+        return (verts.astype(np.float32) + 0.5 * self.dx,
+                faces.astype(np.int32))
 
     @block("M5.4", "GPU marching cubes via wp.MarchingCubes (device-resident)")
     def _mc_extract_gpu(self, iso_level: float):
@@ -344,7 +348,14 @@ class MeshExtractor:
             return None, None
         verts = self._mc.verts.numpy().astype(np.float32)
         # Warp MC returns vertices in *grid-index* coordinates; scale to world.
-        verts = verts * self.dx
+        # audit-2026-06-14 #12: the density/SDF grid is CELL-CENTRED — the
+        # scatter kernels place a particle at world p into sample index
+        # i = p/dx - 0.5 (so index i ↔ world (i+0.5)*dx, and the SDF evaluates
+        # phi at (i+0.5)*dx). MC verts are in grid-index space, so the world
+        # map is (g+0.5)*dx, NOT g*dx — the old g*dx shifted the fluid mesh by
+        # -0.5*dx relative to the cell-centred obstacle SDFs and the raw
+        # particles. Verified by particle-cloud vs mesh-bbox centre comparison.
+        verts = (verts + 0.5) * self.dx
         faces = self._mc.indices.numpy().reshape(-1, 3).astype(np.int32)
         return verts, faces
 

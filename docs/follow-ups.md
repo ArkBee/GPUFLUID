@@ -7,6 +7,25 @@
 
 ---
 
+## audit 2026-06-14 (adversarial multi-agent bug-hunt, branch feat/demo30-rescope)
+
+Воркфлоу: 7 ревьюеров × поверхность + 3 скептика-верификатора на находку. 13
+подтверждённых багов (≥2/3). **12 закрыты** в этой ветке (config/commands/render/
+addon/solver/surface — см. коммиты `audit 2026-06-14`). Один отложен:
+
+- 📝 **FU-036** — **grid-level mesh-коллайдер** (audit #4). Box/sphere/cylinder
+  проецируют скорость на СЕТКЕ каждый субшаг (`grid_postprocess`); меш-препятствие
+  делает только post-hoc particle pushback (`k_mesh_sdf_pushback`), поэтому
+  глубокий гидростатический столб медленно протекает (см. solver.py mesh-collider
+  comment + [[project_mpm_scene_authoring]]). **Не быстрый фикс:** машинерия
+  `mpm_solver_warp.grid_postprocess` (стр. 480-490) передаёт кернелу только
+  `Dirichlet_collider`-структуру (vec3/float) — массив SDF туда не влезает, нужна
+  правка third_party + GPU-валидация на сцене глубокого пула. Workaround уже есть:
+  box-стенки бассейна (как в `demo30_stairs.toml`). Готово когда: меш-домен держит
+  столб ≥0.3 без протечки + тест на сцене.
+
+---
+
 ## demo30 rescope 2026-06-13 (branch feat/demo30-rescope)
 
 Перезаход на застрявшую demo30 после MPM-pivot. Метод: judge-panel workflow

@@ -54,8 +54,13 @@ def test_gpu_mc_vertices_lie_on_iso():
     v, f = ex_gpu.extract(s.pos, iso_level=0.6, smooth_passes=2)
     # density field is on `ex_gpu.dens`
     d = ex_gpu.dens.numpy()
-    # Convert world verts back to grid-index coords and sample
-    grid_coords = (v / ex_gpu.dx).T  # (3, N)
+    # Convert world verts back to grid-ARRAY-index coords and sample.
+    # audit-2026-06-14 #12: the grid is cell-centred — world (g+0.5)*dx maps to
+    # density array index g, so subtract the half-cell before sampling. (This
+    # is the "not off-by-half-a-cell" invariant in the docstring, now explicit:
+    # the rescale adds 0.5, the back-conversion removes it, and the sampled
+    # density still lands on the iso level.)
+    grid_coords = (v / ex_gpu.dx - 0.5).T  # (3, N)
     sampled = map_coordinates(d, grid_coords, order=1, mode="constant", cval=0.0)
     # 95% of vertices should be within 0.05 of the iso level (0.6)
     err = np.abs(sampled - 0.6)
