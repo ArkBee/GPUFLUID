@@ -423,6 +423,26 @@ def _normalise_id(bid: str) -> str:
     return bid.replace(".", "_").replace("-", "_").lower()
 
 
+def _slug_in_test_haystack(slug: str, haystack: str) -> bool:
+    """True if `slug` appears in the `|`-joined lowercased test-name haystack
+    as a COMPLETE block id, not as the numeric prefix of a longer sibling.
+
+    audit-2026-06-14r5 (promoted from the round-4 disputed finding once the
+    collisions were confirmed live — 80 of them in the registry): a plain
+    ``slug in haystack`` substring test made block ``S2.1`` (slug ``s2_1``)
+    count as 'tested' on the strength of any ``test_s2_11_*`` / ``test_s2_14_*``
+    function, silently labelling untested blocks impl,test in the STATUS table
+    and suppressing their no-guard-test warning.
+
+    The trailing ``(?![0-9])`` lookahead closes the numeric segment so
+    ``s2_1`` no longer matches ``s2_11``; the leading ``(?<![a-z0-9])`` keeps
+    the head from matching mid-token. A child-block test (``s2_1_gpu``) still
+    counts for its parent — that's a refinement of the same block, not a
+    different one."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(slug)}(?![0-9])",
+                     haystack) is not None
+
+
 def _check_test_coverage(registry: Dict[str, List[BlockInfo]],
                          out: CheckReport) -> None:
     """Warn for any block without a guard test.
@@ -461,7 +481,7 @@ def _check_test_coverage(registry: Dict[str, List[BlockInfo]],
     full_text = "\n".join(full_text_haystack_parts)
     for bid in registry:
         slug = _normalise_id(bid)
-        if slug in slug_str:
+        if _slug_in_test_haystack(slug, slug_str):
             continue
         if bid in full_text:
             continue
@@ -603,7 +623,7 @@ def regen_blocks_md() -> str:
         src_files = sorted({_short_path(i.source_file) for i in infos})
         src = ", ".join(f"`{s}`" for s in src_files)
         slug = _normalise_id(bid)
-        has_test = test_haystack and slug in test_haystack
+        has_test = bool(test_haystack) and _slug_in_test_haystack(slug, test_haystack)
         status = "impl,test" if has_test else "impl"
         lines.append(f"| {bid} | {_esc(desc)} | {layer} | {src} | {status} |")
         rendered_ids.add(bid)
