@@ -48,6 +48,10 @@ KEY_CACHE_DOM_SIZE      = "gpufluid_cache_dom_size"
 KEY_WW_CACHE_DIR        = "gpufluid_ww_cache_dir"
 KEY_WW_CACHE_FRAME_OFFSET = "gpufluid_ww_cache_frame_offset"
 KEY_WW_CACHE_ORIGIN     = "gpufluid_ww_cache_origin"
+# audit-2026-06-14 #3: whitewater positions are in the SAME normalised [0,1]^3
+# space as the surface mesh, so they MUST be scaled by dom_size too — this key
+# was missing, so foam/spray collapsed into a 1 m cube on any non-unit domain.
+KEY_WW_CACHE_DOM_SIZE   = "gpufluid_ww_cache_dom_size"
 
 # Bake-trace binding (on Domain Empty — note: NOT prefixed
 # `_cache_origin`/`_cache_dom_size` like the cache-binding set).
@@ -64,6 +68,7 @@ ALL_CACHE_KEYS = (
 )
 ALL_WW_KEYS = (
     KEY_WW_CACHE_DIR, KEY_WW_CACHE_FRAME_OFFSET, KEY_WW_CACHE_ORIGIN,
+    KEY_WW_CACHE_DOM_SIZE,
 )
 ALL_BAKE_TRACE_KEYS = (
     KEY_BAKE_TRACE_CACHE_DIR, KEY_BAKE_TRACE_ORIGIN, KEY_BAKE_TRACE_DOM_SIZE,
@@ -116,6 +121,11 @@ def get_ww_cache_origin(obj, default: Vec3 = (0.0, 0.0, 0.0)) -> Vec3:
     return (float(v[0]), float(v[1]), float(v[2]))
 
 
+def get_ww_cache_dom_size(obj, default: Vec3 = (1.0, 1.0, 1.0)) -> Vec3:
+    v = obj.get(KEY_WW_CACHE_DOM_SIZE, default)
+    return (float(v[0]), float(v[1]), float(v[2]))
+
+
 def has_ww_binding(obj) -> bool:
     return obj.get(KEY_WW_CACHE_DIR) is not None
 
@@ -157,10 +167,14 @@ def set_cache_binding(
 
 def set_ww_binding(
     obj, cache_dir: str, origin: Vec3, frame_offset: int = 0,
+    dom_size: Vec3 = (1.0, 1.0, 1.0),
 ) -> None:
     obj[KEY_WW_CACHE_DIR] = str(cache_dir)
     obj[KEY_WW_CACHE_FRAME_OFFSET] = int(frame_offset)
     obj[KEY_WW_CACHE_ORIGIN] = list(origin)
+    # audit-2026-06-14 #3: persist dom_size so the rebuild scales normalised
+    # whitewater positions to world like the surface mesh does.
+    obj[KEY_WW_CACHE_DOM_SIZE] = list(dom_size)
 
 
 def set_bake_trace(obj, cache_dir: str, origin: Vec3, dom_size: Vec3) -> None:

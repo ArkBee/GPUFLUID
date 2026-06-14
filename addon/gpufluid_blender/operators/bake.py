@@ -1011,6 +1011,7 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
                     origin_x=float(origin[0]),
                     origin_y=float(origin[1]),
                     origin_z=float(origin[2]),
+                    dom_size=tuple(float(c) for c in dom_size),  # audit #3
                 )
             except Exception as e:
                 self.report({"WARNING"},

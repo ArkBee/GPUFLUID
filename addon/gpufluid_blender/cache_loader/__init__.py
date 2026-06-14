@@ -85,7 +85,8 @@ def _rebuild_mesh(obj, verts, faces, origin):
 # Whitewater point-cloud loader
 # ---------------------------------------------------------------------------
 
-def _rebuild_ww_points_inplace(me, positions, kinds, origin, visible_kinds):
+def _rebuild_ww_points_inplace(me, positions, kinds, origin, visible_kinds,
+                               dom_size=(1.0, 1.0, 1.0)):
     """Identical to old in-place rebuild, but split out so the double-buffer
     swap path can reuse it on a fresh datablock."""
     me.clear_geometry()
@@ -103,7 +104,13 @@ def _rebuild_ww_points_inplace(me, positions, kinds, origin, visible_kinds):
         kinds = kinds[keep]
     if positions.shape[0] == 0:
         return
-    pts = (positions + np.asarray(origin, dtype=np.float32)).astype(np.float32)
+    # audit-2026-06-14 #3: whitewater positions are normalised [0,1]^3 (same
+    # space as the surface mesh), so scale by dom_size BEFORE adding origin —
+    # exactly like the surface path (v_world = verts*dom_size + origin). Without
+    # this, foam/spray collapse into a 1 m cube on any non-unit domain.
+    pts = (np.asarray(positions, dtype=np.float32)
+           * np.asarray(dom_size, dtype=np.float32)
+           + np.asarray(origin, dtype=np.float32)).astype(np.float32)
     me.vertices.add(pts.shape[0])
     me.vertices.foreach_set("co", pts.ravel())
     if kinds is not None and kinds.size > 0:
@@ -116,7 +123,8 @@ def _rebuild_ww_points_inplace(me, positions, kinds, origin, visible_kinds):
     me.update()
 
 
-def _rebuild_ww_points(obj, positions, kinds, origin, visible_kinds):
+def _rebuild_ww_points(obj, positions, kinds, origin, visible_kinds,
+                       dom_size=(1.0, 1.0, 1.0)):
     """Replace `obj.data` with a vertex-only mesh of whitewater positions.
 
     `kinds` is an int32 array (foam=0, spray=1, bubble=2) of length N, or None.
@@ -131,7 +139,8 @@ def _rebuild_ww_points(obj, positions, kinds, origin, visible_kinds):
     """
     # WW path uses in-place helper directly — point-only data, no faces,
     # avoids the depsgraph race seen in the surface mesh path.
-    _rebuild_ww_points_inplace(obj.data, positions, kinds, origin, visible_kinds)
+    _rebuild_ww_points_inplace(obj.data, positions, kinds, origin, visible_kinds,
+                               dom_size)
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +598,7 @@ def _frame_change_handler(scene, depsgraph=None):
         if ww_dir:
             offset = _cb.get_ww_cache_frame_offset(obj)
             origin = list(_cb.get_ww_cache_origin(obj))
+            dom_size = list(_cb.get_ww_cache_dom_size(obj))  # audit #3
             idx = f - offset
             if idx >= 0:
                 pos_path = os.path.join(ww_dir, "whitewater", f"frame_{idx:04d}.npy")
@@ -615,7 +625,8 @@ def _frame_change_handler(scene, depsgraph=None):
                                 "interrupted mid-frame? dropping kinds.",
                                 f, obj.name, pos.shape[0], kinds.shape[0])
                             kinds = None
-                        _rebuild_ww_points(obj, pos, kinds, origin, visible_kinds)
+                        _rebuild_ww_points(obj, pos, kinds, origin, visible_kinds,
+                                           dom_size)
                     except Exception as exc:  # noqa: BLE001
                         _addon_logger.warning(
                             "ww: error at frame %d for '%s': %s",

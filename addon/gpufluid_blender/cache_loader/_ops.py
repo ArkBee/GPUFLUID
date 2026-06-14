@@ -231,9 +231,38 @@ class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
                     "the first SIMULATED frame (frame_0001) — pre-round-61 "
                     "default 1 put the empty frame on scene frame 1 (looked "
                     "like a blank/failed bake) AND dropped the final frame.")
+    # audit-2026-06-14 #3: dom_size to scale normalised [0,1]^3 whitewater
+    # positions to world, mirroring the surface attach. Default (1,1,1) keeps
+    # legacy unit-cube behaviour; the post-bake auto-attach passes the real
+    # dom_size, and the standalone-button path derives it from the Domain below.
+    dom_size: bpy.props.FloatVectorProperty(
+        name="Domain size", size=3, default=(1.0, 1.0, 1.0))
 
     def execute(self, context):
         cache_dir = bpy.path.abspath(self.cache_dir)
+        # Standalone-button fallback: if dom_size is still the unit default and
+        # there's an active Domain, recompute origin + dom_size from its world
+        # AABB so manual attach matches what Bake would have written (mirrors
+        # OT_attach_cache.execute lines 75-103).
+        if tuple(self.dom_size) == (1.0, 1.0, 1.0):
+            active = context.view_layer.objects.active
+            active_dom = getattr(active, "gpufluid_domain", None)
+            if active is not None and active_dom is not None and active_dom.is_domain:
+                import mathutils
+                if active.type == "EMPTY":
+                    d = active.empty_display_size
+                    local = [mathutils.Vector(c) for c in (
+                        (-d, -d, -d), (d, -d, -d), (d, d, -d), (-d, d, -d),
+                        (-d, -d, d), (d, -d, d), (d, d, d), (-d, d, d))]
+                    pts = [active.matrix_world @ v for v in local]
+                else:
+                    pts = [active.matrix_world @ mathutils.Vector(c)
+                           for c in active.bound_box]
+                xs = [p.x for p in pts]; ys = [p.y for p in pts]; zs = [p.z for p in pts]
+                lo = (min(xs), min(ys), min(zs))
+                hi = (max(xs), max(ys), max(zs))
+                self.origin_x, self.origin_y, self.origin_z = lo
+                self.dom_size = (hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2])
         if not os.path.isdir(os.path.join(cache_dir, "whitewater")):
             self.report(
                 {"ERROR"},
@@ -249,7 +278,8 @@ class GPUFLUID_OT_attach_ww_cache(bpy.types.Operator):
         _cb.set_ww_binding(
             target, cache_dir,
             (self.origin_x, self.origin_y, self.origin_z),
-            frame_offset=self.frame_offset)
+            frame_offset=self.frame_offset,
+            dom_size=tuple(self.dom_size))  # audit #3
         _frame_change_handler(context.scene)
         # Pre-public-test audit (2026-06-01, §9.6 mirror-drift): the surface
         # attach WARNINGs on a 0-frame bind, but this path reported plain INFO
