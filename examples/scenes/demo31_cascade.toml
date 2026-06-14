@@ -1,0 +1,59 @@
+# demo31 — sloped-step cascade (MPM). 3 box steps tilted ~14° about Y so water
+# drains down-slope toward +X step-to-step instead of pooling (flat steps
+# retain; sloped steps drain — project finding). Inflow lands on the top step's
+# high side. CFL substepping ON for stability (a lively inflow NaNs without it).
+[domain]
+resolution = [96, 96, 96]
+size_world = [2.0, 2.0, 2.0]
+
+# Ry(14°) row-major: columns are the box-local axes in world. Top normal
+# (box-local +Z) leans toward +X, so the slab drains toward +X.
+# Ry(20°) — steeper drain so the slope clears water faster than the faucet adds.
+[[obstacle]]
+type = "box"
+center = [0.27, 0.5, 0.70]
+half_size = [0.16, 0.30, 0.025]
+rotation = [[0.9397, 0.0, 0.3420], [0.0, 1.0, 0.0], [-0.3420, 0.0, 0.9397]]
+
+[[obstacle]]
+type = "box"
+center = [0.50, 0.5, 0.50]
+half_size = [0.16, 0.30, 0.025]
+rotation = [[0.9397, 0.0, 0.3420], [0.0, 1.0, 0.0], [-0.3420, 0.0, 0.9397]]
+
+[[obstacle]]
+type = "box"
+center = [0.73, 0.5, 0.30]
+half_size = [0.16, 0.30, 0.025]
+rotation = [[0.9397, 0.0, 0.3420], [0.0, 1.0, 0.0], [-0.3420, 0.0, 0.9397]]
+
+# faucet onto the top step's slope, LOW rate so the slope drains it (no pile-up)
+[[inflow]]
+lo = [0.17, 0.42, 0.80]
+hi = [0.27, 0.58, 0.86]
+velocity = [0.05, 0.0, -0.05]
+rate_per_sec = 4000
+frame_start = 0
+frame_end = 120
+color = [0.10, 0.45, 0.85]
+
+[simulation]
+solver = "mpm"
+dt = 0.004
+cfl = true
+cfl_factor = 0.4
+cfl_max_substeps = 24
+gravity = -9.81
+frames = 120
+fps = 24
+
+[simulation.mpm]
+bulk_modulus = 900.0
+rpic_damping = 0.15
+grid_v_damping = 0.998
+initial_velocity = -0.2
+
+[output]
+cache_dir = "../../out/demo31_cascade"
+mesh = true
+color_mix_mode = "linear"
