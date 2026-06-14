@@ -177,6 +177,16 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
                     "stop runaway loops on misconfigured caches.",
         default=10000, min=100, max=1000000,
     )
+    # 2026-06-15: language of the in-panel help text (the per-knob hints the
+    # Domain panel renders). Defaults to Russian for this user; English for
+    # everyone else is one click away.
+    hint_language: bpy.props.EnumProperty(
+        name="Hint language / Язык подсказок",
+        items=[("ru", "Русский", "Подсказки в панели на русском"),
+               ("en", "English", "Panel help text in English")],
+        default="ru",
+        description="Language of the help text shown in the Domain panel",
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -195,6 +205,8 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         col.label(text="Cache loader:")
         col.prop(self, "preload_cap")
         col.prop(self, "preload_max_frames")
+        col.separator()
+        col.prop(self, "hint_language")
 
 
 class _FallbackPrefs:
@@ -209,6 +221,7 @@ class _FallbackPrefs:
     manual-register run re-detects.
     """
     interpreter_path: str = ""
+    hint_language: str = "ru"
 
 
 _FALLBACK_PREFS = _FallbackPrefs()

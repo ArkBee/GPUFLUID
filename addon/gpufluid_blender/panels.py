@@ -51,6 +51,12 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         d = context.active_object.gpufluid_domain
+        # ── One-click presets (2026-06-15) ── the fastest path for anyone who
+        # doesn't want to reason about bulk modulus / dt / CFL by hand.
+        pbox = layout.box()
+        pbox.label(text="Пресеты / Presets", icon="PRESET")
+        pbox.operator_menu_enum("gpufluid.apply_preset", "preset",
+                                text="Выбрать пресет / Pick preset")
         col = layout.column()
         col.prop(d, "resolution")
         col.prop(d, "cache_dir")
@@ -280,6 +286,40 @@ class GPUFLUID_PT_whitewater(bpy.types.Panel):
         row.prop(ww, "show_foam", toggle=True)
         row.prop(ww, "show_spray", toggle=True)
         row.prop(ww, "show_bubble", toggle=True)
+
+
+@block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")
+class GPUFLUID_PT_help(bpy.types.Panel):
+    """Collapsible per-knob help in the user's chosen language (2026-06-15).
+
+    Default-closed so it never clutters the panel; one click expands a
+    plain-language cheat-sheet of what the main physics knobs do. Language
+    follows the addon preference `hint_language`."""
+    bl_label = "Помощь / Help"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = PANEL_CATEGORY
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        o = context.active_object
+        return o is not None and o.gpufluid_domain.is_domain
+
+    def draw(self, context):
+        layout = self.layout
+        # Lazy imports: this file is also loaded standalone under a bpy stub in
+        # tests (spec_from_file_location) where relative imports can't resolve.
+        try:
+            from . import preferences
+            from .operators import presets as _presets
+            lang = getattr(preferences.get_prefs(context), "hint_language", "ru")
+            lines = _presets.HINT_TEXT.get(lang, _presets.HINT_TEXT["en"])
+        except Exception:
+            lines = []
+        col = layout.column(align=True)
+        for line in lines:
+            col.label(text=line)
 
 
 @block("A8.7", "UI panels (8 sections under GpuFluid sidebar category)")

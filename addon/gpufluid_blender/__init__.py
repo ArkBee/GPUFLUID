@@ -70,6 +70,7 @@ if bpy is not None:
     from . import preferences
     from .operators import bake as op_bake
     from .operators import helpers as op_helpers
+    from .operators import presets as op_presets
     from .operators import render as op_render
     from . import cache_loader
     from . import panels
@@ -98,6 +99,7 @@ def _collect_classes():
         op_helpers.GPUFLUID_OT_clear_cache,
         op_helpers.GPUFLUID_OT_open_cache_dir,
         op_helpers.GPUFLUID_OT_apply_eevee_preset,
+        op_presets.GPUFLUID_OT_apply_preset,
         cache_loader.GPUFLUID_OT_attach_cache,
         cache_loader.GPUFLUID_OT_attach_ww_cache,
         cache_loader.GPUFLUID_OT_detach_cache,
@@ -108,6 +110,7 @@ def _collect_classes():
         panels.GPUFLUID_PT_inflow,
         panels.GPUFLUID_PT_outflow,
         panels.GPUFLUID_PT_whitewater,
+        panels.GPUFLUID_PT_help,
         panels.GPUFLUID_PT_bake,
     )
 

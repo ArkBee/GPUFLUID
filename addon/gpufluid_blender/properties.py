@@ -96,7 +96,10 @@ class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
 @block("A8.2", "Domain property group")
 class GpufluidDomainProps(bpy.types.PropertyGroup):
     is_domain: bpy.props.BoolProperty(name="Is gpufluid Domain", default=False)
-    resolution: bpy.props.IntProperty(name="Resolution", default=64, min=8, max=512, soft_max=256,
+    # soft_min/soft_max keep the SLIDER in a sane range; a power user can still
+    # TYPE a value up to the hard min/max for an over-range case (2026-06-15).
+    resolution: bpy.props.IntProperty(name="Resolution", default=64, min=8, max=512,
+                                      soft_min=32, soft_max=192,
                                       description="Cells per side of the longest domain axis")
     # default left empty; the Add Domain helper fills it with an absolute path
     # (Blender 5.x extensions reject "//" relative prefix in defaults).
@@ -108,10 +111,13 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     )
 
     # simulation
-    frames: bpy.props.IntProperty(name="Frames", default=120, min=1, max=10000)
-    fps: bpy.props.IntProperty(name="FPS", default=24, min=1, max=240)
-    dt: bpy.props.FloatProperty(name="dt", default=0.005, min=1e-5, max=0.1, precision=5)
-    pressure_iters: bpy.props.IntProperty(name="Pressure Iterations", default=60, min=1, max=2000)
+    frames: bpy.props.IntProperty(name="Frames", default=120, min=1, max=10000,
+                                  soft_min=24, soft_max=600)
+    fps: bpy.props.IntProperty(name="FPS", default=24, min=1, max=240, soft_max=60)
+    dt: bpy.props.FloatProperty(name="dt", default=0.005, min=1e-5, max=0.1, precision=5,
+                                soft_min=0.002, soft_max=0.008)
+    pressure_iters: bpy.props.IntProperty(name="Pressure Iterations", default=60, min=1, max=2000,
+                                          soft_min=20, soft_max=200)
     flip_blend: bpy.props.FloatProperty(name="FLIP/PIC Blend", default=0.95, min=0.0, max=1.0,
                                         description="1.0 = pure FLIP, 0.0 = pure PIC")
     gravity: bpy.props.FloatProperty(name="Gravity Y", default=-9.81)
@@ -123,19 +129,25 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
                ("pcg", "PCG", "Diagonal-preconditioned conjugate gradient (5-10x fewer iters)")],
         default="pcg",
     )
-    use_cfl: bpy.props.BoolProperty(name="CFL Substepping", default=False,
-                                    description="Auto-split dt when particles move too fast")
+    # audit-2026-06-15: default ON. A lively inflow blows the MPM pressure
+    # stack to NaN within ~20 steps without substepping (live-found). CFL on
+    # by default makes the out-of-the-box bake stable; the small extra cost
+    # (a few substeps on fast frames) is the right trade for "doesn't explode".
+    use_cfl: bpy.props.BoolProperty(name="CFL Substepping", default=True,
+                                    description="Auto-split dt when particles move too fast. "
+                                    "Keep ON — prevents the bake diverging to NaN on fast flow.")
     # FU-029: range deliberately unchanged (max=2.0 back-compat, no silent
     # clamping) — the >1.0 MPM caveat is guidance only (description + a
     # panel alert row in panels.py).
     cfl_factor: bpy.props.FloatProperty(
-        name="CFL", default=0.5, min=0.05, max=2.0,
+        name="CFL", default=0.5, min=0.05, max=2.0, soft_min=0.2, soft_max=1.0,
         description="Courant factor for adaptive substepping. "
                     "MPM note (FU-029): values > 1.0 under-substep stress "
                     "waves — the elastic wave speed exceeds the advection "
                     "CFL, so the bake may diverge or alias at rigid "
                     "contacts; keep <= 1.0 for MPM (0.5 default is safe)")
-    cfl_max_substeps: bpy.props.IntProperty(name="Max Substeps / Frame", default=16, min=1, max=128)
+    cfl_max_substeps: bpy.props.IntProperty(name="Max Substeps / Frame", default=16, min=1, max=128,
+                                            soft_min=8, soft_max=48)
 
     # meshing
     iso_level: bpy.props.FloatProperty(name="Iso Level", default=0.6, min=0.01, max=10.0)
@@ -188,9 +200,10 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     # MPM-specific knobs (used only when solver == 'mpm')
     mpm_bulk_modulus: bpy.props.FloatProperty(
         name="Bulk Modulus", default=1500.0, min=100.0, max=10000.0,
+        soft_min=500.0, soft_max=2000.0,
         description="Water stiffness (high = closer to real water but less stable). 1500 is the production default; 3000+ needs finer grid.")
     mpm_rpic_damping: bpy.props.FloatProperty(
-        name="Viscosity (RPIC)", default=0.15, min=0.0, max=1.0,
+        name="Viscosity (RPIC)", default=0.15, min=0.0, max=1.0, soft_max=0.5,
         description="APIC rotational-mode damping. 0 = pure APIC (lively swirly water). 0.15 = subtle viscosity. 0.3+ = syrupy.")
     mpm_grid_v_damping: bpy.props.FloatProperty(
         name="Global Damping", default=0.998, min=0.9, max=1.0, precision=4,
