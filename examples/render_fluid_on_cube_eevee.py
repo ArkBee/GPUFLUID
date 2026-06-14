@@ -77,7 +77,20 @@ def _load_obstacles_from_scene(scene_toml: Path) -> list[dict]:
     obstacle-free scene legitimately returns ``[]``.
     """
     data = tomllib.loads(scene_toml.read_text())
-    return list(data.get("obstacle", []))
+    obstacles = list(data.get("obstacle", []))
+    # audit-2026-06-14 #2: a mesh obstacle's `path` is stored RELATIVE to the
+    # scene TOML (the bake resolves it against config_dir = scene dir, see
+    # cli/commands.py:66-68). Resolve it the SAME way here so the renderer draws
+    # the collider the bake actually used. Otherwise a relative path is checked
+    # against the process CWD, fails Path.exists() below, and the obstacle
+    # silently vanishes from the video while the water still collides with it.
+    scene_dir = scene_toml.parent
+    for obs in obstacles:
+        if obs.get("type") == "mesh":
+            p = obs.get("path", "")
+            if p and not Path(p).is_absolute():
+                obs["path"] = str((scene_dir / p).resolve())
+    return obstacles
 
 
 def _obb_rows_to_quat(rows):
@@ -246,9 +259,22 @@ def _content_sim_bbox(cache, obstacles, n_sample=6):
             hi[k] = max(hi[k], float(c[k]) + float(h[k]))
     if not seen:
         return None
-    # clamp into the domain (mesh verts can poke a hair past walls)
+    # clamp into the domain (mesh verts can poke a hair past walls).
+    # audit-2026-06-14 #11: read the REAL domain extent from cache.json rather
+    # than assuming a unit cube — a FLIP scene with a metric dx spans
+    # [0, dx*res], so a hardcoded 1.0 crushed the content box and mis-framed it.
+    # No-op for normalized (MPM / default-dx FLIP) scenes where domain_size==[1,1,1].
+    dom_hi = [1.0, 1.0, 1.0]
+    try:
+        import json as _json
+        _cj = _json.loads((Path(cache) / "cache.json").read_text())
+        _ds = _cj.get("domain_size")
+        if _ds and len(_ds) == 3:
+            dom_hi = [float(v) for v in _ds]
+    except Exception:
+        pass  # dodge: no/unreadable cache.json -> keep the unit-cube default
     lo = [max(0.0, x) for x in lo]
-    hi = [min(1.0, x) for x in hi]
+    hi = [min(dom_hi[k], hi[k]) for k in range(3)]
     return lo, hi
 
 
