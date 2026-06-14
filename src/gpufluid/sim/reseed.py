@@ -290,8 +290,9 @@ def reseed_particles_gpu(
     they're compacted in lockstep with positions/velocities.
     Output Warp arrays are fresh allocations (the caller's old buffers
     can be dropped). Velocities of emitted particles are zero; their
-    colour is white (1,1,1); their temperature is 0.0 (the next G2P
-    sweep paints them from the surrounding grid temperature field).
+    colour is zero (0,0,0) and temperature 20.0 — matching the CPU
+    reseed path and FlipSolver3D.prepare_frame (audit-2026-06-14r2 #6;
+    was white/0.0, a §9.6 mirror-drift). The next G2P sweep repaints them.
     """
     import warp.utils as wputils
     dev = device or default_device()
@@ -377,19 +378,23 @@ def reseed_particles_gpu(
     new_color = None
     if color_kept is not None:
         color_kept_np = color_kept[:n_alive].numpy() if n_alive > 0 else np.zeros((0, 3), dtype=np.float32)
-        # Emitted particles get white — a neutral choice that lets the next
-        # G2P pass paint them from the surrounding grid colour field.
-        emit_col = np.ones((n_emit, 3), dtype=np.float32)
+        # audit-2026-06-14r2 #6: emitted particles get ZERO (black), matching the
+        # CPU reseed path (reseed_particles) and the authoritative inflow-emit
+        # convention in FlipSolver3D.prepare_frame. The GPU sibling had drifted
+        # to white(1,1,1) (§9.6 mirror-drift), so the same scene flips emit
+        # colour the moment particle count crosses RESEED_GPU_THRESHOLD.
+        emit_col = np.zeros((n_emit, 3), dtype=np.float32)
         new_color_np = np.concatenate([color_kept_np, emit_col], axis=0)
         new_color = wp.array(new_color_np, dtype=wp.vec3, device=dev)
 
     new_temperature = None
     if temp_kept is not None:
         temp_kept_np = temp_kept[:n_alive].numpy() if n_alive > 0 else np.zeros(0, dtype=np.float32)
-        # Emitted particles get T=0.0 — neutral; the next G2P sweep
-        # paints them from the surrounding grid temperature field (same
-        # design as the colour path's "white" emit value).
-        emit_t = np.zeros(n_emit, dtype=np.float32)
+        # audit-2026-06-14r2 #6: emitted particles get T=20.0, matching the CPU
+        # reseed path and prepare_frame's unspecified-temperature default. The
+        # GPU sibling had drifted to 0.0 (§9.6), causing a 20°C->0°C jump in the
+        # temperature-colormap output as particle count crosses the GPU threshold.
+        emit_t = np.full(n_emit, 20.0, dtype=np.float32)
         new_temperature_np = np.concatenate([temp_kept_np, emit_t], axis=0)
         new_temperature = wp.array(new_temperature_np, dtype=float, device=dev)
 

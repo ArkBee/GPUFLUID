@@ -126,10 +126,11 @@ def test_gpu_reseed_speedup_at_500k():
 
 def test_gpu_reseed_color_lockstep():
     """When attr_color is passed, kept particles must keep their original
-    colour and emitted particles must get white (1,1,1)."""
+    colour and emitted particles get ZERO (0,0,0) — matching the CPU reseed
+    path and prepare_frame (audit-2026-06-14r2 #6; was white)."""
     pos, vel, marker = _random_particles(60_000, 24, 1.0 / 24.0)
     # Colour everything red so we can identify emitted particles by their
-    # white colour after reseed.
+    # black (zero) colour after reseed.
     col = np.tile(np.array([1.0, 0.0, 0.0], dtype=np.float32), (len(pos), 1))
     cfg = ReseedConfig(min_per_cell=4, max_per_cell=16)
     dx = 1.0 / 24.0
@@ -142,9 +143,10 @@ def test_gpu_reseed_color_lockstep():
         pos_wp, vel_wp, marker_wp, dx, cfg, np.random.default_rng(0),
         attr_color_wp=col_wp)
     c = new_col.numpy()
-    # The last `n_emit` rows must be white; everything before must be red.
+    # The last `n_emit` rows must be black (0); everything before must be red.
     assert n_emit > 0, "no particles emitted — pick a sparser scene"
-    assert np.allclose(c[-n_emit:], 1.0), "emitted particles should be white"
+    assert np.allclose(c[-n_emit:], 0.0), \
+        "emitted particles should be zero/black (matches CPU reseed + prepare_frame)"
     # Kept rows: red (allow tiny float tolerance)
     kept = c[:-n_emit]
     assert (kept[:, 0] > 0.99).all() and (kept[:, 1] < 0.01).all() \
@@ -162,8 +164,8 @@ def test_gpu_reseed_temperature_lockstep():
     surface-area pin for the new API.
     """
     pos, vel, marker = _random_particles(60_000, 24, 1.0 / 24.0)
-    # Every input particle is hot (T=80). Emitted particles should land
-    # at T=0 (the "neutral" emit value, mirroring colour's "white" emit).
+    # Every input particle is hot (T=80). Emitted particles should land at
+    # T=20.0 — the CPU reseed / prepare_frame default (audit r2 #6; was 0.0).
     temps = np.full(len(pos), 80.0, dtype=np.float32)
     cfg = ReseedConfig(min_per_cell=4, max_per_cell=16)
     dx = 1.0 / 24.0
@@ -182,9 +184,9 @@ def test_gpu_reseed_temperature_lockstep():
         "temperature array length must match positions in lockstep"
     t = new_temp.numpy()
     assert n_emit > 0, "no particles emitted — pick a sparser scene"
-    # Last `n_emit` rows: neutral emit value (0.0).
-    assert np.allclose(t[-n_emit:], 0.0), \
-        "emitted particles should get the neutral T=0.0 emit value"
+    # Last `n_emit` rows: the prepare_frame default emit value (20.0).
+    assert np.allclose(t[-n_emit:], 20.0), \
+        "emitted particles should get T=20.0 (matches CPU reseed + prepare_frame)"
     # Kept rows: T=80 preserved.
     kept = t[:-n_emit]
     assert np.allclose(kept, 80.0, atol=1e-4), \
