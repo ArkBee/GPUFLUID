@@ -17,7 +17,14 @@ def decimate_mesh(verts: np.ndarray, faces: np.ndarray,
                   aggressiveness: int = 7) -> Tuple[np.ndarray, np.ndarray]:
     """Return decimated (verts, faces). ``target_ratio`` in (0, 1] keeps
     that fraction of the original faces."""
-    if verts is None or faces is None or len(faces) == 0 or target_ratio >= 1.0:
+    # audit-2026-06-15r7 #4: a non-positive ratio is a no-op, NOT "decimate to
+    # nothing". Without this, target_ratio<=0 fell through and
+    # target_count=max(4, int(len*ratio)) collapsed the WHOLE frame to a 4-face
+    # degenerate blob (the call site only gates on `< 1.0`, so 0.0/-x reach
+    # here). Validation also lives at the config parse layer; this guard keeps
+    # the library function safe for any direct caller.
+    if (verts is None or faces is None or len(faces) == 0
+            or target_ratio >= 1.0 or target_ratio <= 0.0):
         return verts, faces
     target_count = max(4, int(len(faces) * float(target_ratio)))
     import pyfqmr

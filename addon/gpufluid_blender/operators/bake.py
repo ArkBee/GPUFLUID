@@ -811,7 +811,17 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
         # pick up the leftovers and the viewport would show a frame from
         # the prior bake at frames beyond the new frame_count.
         # Live-found 2026-05-25 during round-3 testing.
-        import shutil as _shutil
+        # audit-2026-06-15r7 #2: use the round-60 _robust_rmtree (retry + chmod
+        # + backoff for the Windows WinError 5/32/145 async-delete / AV-handle
+        # race), NOT a bare shutil.rmtree. OT_clear_cache was hardened against
+        # exactly this race; the bake's own stale-strip was the un-hardened twin
+        # (§9.6 mirror drift). A swallowed WinError 145 here leaves the prior
+        # run's tail frames on disk, which then inflate the glob-derived
+        # frame_count and defeat the preloader's anti-stale cap — the precise
+        # stale-frame bug this strip exists to prevent.
+        # Lazy import: standalone test loads stub `helpers` with only
+        # subprocess_drain, so keep _robust_rmtree off the module-load path.
+        from .helpers import _robust_rmtree
         out_root = Path(str(scene_dict["output"]["cache_dir"]))
         # whitewater + whitewater_kinds added per pre-public-test audit
         # (2026-06-01): they were omitted, so a shorter re-bake left the
@@ -822,11 +832,16 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
             d = out_root / sub
             if d.is_dir():
                 try:
-                    _shutil.rmtree(d)
-                except Exception as e:
+                    _robust_rmtree(str(d))
+                except OSError as e:
+                    # Surfaced loudly (not a bare warning): proceeding past a
+                    # failed strip risks a mixed-length cache whose tail frames
+                    # leak into the new bake.
                     logger.warning(
                         "addon.bake.stale_subdir_clean_failed",
-                        extra={"dir": str(d), "err": str(e)})
+                        extra={"dir": str(d), "err": str(e),
+                               "hint": "re-bake may show stale tail frames; "
+                                       "close any attached cache / file lock"})
 
         # Set reentrance flag BEFORE spawn (round-6 race fix). Sync mode
         # also wants the guard so two parallel scripted bakes don't both
@@ -915,25 +930,41 @@ class GPUFLUID_OT_bake(bpy.types.Operator):
 
     def _friendly_error_for_rc(self, rc: int):
         """Round-20: translate CLI rc into actionable error message.
-        Reads ``<cache_dir>/cache.json`` for the rc=2 (MPM divergence)
-        case — surfaces the truncated frame + recovery hint. Returns
-        ``None`` when no specific guidance applies (runner falls back
-        to generic 'rc=N' wording)."""
+        Reads ``<cache_dir>/cache.json`` for the rc=2 divergence case —
+        surfaces the truncated frame + a solver-specific recovery hint.
+        Returns ``None`` when no specific guidance applies (runner falls
+        back to generic 'rc=N' wording).
+
+        audit-2026-06-15r7 #1: handle BOTH truncation reasons. Round-32
+        added the FLIP divergence rc=2 path to the CLI + manifest schema +
+        cache_loader, but this twin still recognised only 'mpm_divergence'
+        (§9.6 mirror drift), so a diverged FLIP bake lost its recovery
+        message — the user was never told N valid frames were written and
+        recoverable via Attach Cache, and the MPM-only 'lower Bulk Modulus'
+        text doesn't even apply to FLIP."""
         if rc != 2:
             return None
         try:
             import json as _json
             manifest = _json.loads(
                 (Path(self._cache_dir_str) / "cache.json").read_text())
-            if manifest.get("truncation_reason") != "mpm_divergence":
-                return None
+            reason = manifest.get("truncation_reason")
             frame = manifest.get("truncated_at_frame", "?")
             total = manifest.get("frame_count", "?")
+            if reason == "mpm_divergence":
+                recovery = ("lower Bulk Modulus (default 1500), lower dt, "
+                            "or shrink resolution")
+                solver = "MPM solver"
+            elif reason == "flip_divergence":
+                recovery = ("lower dt / CFL factor, soften inflow velocities, "
+                            "or raise pressure iterations")
+                solver = "FLIP solver"
+            else:
+                return None
             return (
-                f"gpufluid bake: MPM solver diverged at frame {frame}; "
+                f"gpufluid bake: {solver} diverged at frame {frame}; "
                 f"{total} valid frames written to {self._cache_dir_str}. "
-                f"Recovery: lower Bulk Modulus (default 1500), lower dt, "
-                f"or shrink resolution, then re-bake. Use 'Attach Cache' "
+                f"Recovery: {recovery}, then re-bake. Use 'Attach Cache' "
                 f"to load the partial result.")
         except Exception:
             return None

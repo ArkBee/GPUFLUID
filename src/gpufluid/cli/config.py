@@ -604,6 +604,14 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
             "C7.1",
             f"unknown output.color_mix_mode {_cmm!r}; "
             f"expected one of 'linear', 'mixbox', 'off'")
+    # audit-2026-06-15r7 #4: decimate_ratio must be in (0, 1]. A non-positive
+    # value silently collapsed the mesh to a 4-face blob (the decimator's lower
+    # bound was unguarded); reject it loudly at parse instead.
+    _dec = float(out.get("decimate_ratio", 1.0))
+    if not (0.0 < _dec <= 1.0):
+        raise BlockError(
+            "C7.1",
+            f"output.decimate_ratio must be in (0, 1]; got {_dec}")
     output = OutputCfg(
         cache_dir=str(out.get("cache_dir", "out/sim")),
         mesh=bool(out.get("mesh", True)),

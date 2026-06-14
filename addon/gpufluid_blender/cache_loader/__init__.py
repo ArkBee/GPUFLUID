@@ -31,7 +31,7 @@ except ImportError:
         return _w
 
 
-def _rebuild_mesh(obj, verts, faces, origin):
+def _rebuild_mesh(obj, verts, faces, origin, dom_size=(1.0, 1.0, 1.0)):
     """Replace obj.data via Blender's battle-tested `from_pydata` API.
 
     Two previous attempts crashed:
@@ -69,7 +69,15 @@ def _rebuild_mesh(obj, verts, faces, origin):
             n_f = faces.shape[0]
             if n_f == 0:
                 return
-    v_world = (verts + np.asarray(origin, dtype=np.float32)).astype(np.float32)
+    # audit-2026-06-15r7 #3: PLY cache verts are normalised [0,1]^3 and MUST be
+    # scaled by the domain extent before the origin offset — exactly what the
+    # fast (preload) path and the whitewater rebuild already do. Without the
+    # `* dom_size` this slow path collapsed the whole surface into a unit cube
+    # in the domain's lower corner on any non-unit domain (the default Add
+    # Domain is a 2 m cube). §9.6 mirror drift: the dom_size fix had landed on
+    # 2 of the 3 parallel rebuild functions and missed this one.
+    ds = np.asarray(dom_size, dtype=np.float32)
+    v_world = (verts * ds + np.asarray(origin, dtype=np.float32)).astype(np.float32)
     # from_pydata expects list-of-tuples; .tolist() is the standard idiom.
     me.from_pydata(v_world.tolist(), [], faces.astype(np.int32).tolist())
     me.update()
@@ -562,6 +570,10 @@ def _frame_change_handler(scene, depsgraph=None):
             pattern = _cb.get_cache_pattern(obj)
             offset = _cb.get_cache_frame_offset(obj)
             origin = list(_cb.get_cache_origin(obj))
+            # audit-2026-06-15r7 #3: the slow-path rebuild needs the domain
+            # extent too (verts are normalised [0,1]^3) — read it like the WW
+            # path does, else a non-unit domain collapses to a unit cube.
+            dom_size = list(_cb.get_cache_dom_size(obj))
             idx = f - offset
             if idx >= 0:
                 # FAST PATH — pre-loaded sequence: pointer swap only.
@@ -588,7 +600,7 @@ def _frame_change_handler(scene, depsgraph=None):
                         # coloured caches); colours arrive on the next
                         # full attach_cache call. Keeps the handler-time
                         # cost down for the legacy fallback.
-                        _rebuild_mesh(obj, verts, faces, origin)
+                        _rebuild_mesh(obj, verts, faces, origin, dom_size)
                     except Exception as exc:  # noqa: BLE001
                         _addon_logger.warning(
                             "cache: error at frame %d for '%s': %s",
