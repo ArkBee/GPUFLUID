@@ -242,6 +242,16 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         return 2
     # S2.17.7 — continuous emission. Each [[inflow]] from the TOML becomes
     # a time-gated particle batch pre-allocated inside MpmSolver.
+    # audit-2026-06-15r8 #5: warn (don't silently clamp into a crash) when an
+    # inflow starts at/after the sim ends — frame_end is clamped to sim.frames
+    # below, so an un-clamped frame_start > sim.frames would manufacture a
+    # REVERSED range and MpmSolver() would raise a ValueError citing the
+    # CLAMPED frame_end, which the user never wrote. §9.10 (log the fallback).
+    for _i, _inf in enumerate(scene.inflow):
+        if int(_inf.frame_start) >= sim.frames:
+            print(f"[mpm] WARN: inflow[{_i}].frame_start={_inf.frame_start} "
+                  f">= simulation.frames={sim.frames} — it starts at/after the "
+                  f"sim ends, so it emits nothing.", file=sys.stderr)
     inflows = tuple(
         MpmInflow(
             lo=tuple(inf.lo), hi=tuple(inf.hi),
@@ -264,7 +274,9 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             # by inv_dom_z here would DOUBLE-scale the addon path.
             velocity=tuple(inf.velocity),
             rate_per_sec=float(inf.rate_per_sec),
-            frame_start=int(inf.frame_start),
+            # clamp frame_start to sim.frames too (mirror frame_end) so a
+            # too-large start can't make a clamp-induced reversed range (r8 #5).
+            frame_start=int(min(inf.frame_start, sim.frames)),
             frame_end=int(min(inf.frame_end, sim.frames)),
             keyframes=tuple(tuple(row) for row in getattr(inf, "keyframes", ()) or ()),
             # B18 — forward per-source attributes (None ⇒ source contributes
@@ -1202,6 +1214,16 @@ def cmd_render(args: argparse.Namespace) -> int:
     driver = Path(__file__).resolve().parents[3] / "addon" / "gpufluid_blender" / "_headless_render.py"
     if not driver.exists():
         raise BlockError("A8.12", f"render driver missing: {driver}")
+    # audit-2026-06-15r8 #1: when --fps is omitted, resolve the bake fps from
+    # cache.json (sim.fps) instead of leaving a hardcoded 60 in the payload —
+    # the renderer's fps drives the sim-time clock + playback rate, so 60 on a
+    # 24fps bake played 2.5x too fast. Explicit --fps still overrides.
+    fps = args.fps
+    if not fps:
+        try:
+            fps = int(_json.loads(cache_json.read_text()).get("fps", 60) or 60)
+        except Exception:
+            fps = 60
     payload = _json.dumps({
         "cache":  str(cache_dir),
         "scene":  str(scene_toml),
@@ -1209,7 +1231,7 @@ def cmd_render(args: argparse.Namespace) -> int:
         "label":  args.label,
         "color":  args.color,
         "samples": args.samples,
-        "fps":    args.fps,
+        "fps":    fps,
         "frames": args.frames,
         # FU-032: optional — absent/None means "legacy label inference"
         # downstream; the headless wrapper only forwards it when set.
@@ -1374,7 +1396,9 @@ def main(argv=None) -> int:
         metavar=("R", "G", "B"), help="fluid surface RGB in [0,1]")
     p_render.add_argument("--samples", type=int, default=16,
         help="Eevee TAA samples per frame (A8.9 preset)")
-    p_render.add_argument("--fps", type=int, default=60)
+    # audit-2026-06-15r8 #1: default None -> cmd_render resolves the bake fps
+    # from cache.json when omitted (instead of a hardcoded 60).
+    p_render.add_argument("--fps", type=int, default=None)
     p_render.add_argument("--frames", type=int, default=0,
         help="number of frames to render; 0 = read from cache.json")
     p_render.add_argument("--blender", default=None,

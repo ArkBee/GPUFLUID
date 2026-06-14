@@ -279,6 +279,7 @@ class GPUFLUID_PT_whitewater(bpy.types.Panel):
         if ww.use_potential:
             pbox.prop(ww, "potential_radius")
             pbox.prop(ww, "potential_v_max")
+            pbox.prop(ww, "trapped_air_weight")  # audit-r8 #2: now tunable
             pbox.prop(ww, "wave_crest_weight")
         box = col.box()
         box.label(text="Class Visibility (cache reader)")

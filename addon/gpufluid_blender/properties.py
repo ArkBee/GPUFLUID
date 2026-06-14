@@ -81,6 +81,15 @@ class GpufluidWhitewaterGroup(bpy.types.PropertyGroup):
         name="Potential v_max", default=10.0, min=0.1, max=100.0,
         description="Velocity normaliser for the (1 - |v_ij|/v_max) factor",
     )
+    # audit-2026-06-15r8 #2: the trapped-air emission weight (alpha). round-23
+    # wired the config_builder EMIT half but never added this property or the
+    # _output_dict producer, so the CLI alpha was silently pinned to 1.0 and
+    # un-tunable from the UI (§9.3 claim != done). Now fully wired.
+    trapped_air_weight: bpy.props.FloatProperty(
+        name="Trapped-Air Weight", default=1.0, min=0.0, max=4.0,
+        description="Weight (alpha) on the trapped-air potential emission term. "
+                    "1.0 = full; lower = fewer trapped-air whitewater particles.",
+    )
     # B3.2 — wave-crest potential weight. 0 = trapped-air only (current).
     # >0 adds beta * |div n_hat| to the emit weight, so wave crests and
     # breaking ridges emit more spray than the velocity-only heuristic.

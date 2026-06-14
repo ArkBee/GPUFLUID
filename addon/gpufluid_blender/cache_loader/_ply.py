@@ -41,15 +41,34 @@ def _read_ply_minimal(path):
                 f"(got header without that format line)")
         n_v = 0
         n_f = 0
-        has_color = False
+        vertex_props = []
+        cur_elem = None
         for ln in text.splitlines():
             s = ln.strip()
             if s.startswith("element vertex"):
-                n_v = int(s.split()[2])
+                n_v = int(s.split()[2]); cur_elem = "vertex"
             elif s.startswith("element face"):
-                n_f = int(s.split()[2])
-            elif s == "property uchar red":
-                has_color = True
+                n_f = int(s.split()[2]); cur_elem = "face"
+            elif s.startswith("element "):
+                cur_elem = "other"
+            elif s.startswith("property ") and cur_elem == "vertex":
+                vertex_props.append(s.split()[-1])  # "property <type> <name>"
+        # audit-2026-06-15r8 #3: validate the FULL vertex layout, mirroring
+        # gpufluid.io.ply.read_ply (audit r2 #4). Only xyz (12 B) or xyz+rgb
+        # (15 B) are supported. The old code only sniffed for `property uchar
+        # red`; an xyz+normals PLY (24 B/vertex, no red) left has_color False
+        # and read n_v*12 bytes, silently mis-striding every vertex after the
+        # first. §9.6 mirror drift — the library reader got this guard, this one
+        # didn't.
+        if vertex_props == ["x", "y", "z"]:
+            has_color = False
+        elif vertex_props == ["x", "y", "z", "red", "green", "blue"]:
+            has_color = True
+        else:
+            raise ValueError(
+                f"PLY {path}: unsupported vertex layout {vertex_props}; only "
+                f"['x','y','z'] or ['x','y','z','red','green','blue'] are "
+                f"supported (re-export without normals / extra vertex props).")
         if has_color:
             vbuf = f.read(n_v * 15)
             arr = np.frombuffer(vbuf, dtype=np.uint8).reshape(n_v, 15)

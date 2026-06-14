@@ -41,6 +41,11 @@ def _output_dict(dprops):
             out["whitewater_use_potential"] = True
             out["whitewater_potential_radius"] = float(ww.potential_radius)
             out["whitewater_potential_v_max"] = float(ww.potential_v_max)
+            # audit-2026-06-15r8 #2: produce the trapped-air weight the
+            # config_builder emit-loop + CLI already consume (was missing, so
+            # the alpha was silently pinned to the CLI default 1.0).
+            out["whitewater_trapped_air_weight"] = float(
+                getattr(ww, "trapped_air_weight", 1.0))
             wcw = float(getattr(ww, "wave_crest_weight", 0.0))
             if wcw > 0.0:
                 out["whitewater_wave_crest_weight"] = wcw

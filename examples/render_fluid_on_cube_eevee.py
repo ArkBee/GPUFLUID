@@ -480,12 +480,16 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             fbsdf.inputs["Base Color"].default_value = (*fluid_color, 1.0)
             nt.nodes.remove(mix)
             nt.nodes.remove(attr)
-        if refractive:
+        if refractive and material == "water":
             # demo30 2026-06-14 (judge panel): a DARK base colour + full
             # transmission absorbs all light and renders OPAQUE — the dark
             # per-vertex Col (navy) was killing the refraction. Clear water
             # wants a near-white glass tint, not the Col. Drop the Col link
             # and set a light tint so the floor refracts through.
+            # audit-2026-06-15r8 #4: gated on material=='water' — the glass-
+            # white override used to run for ANY material, so --refractive on
+            # honey/oil stole their look (water base colour, no refraction
+            # flags). --refractive is documented as water-only.
             for _lnk in list(fbsdf.inputs["Base Color"].links):
                 nt.links.remove(_lnk)
             fbsdf.inputs["Base Color"].default_value = (0.83, 0.91, 1.0, 1.0)
@@ -719,7 +723,10 @@ def main():
     ap.add_argument("--color", nargs=3, type=float, required=True,
                     metavar=("R", "G", "B"),
                     help="Fluid colour (RGB in [0,1])")
-    ap.add_argument("--fps", type=int, default=60)
+    # audit-2026-06-15r8 #1: default None so an omitted --fps falls back to the
+    # bake fps in cache.json (mirrors --frames), instead of a hardcoded 60 that
+    # ran 24fps bakes 2.5x too fast.
+    ap.add_argument("--fps", type=int, default=None)
     # `None` (not 600) so we can detect "user didn't ask for a count" and fall
     # back to cache.json's frame_count. The headless wrapper (A8.12) only
     # forwards --frames when it's a positive int, so this default kicks in for
@@ -751,18 +758,26 @@ def main():
     up_z = _scene_is_zup(Path(args.scene).resolve())
     sim_s, mesh_s = _parse_wallclock_from_cache_json(cache)
 
+    # Read cache.json once for the frame_count + fps fallbacks below.
+    cache_meta = {}
+    try:
+        cache_meta = json.loads((cache / "cache.json").read_text())
+    except Exception as e:
+        print(f"[warn] could not read cache.json: {e}")
     # Frame count fallback: if --frames was omitted (or 0) read cache.json's
     # frame_count. This is what the headless wrapper relies on — see Bug #2
     # in _headless_render.py.
     n_frames = int(args.frames) if (args.frames and args.frames > 0) else 0
     if n_frames <= 0:
-        try:
-            cache_meta = json.loads((cache / "cache.json").read_text())
-            n_frames = int(cache_meta.get("frame_count", 0))
-        except Exception as e:
-            print(f"[warn] could not read frame_count from cache.json: {e}")
+        n_frames = int(cache_meta.get("frame_count", 0))
         if n_frames <= 0:
             n_frames = 600  # last-ditch fallback matches the old hardcoded default
+    # audit-2026-06-15r8 #1: fps fallback MIRRORS the frame_count one. The
+    # renderer's fps is sim-fps semantics (it drives the sim-time clock, the
+    # "@ Xfps" bake annotation, and sc.render.fps), so an omitted --fps must
+    # use the bake fps from cache.json, not a hardcoded 60 (which played a
+    # 24fps bake 2.5x too fast). Explicit --fps still overrides.
+    fps = int(args.fps) if args.fps else int(cache_meta.get("fps", 60) or 60)
     # FU-033: summarise count + types instead of a single cube's geometry.
     from collections import Counter as _Counter
     _types = _Counter(o.get("type", "box") for o in obstacles)
@@ -781,13 +796,13 @@ def main():
         if args.label.lower() in ("water", "oil", "honey") else "water")
     sc, surf, sim_time_text = build_scene(
         cache, args.label, tuple(args.color),
-        args.fps, n_frames, sim_s, mesh_s,
+        fps, n_frames, sim_s, mesh_s,
         obstacles,
         samples=args.samples, material=material,
         refractive=args.refractive, up_z=up_z,
         cam_angle=args.cam_angle,
     )
-    loader = FrameLoader(cache, surf, sim_time_text, args.fps)
+    loader = FrameLoader(cache, surf, sim_time_text, fps)
     bpy.app.handlers.frame_change_pre.clear()
     bpy.app.handlers.frame_change_pre.append(loader)
 
