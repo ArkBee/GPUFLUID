@@ -86,15 +86,22 @@ block("D4.3.GPU", "GPU triangle ray-cast inside test (brute-force, all triangles
 def k3_mesh_to_solid_bvh(
     cell_centers: wp.array3d(dtype=wp.vec3),
     mesh_id: wp.uint64,
-    accuracy: float,
+    max_dist: float,
     marker: wp.array3d(dtype=int),
 ):
-    """Per-cell winding-number query against Warp's BVH-backed wp.Mesh."""
+    """Per-cell winding-number query against Warp's BVH-backed wp.Mesh.
+
+    audit-2026-06-14r2 #8: the 3rd positional arg of
+    ``mesh_query_point_sign_winding_number`` is ``max_dist`` (the closest-point
+    search bound), NOT ``accuracy`` — this param was misnamed and the launch
+    passed 2.0, capping the search at 2 world units so deep interior cells of a
+    large mesh on a multi-unit domain were never marked solid. ``accuracy``
+    keeps its 2.0 default inside the query."""
     i, j, k = wp.tid()
     if i >= cell_centers.shape[0] or j >= cell_centers.shape[1] or k >= cell_centers.shape[2]:
         return
     p = cell_centers[i, j, k]
-    s = wp.mesh_query_point_sign_winding_number(mesh_id, p, accuracy)
+    s = wp.mesh_query_point_sign_winding_number(mesh_id, p, max_dist)
     if s.result and s.sign < 0.0:
         if marker[i, j, k] != 2:
             marker[i, j, k] = 2
@@ -226,8 +233,19 @@ def mark_solid_from_mesh_gpu(
 
     if use_bvh:
         mesh = _MESH_CACHE.get_or_build(triangles_np, dev, cache_key=cache_key)
+        # audit-2026-06-14r2 #8: max_dist (Warp's closest-point search bound,
+        # NOT accuracy — see kernel docstring) must cover the deepest interior
+        # cell. The deepest point inside a mesh is at most its bbox diagonal
+        # from the surface, so size max_dist to the MESH extent (+ one cell of
+        # margin). The old literal 2.0 culled interior cells of any obstacle
+        # spanning > ~2 world units. Using the mesh bbox (not the whole domain)
+        # keeps the search tight when the obstacle is small in a large domain.
+        _tb = triangles_np.reshape(-1, 3)
+        _dx = float(np.linalg.norm(cell_centers_np[1, 0, 0] - cell_centers_np[0, 0, 0])) \
+            if nx > 1 else 0.0
+        max_dist = float(np.linalg.norm(_tb.max(0) - _tb.min(0))) + _dx + 1e-4
         wp.launch(k3_mesh_to_solid_bvh, dim=(nx, ny, nz),
-                  inputs=[cells_wp, mesh.id, 2.0, marker_wp], device=dev)
+                  inputs=[cells_wp, mesh.id, max_dist, marker_wp], device=dev)
     else:
         flat = triangles_np.reshape(-1, 3).astype(np.float32)
         tris_wp = wp.array(flat, dtype=wp.vec3, device=dev)

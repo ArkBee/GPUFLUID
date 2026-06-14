@@ -76,7 +76,13 @@ def sdf_plane(grid_xyz: np.ndarray, point, normal) -> np.ndarray:
     """
     p = np.asarray(point, dtype=np.float32)
     n = np.asarray(normal, dtype=np.float32)
-    n = n / (np.linalg.norm(n) + 1e-12)
+    nrm = float(np.linalg.norm(n))
+    # audit-2026-06-14r2 #14: the +1e-12 below is only a float-noise dodge, NOT
+    # a zero-vector handler — a genuine (0,0,0) normal would yield an all-zero
+    # half-space (every cell solid). Reject a degenerate normal loudly.
+    if nrm < 1e-9:
+        raise ValueError("sdf_plane: normal must be non-zero")
+    n = n / (nrm + 1e-12)
     return ((grid_xyz - p) * n).sum(axis=-1)
 
 

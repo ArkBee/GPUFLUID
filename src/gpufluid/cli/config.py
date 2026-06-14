@@ -432,10 +432,17 @@ def _parse_obstacle(d: dict) -> ObstacleCfg:
             half_height=float(d["half_height"]),
         )
     if t == "plane":
+        normal = _tuple(d["normal"], 3, "obstacle.normal")
+        # audit-2026-06-14r2 #14: a zero normal makes sdf_plane return an
+        # all-zero field, turning the intended ramp into a fully-solid bbox.
+        # Reject it here with a named error instead of silently mis-meshing.
+        if sum(float(c) ** 2 for c in normal) < 1e-12:
+            raise BlockError("C7.1", "obstacle.normal must be non-zero "
+                             "(a plane needs a direction)")
         return ObstaclePlaneCfg(
             type="plane",
             point=_tuple(d["point"], 3, "obstacle.point"),
-            normal=_tuple(d["normal"], 3, "obstacle.normal"),
+            normal=normal,
             bbox_lo=_tuple(d.get("bbox_lo", [0, 0, 0]), 3, "obstacle.bbox_lo"),
             bbox_hi=_tuple(d.get("bbox_hi", [1, 1, 1]), 3, "obstacle.bbox_hi"),
         )
