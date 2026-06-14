@@ -368,6 +368,16 @@ def collect_scene(context, domain_obj):
                     # round-55: key name must match the original MESH
                     # branch + what config_builder reads (KeyError otherwise)
                     "path": mesh_path,
+                    # audit-2026-06-14r4 #2 (§9.6 mirror of the explicit MESH
+                    # branch below): the OBJ verts are world metres, so the
+                    # collider MUST carry the world→[0,1]³ map. Without scale/
+                    # translate, config_builder defaults to scale=1/translate=0
+                    # and the mesh lands at raw metre coords — entirely outside
+                    # the [0,1]³ domain — so the auto-promoted obstacle silently
+                    # vanished from the sim. Keep identical to lines 445-447.
+                    "scale": avg_inv,
+                    "translate": (-origin.x * avg_inv, -origin.y * avg_inv,
+                                  -origin.z * avg_inv),
                     "center": to_sim(centre_w),
                     "half_size": (hx, hy, hz),  # bbox-equiv for legacy
                 })

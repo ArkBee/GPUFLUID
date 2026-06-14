@@ -49,3 +49,30 @@ def test_i6_5_round_trip_three_frames(tmp_path):
     assert stage.GetStartTimeCode() == 0.0
     assert stage.GetEndTimeCode() == 2.0
     assert stage.GetFramesPerSecond() == 24
+
+
+def test_i6_5_authors_polygon_subdivision_scheme(tmp_path):
+    """audit-2026-06-14r4 #1: the mesh must author subdivisionScheme='none'.
+
+    USD's unauthored fallback is 'catmullClark', which makes every importer
+    treat the baked marching-cubes polygons as a subdivision control cage and
+    render a smoothed/shrunken surface instead of the cached mesh. Pin the
+    authored value so it can't silently regress to the smoothing default.
+    """
+    from pxr import Usd, UsdGeom
+    out = tmp_path / "subdiv.usdc"
+    frames = [(0, np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+                  np.array([[0, 1, 2]], dtype=np.int32))]
+    write_usd_mesh_sequence(out, frames, fps=24, prim_path="/gpufluid/cache")
+
+    # Keep `stage` bound — an inline Usd.Stage.Open(...) temporary gets GC'd
+    # and the returned prim goes invalid ("Accessed schema on invalid prim").
+    stage = Usd.Stage.Open(str(out))
+    mesh = UsdGeom.Mesh.Get(stage, "/gpufluid/cache")
+    scheme = mesh.GetSubdivisionSchemeAttr()
+    assert scheme.HasAuthoredValue(), \
+        "subdivisionScheme must be authored, not left at the catmullClark fallback"
+    assert scheme.Get() == UsdGeom.Tokens.none, \
+        f"expected subdivisionScheme='none', got {scheme.Get()!r}"
+    # Winding pinned so faces don't flip across consumers.
+    assert mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.rightHanded

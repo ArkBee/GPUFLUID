@@ -1190,7 +1190,32 @@ def cmd_render(args: argparse.Namespace) -> int:
     })
     cmd = [blender, "--background", "--python", str(driver), "--", payload]
     print(f"[render] launching: {' '.join(cmd[:3])} ... ({len(payload)} bytes config)")
-    r = subprocess.run(cmd, check=False)
+    # audit-2026-06-14r4 #3: the common misconfig — Blender not on PATH, or a
+    # typo'd --blender — makes subprocess.run raise FileNotFoundError (WinError
+    # 2), NOT return a code. main() only catches BlockError, so that escaped as
+    # a raw traceback. Convert it to the same one-line BlockError contract the
+    # missing-cache.json case above already uses (mirrors _headless_render's
+    # round-25/28 hardening).
+    try:
+        r = subprocess.run(cmd, check=False)
+    except (FileNotFoundError, OSError) as e:
+        raise BlockError(
+            "A8.12",
+            f"could not launch Blender executable {blender!r}: {e}. "
+            f"Put blender on PATH or pass --blender <path-to-blender>.")
+    # audit-2026-06-14r4 #5: Blender exits 0 even when it wrote no frames
+    # (particles-only cache → no mesh/ dir, empty frame range, skipped out
+    # path). Don't report success blindly — count PNGs and warn, mirroring the
+    # addon's render_output_sanity. (Can't fail hard: the wrapper doesn't know
+    # the exact filename pattern, so a zero PNG count under a non-zero rc is
+    # already covered by rc; we only add signal on the rc==0 case.)
+    if r.returncode == 0:
+        n_png = sum(1 for _ in out_dir.glob("**/*.png"))
+        if n_png == 0:
+            print(f"[render] WARNING: Blender exited 0 but no .png was written "
+                  f"to {out_dir} — the render produced nothing (empty frame "
+                  f"range, or a particles-only cache with no mesh).",
+                  file=sys.stderr)
     return r.returncode
 
 

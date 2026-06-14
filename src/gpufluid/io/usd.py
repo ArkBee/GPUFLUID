@@ -49,6 +49,15 @@ def write_usd_mesh_sequence(
     if parent_path and parent_path != "/":
         UsdGeom.Xform.Define(stage, parent_path)
     mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    # audit-2026-06-14r4 #1: author subdivisionScheme=none. USD's documented
+    # fallback when the attr is unauthored is 'catmullClark', so importers
+    # (Blender, usdview, Hydra, Omniverse) would treat our marching-cubes
+    # polygon mesh as a Catmull-Clark *control cage* and render a smoothed,
+    # shrunken surface — not the baked mesh this cache is meant to reproduce
+    # faithfully. 'none' pins it as a plain polygon mesh; rightHanded locks
+    # the winding so faces don't flip across consumers.
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    mesh.CreateOrientationAttr(UsdGeom.Tokens.rightHanded)
 
     points_attr = mesh.GetPointsAttr()
     fvc_attr = mesh.GetFaceVertexCountsAttr()
