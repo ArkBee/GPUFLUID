@@ -50,7 +50,12 @@ class CacheManifest:
     truncated_at_frame: Optional[int] = None
     truncation_reason: Optional[str] = None
 
-    def mesh_path(self, root: Path, frame: int) -> Path:
+    def mesh_path(self, root: Path, frame: int) -> Optional[Path]:
+        # audit-2026-06-14r2 #11: guard None symmetrically with particles_path
+        # — an MPM particles-only bake writes mesh_pattern=null, and the old
+        # `None.format(...)` raised AttributeError instead of returning None.
+        if not self.mesh_pattern:
+            return None
         return root / self.mesh_pattern.format(frame)
 
     def particles_path(self, root: Path, frame: int) -> Optional[Path]:

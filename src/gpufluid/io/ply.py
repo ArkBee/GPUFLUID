@@ -119,15 +119,32 @@ def read_ply(path: Union[str, Path], return_colors: bool = False):
         if "format binary_little_endian" not in header:
             raise BlockError("I6.1", f"unsupported PLY format in {path}")
         n_v = 0; n_f = 0
-        has_color = False
+        # audit-2026-06-14r2 #4: collect the vertex element's property names in
+        # order and validate the layout, instead of only sniffing for `red`.
+        # An xyz+normals (or any other) layout was silently read as 12 B/vertex,
+        # reinterpreting normal bytes as coordinates — contradicting the
+        # docstring's "other combinations are rejected" claim.
+        vertex_props = []
+        cur_element = None
         for line in header.splitlines():
             ls = line.strip()
             if ls.startswith("element vertex"):
-                n_v = int(ls.split()[2])
+                n_v = int(ls.split()[2]); cur_element = "vertex"
             elif ls.startswith("element face"):
-                n_f = int(ls.split()[2])
-            elif ls == "property uchar red":
-                has_color = True
+                n_f = int(ls.split()[2]); cur_element = "face"
+            elif ls.startswith("element"):
+                cur_element = "other"
+            elif ls.startswith("property") and cur_element == "vertex":
+                vertex_props.append(ls.split()[-1])  # the property name
+        if vertex_props == ["x", "y", "z"]:
+            has_color = False
+        elif vertex_props == ["x", "y", "z", "red", "green", "blue"]:
+            has_color = True
+        else:
+            raise BlockError(
+                "I6.1", f"unsupported PLY vertex layout {vertex_props} in {path}; "
+                "read_ply parses only xyz or xyz+rgb(uchar) — use trimesh for "
+                "generic PLYs")
         if has_color:
             # 12 B xyz + 3 B rgb per vertex, interleaved
             vbuf = f.read(n_v * 15)
@@ -143,7 +160,18 @@ def read_ply(path: Union[str, Path], return_colors: bool = False):
         # per-face Python loop that was ~50ms on 10k faces; this is <1ms.
         face_bytes = f.read(n_f * 13)
         if n_f > 0:
+            if len(face_bytes) < n_f * 13:
+                raise BlockError("I6.1", f"truncated PLY face data in {path}")
             rows = np.frombuffer(face_bytes, dtype=np.uint8).reshape(n_f, 13)
+            # audit-2026-06-14r2 #1: every face record MUST be a triangle
+            # (count byte == 3). A quad/n-gon is 17+ bytes; reading it as 13
+            # misaligns the byte stream from that face on and yields scrambled
+            # indices with NO error. The addon reader (cache_loader/_ply.py) got
+            # this guard in round-32; the library reader had drifted (§9.6).
+            if (rows[:, 0] != 3).any():
+                raise BlockError(
+                    "I6.1", f"non-triangle face in PLY {path}; cache PLYs must "
+                    "be triangulated (read_ply parses fixed 3-index records)")
             faces = np.ascontiguousarray(rows[:, 1:]).view(np.int32).reshape(n_f, 3).copy()
         else:
             faces = np.empty((0, 3), dtype=np.int32)
