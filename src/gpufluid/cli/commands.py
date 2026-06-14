@@ -100,6 +100,23 @@ def _build_obstacle_sdf(scene: SceneCfg, grid_xyz) -> Optional[np.ndarray]:
 # C7.2 — simulate
 # ---------------------------------------------------------------------------
 
+def _resolve_cache_dir(scene) -> Path:
+    """Resolve scene.output.cache_dir to an absolute path.
+
+    audit-2026-06-14r6 #2: a relative cache_dir (e.g. the `../../out/foo`
+    convention every example scene uses) must resolve against the SCENE FILE's
+    directory, not the process CWD — otherwise running `gpufluid simulate
+    examples/scenes/x.toml` from the repo root writes the cache to a different
+    place than the scene author intended. The FLIP and MPM paths used to do
+    this differently (FLIP: config_dir-relative; MPM: bare `.resolve()` =
+    CWD-relative), a §9.6 mirror drift. This single helper feeds both.
+    """
+    cache_dir = Path(scene.output.cache_dir)
+    if not cache_dir.is_absolute() and scene.config_dir is not None:
+        cache_dir = scene.config_dir / cache_dir
+    return cache_dir.resolve()
+
+
 # [BLK C7.2]
 @block("C7.2", "simulate command: run a scene and write a mesh cache")
 def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
@@ -457,7 +474,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     cfg.fluid.bulk_modulus = sim.mpm_bulk_modulus
     cfg.fluid.rpic_damping = sim.mpm_rpic_damping
     cfg.fluid.grid_v_damping_scale = sim.mpm_grid_v_damping
-    cache_dir = Path(scene.output.cache_dir).resolve()
+    cache_dir = _resolve_cache_dir(scene)  # audit-r6 #2: scene-dir relative, not CWD
     particles_dir = cache_dir / "particles_raw"  # raw MpmSolver dump location
     mesh_dir = cache_dir / "mesh"
     particles_dir.mkdir(parents=True, exist_ok=True)
@@ -600,7 +617,12 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                               f"{frame_idx}: {loaded.shape[0]} rows vs "
                               f"{pts.shape[0]} particles — stale/mismatched "
                               f"cache? mesh will be uncoloured (white).")
-            if cols_np is not None and v.shape[0] > 0:
+            # audit-2026-06-14r6 #5: honour color_mix_mode="off" — the docstring
+            # promises it "disables per-vertex colour writing entirely", but
+            # every consumer only branched on =="mixbox", so "off" silently fell
+            # through to the linear colour pass. Skip the whole colour build so
+            # vc_u8 stays None and the PLY is written uncoloured.
+            if cfg.color_mix_mode != "off" and cols_np is not None and v.shape[0] > 0:
                 cols_wp = wp.array(
                     cols_np, dtype=wp.vec3, device=mesher.device,
                 )
@@ -780,13 +802,15 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         # S2.15: multi-source [[fluids]] (each may carry per-source `color`)
         for f in scene.fluids:
             _seed_one(f)
-    else:
+    elif scene.fluid is not None:
+        # audit-2026-06-14r6 #1: only seed the single [fluid] box when the user
+        # actually authored one. load_scene now sets scene.fluid=None for an
+        # absent [fluid], so an inflow-only FLIP scene no longer drops a phantom
+        # default water box (this mirrors the MPM source-selector's guard).
         _seed_one(scene.fluid)
     print(f"           particles: {solver.n_particles}")
 
-    cache_dir = Path(scene.output.cache_dir)
-    if not cache_dir.is_absolute() and scene.config_dir is not None:
-        cache_dir = scene.config_dir / cache_dir
+    cache_dir = _resolve_cache_dir(scene)  # audit-r6 #2: shared with the MPM path
     cache_dir.mkdir(parents=True, exist_ok=True)
     mesh_dir = cache_dir / "mesh"; mesh_dir.mkdir(exist_ok=True)
     parts_dir = cache_dir / "particles"
@@ -969,9 +993,12 @@ def cmd_simulate(args: argparse.Namespace) -> int:
             # via KNN blend against the current particle cloud; optionally remix
             # in pigment space (Mixbox) for green-not-grey contact zones.
             vc_u8 = None
+            # audit-2026-06-14r6 #5: color_mix_mode="off" disables colour here
+            # too (§9.6 mirror of the MPM path) — was silently ignored.
             if (verts is not None and verts.shape[0] > 0
                     and solver.attr_color is not None
-                    and solver.n_particles > 0):
+                    and solver.n_particles > 0
+                    and str(scene.output.color_mix_mode) != "off"):
                 search_r_world = float(scene.output.sdf_search_radius_cells) * float(solver.dx)
                 cols_np = solver.attr_color.numpy().astype(np.float32)
                 if cols_np.shape[0] == int(solver.pos.shape[0]):

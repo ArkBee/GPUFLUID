@@ -542,8 +542,14 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
             )
         raise BlockError("C7.1", f"unknown fluid type: {ftype!r}")
 
+    # audit-2026-06-14r6 #1: distinguish "user authored [fluid]" from "[fluid]
+    # absent". Parsing an empty dict yields a DEFAULT FluidBoxCfg box, which an
+    # inflow-only scene could not be told apart from a real source — the FLIP
+    # source-selector then seeded that phantom box (the MPM twin guarded it, the
+    # FLIP path didn't: §9.6 drift). `None` means "no static source"; both
+    # solvers already treat a non-FluidBoxCfg scene.fluid as exactly that.
     fl = raw.get("fluid", {})
-    fluid = _parse_fluid_entry(fl)
+    fluid = _parse_fluid_entry(fl) if "fluid" in raw else None
     # S2.15: optional [[fluids]] array (multi-source); each may carry `color`.
     fluids_raw = raw.get("fluids", [])
     fluids = [_parse_fluid_entry(f) for f in fluids_raw]
@@ -589,6 +595,15 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
     )
 
     out = raw.get("output", {})
+    # audit-2026-06-14r6 #5: reject an unknown color_mix_mode at parse time
+    # rather than silently treating it as the linear default. "off" is now
+    # actually honoured downstream (skips the colour pass).
+    _cmm = str(out.get("color_mix_mode", "linear"))
+    if _cmm not in ("linear", "mixbox", "off"):
+        raise BlockError(
+            "C7.1",
+            f"unknown output.color_mix_mode {_cmm!r}; "
+            f"expected one of 'linear', 'mixbox', 'off'")
     output = OutputCfg(
         cache_dir=str(out.get("cache_dir", "out/sim")),
         mesh=bool(out.get("mesh", True)),

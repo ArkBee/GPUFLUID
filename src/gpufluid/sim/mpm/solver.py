@@ -857,11 +857,21 @@ class MpmSolver:
             target = d / f"frame_{out_frame:04d}.npy"
             cur = attr_arr.numpy().astype(np.float32)[mask]
             if attrs_static:
-                # Static bake: selection never changes → one shared file,
-                # written once (mesher falls back to frame_0000.npy).
+                # Static bake: selection never changes → one shared file the
+                # mesher falls back to (frame_0000.npy). audit-2026-06-14r6 #4:
+                # write it UNCONDITIONALLY every dump (no `if not once.exists()`
+                # skip). The skip re-introduced the very stale-sidecar hazard
+                # documented above for the dynamic path: a re-bake into an
+                # existing cache whose particle COUNT changed (resized box /
+                # new dx / new resolution) kept the PRIOR bake's frame_0000.npy,
+                # the mesher's count-equality guard then failed and dropped all
+                # per-vertex colour (coloured water rendered grey). `cur` is
+                # identical across a static bake's frames, so re-writing the
+                # same small array is negligible and keeps the file aligned
+                # with THIS bake. §9.11 dodge: same reasoning as the dynamic
+                # branch — the existence check is exactly what let staleness in.
                 once = d / "frame_0000.npy"
-                if not once.exists():
-                    np.save(once, cur)
+                np.save(once, cur)
             else:
                 # Dynamic bake: always (over)write this frame's own sidecar
                 # so it stays aligned with this frame's PLY, even on re-bake.

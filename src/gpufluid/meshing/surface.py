@@ -333,8 +333,14 @@ class MeshExtractor:
                                         device=self.device)
             self._mc_max_verts = cap_v
             self._mc_max_tris = cap_t
-        # surface() may throw if the buffer is too small — bump and retry.
-        for _attempt in range(2):
+        # surface() may throw if the buffer is too small — bump and retry until
+        # it fits. audit-2026-06-14r6 #3: the resize MUST be followed by another
+        # surface() attempt, and final exhaustion MUST raise. The old range(2)
+        # capped this at two surface() calls, so a frame needing >2x the current
+        # budget left the buffer resized but surface() never re-run — and the
+        # code below then read self._mc.verts, which a throwing surface() leaves
+        # holding the PREVIOUS frame's mesh, silently emitting a stale surface.
+        for _attempt in range(6):
             try:
                 self._mc.surface(self.dens, threshold=float(iso_level))
                 break
@@ -343,6 +349,12 @@ class MeshExtractor:
                 self._mc_max_tris *= 2
                 self._mc.resize(max_verts=self._mc_max_verts,
                                 max_tris=self._mc_max_tris)
+        else:
+            # Exhausted every retry — fail loud rather than emit a stale mesh.
+            raise RuntimeError(
+                f"marching cubes buffer exhausted after retries "
+                f"(max_verts={self._mc_max_verts}, max_tris={self._mc_max_tris}); "
+                f"the iso-surface did not fit — scene density may have diverged")
         n_v = int(self._mc.verts.shape[0])
         if n_v == 0:
             return None, None
