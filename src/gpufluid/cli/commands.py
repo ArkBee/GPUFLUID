@@ -476,7 +476,12 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     # sanity caught it via mesh count vs cache.json mismatch, but the
     # user got no specific signal about WHY.
     from ..sim.mpm.solver import MpmDivergenceError
+    import time as _time
     truncated_at: int | None = None
+    # audit-2026-06-14 #5/#9: measure real WALL-CLOCK for the notes field so it
+    # matches the FLIP writer's convention (and the renderer overlay that parses
+    # it). The old `sim=frames*dt` was neither wall-clock nor simulated time.
+    t_sim0 = _time.perf_counter()
     try:
         solver.run(particles_dir, progress=True)
     except MpmDivergenceError as exc:
@@ -491,8 +496,11 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         # successfully dumped to particles_raw, writes truthful
         # cache.json with truncated_at_frame, then exits rc=2.
 
+    t_sim_total = _time.perf_counter() - t_sim0
+
     # Mesh pass — turn the per-frame point clouds into triangle meshes
     # the addon's Attach Cache (A8.6) can stream.
+    t_mesh0 = _time.perf_counter()
     out_cfg = scene.output
     frame_count = 0
     if out_cfg.mesh:
@@ -623,6 +631,8 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         # this reported the FULL n_frames count even on truncated bakes.
         frame_count = len(list(particles_dir.glob("sim_*.ply")))
 
+    t_mesh_total = _time.perf_counter() - t_mesh0
+
     # Cache manifest so A8.6 / A8.12 can locate the bake. If MPM
     # diverged, frame_count reports the ACTUAL written count (so the
     # addon's preload reads exactly what's on disk) and
@@ -638,13 +648,16 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         "domain_size": list(scene.domain_size),
         "resolution": list(scene.domain.resolution),
         "dx": scene.dx,
-        "notes": f"sim={sim.frames * sim.dt:.2f}s",
+        "notes": f"sim={t_sim_total:.1f}s mesh={t_mesh_total:.1f}s",
     }
     if truncated_at is not None:
         # Round-20: surface the divergence point so the addon's
         # _runner.py can give a specific ERROR message instead of the
         # generic "subprocess failed rc=2".
-        manifest["truncated_at_frame"] = int(truncated_at)
+        # audit-2026-06-14 #6: last_dumped_frame is a raw SOLVER STEP number;
+        # divide by dump_every so truncated_at_frame is in the same
+        # output-frame units as frame_count (the addon prints both together).
+        manifest["truncated_at_frame"] = int(truncated_at // max(1, cfg.dump_every))
         manifest["truncation_reason"] = "mpm_divergence"
     (cache_dir / "cache.json").write_text(json.dumps(manifest, indent=2))
     return 0 if truncated_at is None else 2
@@ -1051,8 +1064,12 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     # via the manifest. The dataclass-typed manifest filters unknown
     # keys (round-31 reviewer #3 schema-drift finding), so we have to
     # write through raw JSON for the truncation marker. Done below.
+    # audit-2026-06-14 #7: on divergence the loop breaks at frame N BEFORE
+    # writing it (the mesh/particle dump is after the has_diverged() check), so
+    # exactly frames 0..N-1 == N == flip_truncated_at files exist on disk. The
+    # old `+ 1` claimed one frame more than was ever written.
     flip_frame_count = (
-        flip_truncated_at + 1 if flip_truncated_at is not None
+        flip_truncated_at if flip_truncated_at is not None
         else scene.simulation.frames)
     manifest = CacheManifest(
         fps=scene.simulation.fps,

@@ -341,7 +341,12 @@ class SceneCfg:
 # ---------------------------------------------------------------------------
 
 def _tuple(seq, n, name):
-    if not isinstance(seq, Sequence) or len(seq) != n:
+    # dodge (audit-2026-06-14 #8): a quoted scalar like center = "0.5" is a
+    # `Sequence` of len 3, so it would silently pass and become ('0','.','5').
+    # Exclude str/bytes explicitly so a stray string value gets this named
+    # field error instead of garbage / a confusing downstream TypeError.
+    if (isinstance(seq, (str, bytes))
+            or not isinstance(seq, Sequence) or len(seq) != n):
         raise BlockError("C7.1", f"{name}: expected list of {n}; got {seq!r}")
     return tuple(seq)
 
@@ -402,10 +407,13 @@ def _parse_obstacle(d: dict) -> ObstacleCfg:
         rot_raw = d.get("rotation")
         rotation = None
         if rot_raw is not None:
-            if len(rot_raw) != 3:
+            # dodge (audit-2026-06-14 #10): a scalar `rotation = 1.0` has no
+            # len() and would raise a bare TypeError; check the type first so
+            # the user gets the named "must be 3×3" error.
+            if not isinstance(rot_raw, (list, tuple)) or len(rot_raw) != 3:
                 raise BlockError("C7.1",
                     "obstacle.rotation must be a 3×3 matrix (got "
-                    f"{len(rot_raw)} rows)")
+                    f"{rot_raw!r})")
             rotation = tuple(
                 _tuple(row, 3, f"obstacle.rotation[{i}]")
                 for i, row in enumerate(rot_raw)
@@ -453,7 +461,11 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
 
     dom = raw.get("domain", {})
     domain = DomainCfg(
-        resolution=_tuple(dom.get("resolution", [64, 64, 64]), 3, "domain.resolution"),
+        # audit-2026-06-14 #9: coerce to int (grid cell counts) — the only
+        # int-typed field that previously skipped int(), so a TOML float like
+        # [64.0,64.0,64.0] leaked through into grid sizing.
+        resolution=tuple(int(v) for v in _tuple(
+            dom.get("resolution", [64, 64, 64]), 3, "domain.resolution")),
         dx=float(dom["dx"]) if "dx" in dom else None,
         # FU-016: real world extent in metres, forwarded by the addon.
         size_world=(tuple(float(v) for v in _tuple(
