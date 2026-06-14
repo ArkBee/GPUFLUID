@@ -157,9 +157,18 @@ def remix_vertices_mixbox(
             idx = tree.query_ball_point(v, r=search_radius_world)
             if not idx:
                 continue
-            idx = np.asarray(idx)[:max_neighbours]
+            idx = np.asarray(idx)
             d = particle_pos[idx] - v
             d_sq = (d * d).sum(axis=1)
+            if idx.size > max_neighbours:
+                # audit-2026-06-14r2 #7: keep the K NEAREST. query_ball_point
+                # returns neighbours in unordered tree-traversal order, so the
+                # old `[:max_neighbours]` blended an ARBITRARY 16, not the
+                # nearest 16 — the mixbox branch below already sorts; this
+                # fallback (the live path when pymixbox is absent) had drifted.
+                order = np.argsort(d_sq)[:max_neighbours]
+                idx = idx[order]
+                d_sq = d_sq[order]
             w = 1.0 / (d_sq + 1e-8)
             w = w / w.sum()
             rgb = (w[:, None] * particle_colors[idx]).sum(axis=0)

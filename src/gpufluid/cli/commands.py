@@ -578,6 +578,15 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                     temps_np = np.load(temp_path).astype(np.float32)
                     if temps_np.shape[0] == pts.shape[0]:
                         cols_np = cmap_fn(temps_np, t_min_cfg, t_max_cfg)
+                    else:
+                        # audit-2026-06-14r2 #13: a row-count mismatch used to
+                        # fall through SILENTLY (to the colour sidecar, then to
+                        # a white mesh). Surface it so a stale/mismatched cache
+                        # is visible instead of presenting as uncoloured geom.
+                        print(f"[mpm] WARNING: temperatures sidecar frame "
+                              f"{frame_idx}: {temps_np.shape[0]} rows vs "
+                              f"{pts.shape[0]} particles — stale/mismatched "
+                              f"cache? falling back to colour sidecar.")
             if cols_np is None and has_color_path and v.shape[0] > 0:
                 col_path = colors_dir / f"frame_{frame_idx:04d}.npy"
                 if not col_path.exists():
@@ -586,6 +595,11 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
                     loaded = np.load(col_path).astype(np.float32)
                     if loaded.shape[0] == pts.shape[0]:
                         cols_np = loaded
+                    else:
+                        print(f"[mpm] WARNING: colours sidecar frame "
+                              f"{frame_idx}: {loaded.shape[0]} rows vs "
+                              f"{pts.shape[0]} particles — stale/mismatched "
+                              f"cache? mesh will be uncoloured (white).")
             if cols_np is not None and v.shape[0] > 0:
                 cols_wp = wp.array(
                     cols_np, dtype=wp.vec3, device=mesher.device,
