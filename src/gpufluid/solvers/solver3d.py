@@ -1794,6 +1794,14 @@ def k3_apply_A(  # A·x — same stencil as Jacobi: diag*x - sum_nb (on fluid ce
         if m != 2:
             diag += 1.0
             if m == 1 and k < nz - 1: sum_nb += x[i, j, k + 1]
+    # audit-2026-06-14r3 #7: a fluid cell whose 6 neighbours are ALL solid is a
+    # structural zero row (diag==0). Jacobi/GS guard it (`if diag<0.5: p=0`); the
+    # PCG operator must AGREE or the system is singular and PCG never converges
+    # under a MOVING solid (nonzero RHS on that row). Treat it as a 1×1 identity
+    # row — consistent with the preconditioner, which clamps diag to >=1.
+    if diag < 0.5:
+        y[i, j, k] = x[i, j, k]
+        return
     y[i, j, k] = diag * x[i, j, k] - sum_nb
 
 
@@ -2099,6 +2107,12 @@ def k3_apply_A_per_tile(
         if m != 2:
             diag += 1.0
             if m == 1 and lk < sz - 1: sum_nb += x[li, lj, lk + 1]
+    # audit-2026-06-14r3 #7: identity row for an all-solid-neighbour fluid cell
+    # (matches k3_apply_A + Jacobi/GS + the preconditioner) so the sparse PCG
+    # system stays non-singular under a moving solid.
+    if diag < 0.5:
+        y[li, lj, lk] = x[li, lj, lk]
+        return
     y[li, lj, lk] = diag * x[li, lj, lk] - sum_nb
 
 
@@ -2407,6 +2421,15 @@ class FlipSolver3D:
         self.us = zeros((nx + 1, ny, nz), dev=self.device)
         self.vs = zeros((nx, ny + 1, nz), dev=self.device)
         self.ws = zeros((nx, ny, nz + 1), dev=self.device)
+        # audit-2026-06-14r3 #1: dedicated viscosity-Jacobi scratch. The
+        # semi-implicit viscosity loop used to ping-pong through us/vs/ws — but
+        # those hold the pre-pressure FLIP reference (saved by k3_normalize and
+        # read by k3_g2p_and_advect as old_u/v/w), so reusing them corrupted the
+        # FLIP/PIC blend whenever viscosity>0. Allocated eagerly (not lazily) so
+        # the CUDA-graph capture never has to allocate mid-step.
+        self.visc_u = zeros((nx + 1, ny, nz), dev=self.device)
+        self.visc_v = zeros((nx, ny + 1, nz), dev=self.device)
+        self.visc_w = zeros((nx, ny, nz + 1), dev=self.device)
         self.p     = zeros((nx, ny, nz), dev=self.device)
         self.p_tmp = zeros((nx, ny, nz), dev=self.device)
         self.div   = zeros((nx, ny, nz), dev=self.device)
@@ -2518,7 +2541,7 @@ class FlipSolver3D:
         self._anim_specs.append({"kind": kind, "base_center": tuple(base_center),
                                  "motion": motion, "params": dict(params)})
 
-    def _obstacle_velocity_at(self, spec, frame_idx: int):
+    def _obstacle_velocity_at(self, spec, frame_idx: int, frame_dt: float):
         """World-space velocity (m/s) of an animated obstacle this frame.
         Linear motion → spec velocity. Keyframe motion → finite difference."""
         m = spec.get("motion")
@@ -2527,14 +2550,19 @@ class FlipSolver3D:
         # LinearMotion
         if hasattr(m, "velocity") and m.kind == "linear":
             return tuple(float(c) for c in m.velocity)
-        # KeyframeMotion → centered difference of centre across one frame
+        # KeyframeMotion → centred difference of centre over 2 frame periods.
+        # audit-2026-06-14r3 #5: divide by the REAL frame period (frame_dt =
+        # 1/fps), not a hardcoded 24. KeyframeMotion has no `fps` attribute so
+        # the old `m.fps if hasattr else 24` ALWAYS used 24, mis-scaling the
+        # stamped moving-wall velocity by actual_fps/24 (0.4x at 60 fps slow-mo).
         if m.kind == "keyframes":
             c1 = evaluate_center(spec["base_center"], m, frame_idx + 1)
             c0 = evaluate_center(spec["base_center"], m, frame_idx - 1)
-            return tuple(float(c) for c in (c1 - c0) * (m.fps if hasattr(m, "fps") else 24) / 2.0)
+            denom = 2.0 * float(frame_dt) if frame_dt else 1.0
+            return tuple(float(c) for c in (c1 - c0) / denom)
         return (0.0, 0.0, 0.0)
 
-    def _build_anim_sdf_per_obstacle(self, frame_idx: int):
+    def _build_anim_sdf_per_obstacle(self, frame_idx: int, frame_dt: float):
         """Return (list_of_(sdf, velocity)_for_analytic_obstacles, mesh_specs)."""
         if not self._anim_specs:
             return [], []
@@ -2544,7 +2572,7 @@ class FlipSolver3D:
         for spec in self._anim_specs:
             c = evaluate_center(spec["base_center"], spec["motion"], frame_idx)
             kind = spec["kind"]; p = spec["params"]
-            vel = self._obstacle_velocity_at(spec, frame_idx)
+            vel = self._obstacle_velocity_at(spec, frame_idx, frame_dt)
             if kind == "sphere":
                 analytic.append((sdf_sphere(grid, c, p["radius"]), vel))
             elif kind == "box":
@@ -2801,7 +2829,10 @@ class FlipSolver3D:
                 col = new_col
             self.attr_color = wp.array(col, dtype=wp.vec3, device=self.device)
         elif self.attr_color is not None:
-            pad = np.ones((self.n_particles - prev_n, 3), dtype=np.float32)
+            # audit-2026-06-14r3 #6: pad with BLACK (0,0,0), matching the
+            # authoritative emit/reseed convention (prepare_frame + sim/reseed);
+            # white(1,1,1) here was a §9.6 mirror-drift (visible colour flip).
+            pad = np.zeros((self.n_particles - prev_n, 3), dtype=np.float32)
             prev_col = self.attr_color.numpy() if prev_n > 0 else np.zeros((0, 3), dtype=np.float32)
             self.attr_color = wp.array(np.concatenate([prev_col, pad], axis=0),
                                        dtype=wp.vec3, device=self.device)
@@ -2817,7 +2848,10 @@ class FlipSolver3D:
                 t = new_t
             self.attr_temperature = wp.array(t, dtype=float, device=self.device)
         elif self.attr_temperature is not None:
-            pad = np.zeros(new_n, dtype=np.float32)
+            # audit-2026-06-14r3 #8: pad with 20.0 °C (ambient), matching the
+            # emit/reseed/MPM convention; 0.0 here read as a real sub-floor
+            # temperature in the colormap (§9.6 mirror-drift).
+            pad = np.full(new_n, 20.0, dtype=np.float32)
             prev_t = self.attr_temperature.numpy() if prev_n > 0 else np.zeros(0, dtype=np.float32)
             self.attr_temperature = wp.array(np.concatenate([prev_t, pad], axis=0),
                                               dtype=float, device=self.device)
@@ -2876,8 +2910,9 @@ class FlipSolver3D:
                 col = new_col
             self.attr_color = wp.array(col, dtype=wp.vec3, device=self.device)
         elif self.attr_color is not None:
-            # New uncolored seed in a colored scene: pad with white.
-            pad = np.ones((len(positions) - len(prev_pos), 3), dtype=np.float32)
+            # New uncolored seed in a colored scene: pad with BLACK (0,0,0) —
+            # audit-2026-06-14r3 #6, matching emit/reseed (was white, §9.6 drift).
+            pad = np.zeros((len(positions) - len(prev_pos), 3), dtype=np.float32)
             prev_col = self.attr_color.numpy() if len(prev_pos) > 0 else np.zeros((0, 3), dtype=np.float32)
             self.attr_color = wp.array(np.concatenate([prev_col, pad], axis=0),
                                        dtype=wp.vec3, device=self.device)
@@ -2892,9 +2927,10 @@ class FlipSolver3D:
                 t = new_t
             self.attr_temperature = wp.array(t, dtype=float, device=self.device)
         elif self.attr_temperature is not None:
-            # Seeded without temperature into a temperatured scene: pad with NaN-ish
-            # sentinel 0.0 (callers can re-stamp afterwards if they need a default).
-            pad = np.zeros(new_n, dtype=np.float32)
+            # Seeded without temperature into a temperatured scene: pad with
+            # 20.0 °C ambient — audit-2026-06-14r3 #8, matching the emit/reseed/
+            # MPM convention (was 0.0, which the colormap read as a real value).
+            pad = np.full(new_n, 20.0, dtype=np.float32)
             prev_t = self.attr_temperature.numpy() if len(prev_pos) > 0 else np.zeros(0, dtype=np.float32)
             self.attr_temperature = wp.array(np.concatenate([prev_t, pad], axis=0),
                                               dtype=float, device=self.device)
@@ -3387,6 +3423,16 @@ class FlipSolver3D:
         # try/except path catches the capture-time raise but burns
         # the capture cost on every such step (constant capture, no
         # cache benefit). Best to refuse eligibility outright.
+        # The guard is specific to APIC because its lazy rebuild is
+        # `wp.array(numpy_zeros, dtype=wp.mat33)` — an alloc PLUS a host→device
+        # memcpy, which is what Warp forbids mid-capture. The other lazily-sized
+        # feature scratches (CSF `_csf_chi`, PCG `_pcg_*`, colour `_cgrid_*`,
+        # scalar `_sgrid_t`, block-sparse `_block_active`) are device-only
+        # `wp.zeros()` with no H2D copy; Warp tolerates those inside a capture,
+        # which the B5.a/B5.b graph tests prove by capturing PCG (+CSF) cleanly
+        # on the very first step. So no extra eligibility guard is needed for
+        # them — an earlier audit-r3 guard here was a false positive that broke
+        # capture-on-first-step and was reverted.
         if self.transfer_mode == "apic" and self.affine_C is None:
             return False
         # All shipped combinations are now graph-eligible.
@@ -3522,23 +3568,23 @@ class FlipSolver3D:
                               self.solid_u, self.solid_v, self.solid_w,
                               nx, ny, nz, ox, oy, oz], device=dev)
         # S2.13 viscosity (semi-implicit). Solve (I - r·Lap) u_new = u for each
-        # MAC component using Jacobi. Re-uses uw/vw/ww as scratch buffers.
+        # MAC component using Jacobi. uw/vw/ww hold u_old (the RHS); the iterate
+        # ping-pongs between u and the dedicated visc_* scratch.
         if self.viscosity > 0.0:
           with prof.section("viscosity"):
             r = dt * self.viscosity / (dx * dx)
             for old, scratch in [(self.u, self.uw), (self.v, self.vw), (self.w, self.ww)]:
                 wp.copy(scratch, old)
-                # `old` plays role of u_old (rhs); we iterate in `scratch` ↔ `old`
-                # alternately. Keep u_old in `scratch` and iterate values in `old`.
-                # We need a separate temp buffer; reuse `us`/`vs`/`ws` if free.
-            # 3 separate iterations to avoid aliasing
+            # audit-2026-06-14r3 #1: iterate through visc_u/visc_v/visc_w, NOT
+            # us/vs/ws — the latter hold the pre-pressure FLIP reference that
+            # k3_g2p_and_advect reads below; ping-ponging them here destroyed it.
             for _ in range(self.viscosity_iters):
                 wp.launch(k3_jacobi_visc, dim=self.u.shape,
-                          inputs=[self.uw, self.u, self.us, r], device=dev); self.u, self.us = self.us, self.u
+                          inputs=[self.uw, self.u, self.visc_u, r], device=dev); self.u, self.visc_u = self.visc_u, self.u
                 wp.launch(k3_jacobi_visc, dim=self.v.shape,
-                          inputs=[self.vw, self.v, self.vs, r], device=dev); self.v, self.vs = self.vs, self.v
+                          inputs=[self.vw, self.v, self.visc_v, r], device=dev); self.v, self.visc_v = self.visc_v, self.v
                 wp.launch(k3_jacobi_visc, dim=self.w.shape,
-                          inputs=[self.ww, self.w, self.ws, r], device=dev); self.w, self.ws = self.ws, self.w
+                          inputs=[self.ww, self.w, self.visc_w, r], device=dev); self.w, self.visc_w = self.visc_w, self.w
             wp.launch(k3_enforce_solid_bc, dim=(nx + 1, ny + 1, nz + 1),
                       inputs=[self.u, self.v, self.w, self.marker,
                               self.solid_u, self.solid_v, self.solid_w,
@@ -3928,7 +3974,7 @@ class FlipSolver3D:
             for static_sdf in self._static_obstacle_sdfs:
                 m[static_sdf <= 0.0] = 2
             # split analytic into per-obstacle (need their velocities)
-            analytic_perobs, mesh_specs_active = self._build_anim_sdf_per_obstacle(frame_idx)
+            analytic_perobs, mesh_specs_active = self._build_anim_sdf_per_obstacle(frame_idx, frame_dt)
             for sdf, vel in analytic_perobs:
                 m[sdf <= 0.0] = 2
             self._marker_host = m
@@ -3970,8 +4016,26 @@ class FlipSolver3D:
             # padded the attr arrays AFTER the filter with the
             # unfiltered per-event lengths → shape mismatch. Build
             # now, mask in step with emit_pos.
-            need_color_pad = self.attr_color is not None
-            need_temp_pad = self.attr_temperature is not None
+            # audit-2026-06-14r3 #4: a coloured/temperatured INFLOW into a scene
+            # whose existing fluid carries no colour must still take effect.
+            # Pre-fix need_*_pad gated only on `attr_* is not None`, so an
+            # inflow-only colour was dropped (attr_color stayed None forever →
+            # grey render). Mirror MPM (solver.py:270/284): when ANY emit event
+            # carries the attribute, initialise the array for the existing
+            # particles (white / 20.0 °C) so the concat below extends a real
+            # array and the inflow's own colour/temperature lands on its rows.
+            any_emit_color = any(e.color is not None for e in emit_events)
+            any_emit_temp = any(e.temperature is not None for e in emit_events)
+            need_color_pad = (self.attr_color is not None) or any_emit_color
+            need_temp_pad = (self.attr_temperature is not None) or any_emit_temp
+            if need_color_pad and self.attr_color is None:
+                self.attr_color = wp.array(
+                    np.ones((self.n_particles, 3), dtype=np.float32),
+                    dtype=wp.vec3, device=self.device)
+            if need_temp_pad and self.attr_temperature is None:
+                self.attr_temperature = wp.array(
+                    np.full(self.n_particles, 20.0, dtype=np.float32),
+                    dtype=float, device=self.device)
             col_pad = (np.concatenate([
                 (np.broadcast_to(np.asarray(e.color, dtype=np.float32),
                                   (len(e.positions), 3)).copy()
@@ -4189,6 +4253,19 @@ class FlipSolver3D:
                         "resume: %s drift saved=%s live=%s — running "
                         "with LIVE value (resume is no longer bit-exact).",
                         key, saved, live)
+        # audit-2026-06-14r3 #2: transfer_mode was serialised by save_checkpoint
+        # but never read back, so an APIC checkpoint resumed into a default
+        # solver silently ran FLIP advection (a physically different sim).
+        # Restore it for a faithful resume; warn if it overrides a different
+        # live (constructor) value.
+        if "transfer_mode" in data.files:
+            saved_mode = str(data["transfer_mode"])
+            if saved_mode != str(self.transfer_mode):
+                _log.getLogger("gpufluid.checkpoint").warning(
+                    "resume: transfer_mode saved=%s live=%s — restoring the "
+                    "checkpoint's scheme (overriding the constructor default).",
+                    saved_mode, self.transfer_mode)
+            self.transfer_mode = saved_mode
         pos = data["pos"]; vel = data["vel"]; marker = data["marker"]; affine = data["affine_C"]
         self.pos = wp.array(pos, dtype=wp.vec3, device=self.device) if len(pos) else None
         self.vel = wp.array(vel, dtype=wp.vec3, device=self.device) if len(vel) else None
