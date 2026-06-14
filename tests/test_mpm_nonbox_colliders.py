@@ -105,3 +105,52 @@ def test_water_does_not_pass_through_a_sphere_collider():
     assert deep < 0.02, (
         f"water penetrated the sphere collider: {deep:.1%} of particles deep "
         f"inside (>2%) — non-box obstacle is acting as a ghost again")
+
+
+def test_mesh_pushback_kernel_exists_and_is_wired():
+    """[BLK S2.17.2.MESH] — mesh obstacles collide via a precomputed-SDF
+    particle pushback (they used to be ghosts)."""
+    pb = _code(MPM / "pushback.py")
+    assert "def k_mesh_sdf_pushback" in pb, "S2.17.2.MESH kernel missing"
+    solver = _code(MPM / "solver.py")
+    assert "wp.launch(k_mesh_sdf_pushback" in solver, \
+        "mesh collider pushback not launched in the step loop"
+    cmds = _code(REPO / "src" / "gpufluid" / "cli" / "commands.py")
+    # the collider loop must build a mesh collider (unambiguous — the OTHER
+    # ObstacleMeshCfg branch, in _build_obstacle_sdf, is the mesher path).
+    assert "meshes.append(MpmMeshCollider(" in cmds, \
+        "mesh obstacle not wired to a collider in the obstacle loop"
+
+
+@pytest.mark.skipif(not HAS_CUDA, reason="no CUDA device")
+def test_water_does_not_pass_through_a_mesh_collider():
+    """A synthetic sphere-shaped SDF used as a MESH collider must block water
+    [BLK S2.17.2.MESH] — drop a column on it, assert <2% ends deep inside."""
+    pytest.importorskip("warp")
+    from gpufluid.sim.mpm.solver import (
+        MpmConfig, MpmSolver, MpmMeshCollider, make_column)
+
+    N = 64
+    dx = 1.0 / N
+    centre = np.array([0.5, 0.5, 0.32])
+    radius = 0.13
+    ax = np.arange(N) * dx
+    gx, gy, gz = np.meshgrid(ax, ax, ax, indexing="ij")
+    sdf = (np.sqrt((gx - centre[0]) ** 2 + (gy - centre[1]) ** 2
+                   + (gz - centre[2]) ** 2) - radius).astype(np.float32)
+    col = make_column((0.5, 0.5), 0.10, 0.55, 0.75, n_xy=12, n_z=8)
+    cfg = MpmConfig(
+        n_grid=N, dt=0.0015, initial_column=col,
+        meshes=(MpmMeshCollider(sdf=sdf, nx=N, ny=N, nz=N, dx=dx),))
+    try:
+        solver = MpmSolver(cfg)
+    except Exception:
+        if HAS_CUDA:
+            raise
+        pytest.skip("no CUDA device for MpmSolver construction")
+    for i in range(160):
+        solver.step(i)
+    P = solver.positions()
+    deep = np.mean(np.linalg.norm(P - centre, axis=1) < 0.6 * radius)
+    assert deep < 0.02, (
+        f"water passed through the mesh-SDF collider: {deep:.1%} deep inside")

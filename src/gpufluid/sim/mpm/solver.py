@@ -80,7 +80,7 @@ from .colliders import (
 )
 from .inflow import MpmInflow, k_inflow_gate, seed_inflow_particles
 from .outflow import MpmOutflow, k_outflow_despawn
-from .pushback import k_cube_pushback, k_wall_pushback
+from .pushback import k_cube_pushback, k_wall_pushback, k_mesh_sdf_pushback
 from .velcaps import k_anti_splash_vz, k_tap_terminal_velocity
 
 
@@ -133,6 +133,19 @@ class MpmCylinderCollider:
     centre: tuple[float, float, float]
     radius: float
     half_height: float
+
+
+@dataclass
+class MpmMeshCollider:
+    """A rigid MESH obstacle, supplied as a precomputed signed-distance grid
+    (``sdf`` is a numpy (nx,ny,nz) float array, NEGATIVE inside the mesh). An
+    arbitrary mesh has no closed analytic SDF, so the collision samples this
+    grid per particle. Goal 2026-06-14: mesh obstacles were ghosts too."""
+    sdf: object  # numpy (nx, ny, nz) float32, negative inside
+    nx: int
+    ny: int
+    nz: int
+    dx: float
 
 
 @dataclass
@@ -190,6 +203,7 @@ class MpmConfig:
     # Goal 2026-06-14: sphere/cylinder obstacles now collide too (were ghosts).
     spheres: Sequence[MpmSphereCollider] = field(default_factory=tuple)
     cylinders: Sequence[MpmCylinderCollider] = field(default_factory=tuple)
+    meshes: Sequence[MpmMeshCollider] = field(default_factory=tuple)
     walls: MpmDomainWalls = field(default_factory=MpmDomainWalls)
     tap: MpmTap | None = field(default_factory=MpmTap)
     anti_splash: MpmAntiSplash | None = field(default_factory=MpmAntiSplash)
@@ -515,6 +529,16 @@ class MpmSolver:
             ))
         self._wall_lo = cfg.walls.lo
         self._wall_hi = cfg.walls.hi
+        # Mesh obstacle colliders (goal 2026-06-14): upload each precomputed
+        # SDF grid to the device once; the per-step pushback samples it.
+        self._mesh_sdfs = []
+        for mc in cfg.meshes:
+            sdf_wp = wp.from_numpy(
+                np.ascontiguousarray(mc.sdf, dtype=np.float32),
+                dtype=float, device=cfg.device)
+            self._mesh_sdfs.append(
+                (sdf_wp, int(mc.nx), int(mc.ny), int(mc.nz),
+                 float(mc.dx), _snap_eps))
 
         # S2.17.8 outflow drains. Convert output-frame gates to sim steps
         # (same dump_every convention as the inflow gate). Pre-resolve each
@@ -563,6 +587,10 @@ class MpmSolver:
             wp.launch(k_cube_pushback, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state, *cube],
                       device=cfg.device)
+        for ms in self._mesh_sdfs:
+            wp.launch(k_mesh_sdf_pushback, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, *ms],
+                      device=cfg.device)
         wp.launch(k_wall_pushback, dim=self.n_particles,
                   inputs=[self.mpm.mpm_state, *self._wall_lo, *self._wall_hi],
                   device=cfg.device)
@@ -589,6 +617,10 @@ class MpmSolver:
         for cube in self._cube_params:
             wp.launch(k_cube_pushback, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state, *cube],
+                      device=cfg.device)
+        for ms in self._mesh_sdfs:
+            wp.launch(k_mesh_sdf_pushback, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, *ms],
                       device=cfg.device)
         wp.launch(k_wall_pushback, dim=self.n_particles,
                   inputs=[self.mpm.mpm_state, *self._wall_lo, *self._wall_hi],

@@ -11,7 +11,7 @@
 # CYLINDER at three different positions/heights, then drains to the floor.
 
 [domain]
-resolution = [128, 128, 128]
+resolution = [96, 96, 96]
 size_world = [2.0, 2.0, 2.0]
 
 # The "bucket of water": an elevated block, offset to -x, released under -Z.
@@ -42,6 +42,14 @@ type = "cylinder_y"
 center = [0.74, 0.50, 0.11]
 radius = 0.11
 half_height = 0.28
+
+# A MESH obstacle (torus with a hole) — the 4th shape. Goal: mesh obstacles
+# must collide too (they were ghosts). trimesh.contains validates 0 penetration.
+[[obstacle]]
+type = "mesh"
+path = "torus.obj"
+scale = 0.42
+translate = [0.40, 0.28, 0.13]
 
 [simulation]
 solver = "mpm"

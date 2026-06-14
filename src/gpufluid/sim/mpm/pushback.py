@@ -142,3 +142,55 @@ def k_wall_pushback(
     state.particle_F[p] = I
     state.particle_F_trial[p] = I
     state.particle_C[p] = Z
+
+
+@block("S2.17.2.MESH",
+       "Particle pushback out of a MESH obstacle via its precomputed signed-"
+       "distance grid + gradient normal. Goal 2026-06-14: mesh obstacles were "
+       "rendered (FU-033) but never collided — water fell straight through.")
+@wp.kernel
+def k_mesh_sdf_pushback(
+    state: MPMStateStruct,
+    sdf: wp.array3d(dtype=float),   # signed distance, NEGATIVE inside the mesh
+    nx: int,
+    ny: int,
+    nz: int,
+    dx: float,
+    snap_eps: float,
+):
+    """Push any particle that lies inside an arbitrary mesh obstacle back out
+    to its surface, mirroring :func:`k_cube_pushback` but using a precomputed
+    SDF grid (the mesh has no closed analytic SDF). Outward normal = the SDF
+    gradient (central differences); pushes to ``sdf ~ snap_eps`` and removes
+    the inward-normal velocity. Resets F/F_trial/C like the cube path."""
+    p = wp.tid()
+    if state.particle_selection[p] == 1:
+        return  # held inflow particle
+    pos = state.particle_x[p]
+    ix = int(pos[0] / dx)
+    iy = int(pos[1] / dx)
+    iz = int(pos[2] / dx)
+    if (ix < 1 or ix >= nx - 1 or iy < 1 or iy >= ny - 1
+            or iz < 1 or iz >= nz - 1):
+        return
+    s = sdf[ix, iy, iz]
+    if s >= snap_eps:
+        return  # outside the solid
+    gx = sdf[ix + 1, iy, iz] - sdf[ix - 1, iy, iz]
+    gy = sdf[ix, iy + 1, iz] - sdf[ix, iy - 1, iz]
+    gz = sdf[ix, iy, iz + 1] - sdf[ix, iy, iz - 1]
+    g = wp.vec3(gx, gy, gz)
+    gl = wp.length(g)
+    if gl < 1.0e-8:
+        return  # degenerate gradient (flat region) — leave it
+    n = g / gl  # outward (toward increasing SDF)
+    state.particle_x[p] = pos + n * (snap_eps - s)
+    v = state.particle_v[p]
+    vn = wp.dot(v, n)
+    if vn < 0.0:
+        state.particle_v[p] = v - vn * n
+    I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    Z = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    state.particle_F[p] = I
+    state.particle_F_trial[p] = I
+    state.particle_C[p] = Z

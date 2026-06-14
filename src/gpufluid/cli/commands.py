@@ -115,7 +115,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     from ..sim.mpm import MpmSolver
     from ..sim.mpm.solver import (
         MpmConfig, MpmCubeCollider, MpmSphereCollider, MpmCylinderCollider,
-        MpmTap, MpmAntiSplash, make_column,
+        MpmMeshCollider, MpmTap, MpmAntiSplash, make_column,
     )
     from ..sim.mpm.inflow import MpmInflow
     from ..sim.mpm.outflow import MpmOutflow
@@ -301,6 +301,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     cubes = []
     spheres = []
     cylinders = []
+    meshes = []
     for ob in scene.obstacle:
         if isinstance(ob, ObstacleBoxCfg):
             # Round-57: forward optional OBB rotation (None ⇒ AABB).
@@ -317,6 +318,47 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             cylinders.append(MpmCylinderCollider(
                 centre=tuple(ob.center), radius=float(ob.radius),
                 half_height=float(ob.half_height)))
+        elif isinstance(ob, ObstacleMeshCfg):
+            # Mesh collider: load + transform the OBJ exactly like the mesher's
+            # obstacle-SDF path, then bake a TRUE signed-distance grid (smooth
+            # normal for the pushback). Computed at a fixed 96^3 (the kernel
+            # samples it by its own dx, independent of the bake grid).
+            _mp = ob.path
+            if scene.config_dir is not None and not Path(_mp).is_absolute():
+                _mp = str(scene.config_dir / _mp)
+            import trimesh as _tm
+            _mesh = _tm.load(_mp, force="mesh", process=False)
+            if ob.rotate_deg is not None:
+                from trimesh.transformations import euler_matrix
+                _r = [float(a) * np.pi / 180.0 for a in ob.rotate_deg]
+                _mesh.apply_transform(euler_matrix(_r[0], _r[1], _r[2], "sxyz"))
+            _sc = ob.scale
+            if isinstance(_sc, (list, tuple)):
+                _mesh.apply_scale([float(s) for s in _sc])
+            elif float(_sc) != 1.0:
+                _mesh.apply_scale(float(_sc))
+            if any(float(t) != 0.0 for t in ob.translate):
+                _mesh.apply_translation(np.asarray(ob.translate, dtype=np.float64))
+            # SDF via GPU inside/outside indicator (BVH) + Euclidean distance
+            # transform. The CPU trimesh-proximity true-SDF HANGS on non-convex
+            # meshes (a torus took >2h); indicator+EDT is ~0.3s and gives a
+            # smooth signed distance (gradient = pushback normal).
+            from ..domain.mesh_sdf_gpu import mesh_indicator_sdf_gpu
+            from ..primitives.sdf import cell_centers
+            from scipy.ndimage import distance_transform_edt
+            _N = 96
+            _dx = 1.0 / _N
+            _tris = np.asarray(_mesh.triangles, dtype=np.float32)
+            _inside = mesh_indicator_sdf_gpu(
+                cell_centers(_N, _N, _N, _dx), _tris, _dx) < 0
+            if not _inside.any():
+                print(f"[mpm] WARNING: mesh obstacle {ob.path!r} has no interior "
+                      f"cells at {_N}^3 — skipping its collider")
+            else:
+                _sdf = ((distance_transform_edt(~_inside)
+                         - distance_transform_edt(_inside)) * _dx).astype(np.float32)
+                meshes.append(MpmMeshCollider(
+                    sdf=_sdf, nx=_N, ny=_N, nz=_N, dx=_dx))
     # Place tap zone just above the highest cube top; if no cube, above floor
     if cubes:
         tap_z_min = max(c.centre[2] + c.half_size[2] + 0.005 for c in cubes)
@@ -391,6 +433,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         cubes=tuple(cubes),
         spheres=tuple(spheres),
         cylinders=tuple(cylinders),
+        meshes=tuple(meshes),
         gravity=g_norm,
         tap=MpmTap(
             lo_x=cx - half - 0.005, hi_x=cx + half + 0.005,

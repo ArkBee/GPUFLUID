@@ -35,11 +35,35 @@ def _occupied_voxels(P, n=48):
     return len(np.unique(keys))
 
 
+_MESH_CACHE = {}
+
+
 def _load_obstacles(scene_toml):
     if not scene_toml or not Path(scene_toml).exists():
         return []
     data = tomllib.loads(Path(scene_toml).read_text())
-    return data.get("obstacle", [])
+    obs = data.get("obstacle", [])
+    # Pre-load + transform mesh obstacles once (trimesh.contains is the exact
+    # inside/outside test — no surface-shell ambiguity for a closed mesh).
+    sdir = Path(scene_toml).resolve().parent
+    for o in obs:
+        if o.get("type") == "mesh":
+            p = o["path"]
+            p = p if Path(p).is_absolute() else str(sdir / p)
+            m = trimesh.load(p, force="mesh", process=False)
+            if o.get("rotate_deg"):
+                from trimesh.transformations import euler_matrix
+                import math as _m
+                r = [float(a) * _m.pi / 180.0 for a in o["rotate_deg"]]
+                m.apply_transform(euler_matrix(r[0], r[1], r[2], "sxyz"))
+            sc = o.get("scale", 1.0)
+            m.apply_scale([float(s) for s in sc] if isinstance(sc, (list, tuple))
+                          else float(sc))
+            tr = o.get("translate", (0, 0, 0))
+            if any(float(t) != 0 for t in tr):
+                m.apply_translation(np.asarray(tr, dtype=float))
+            _MESH_CACHE[id(o)] = m
+    return obs
 
 
 def _inside_obstacle(P, obs, frac=0.6):
@@ -68,6 +92,14 @@ def _inside_obstacle(P, obs, frac=0.6):
             hh = float(o.get("half_height", 0.1))
             d = np.sqrt((P[:, 0] - c[0]) ** 2 + (P[:, 2] - c[2]) ** 2)
             mask |= (d < r) & (np.abs(P[:, 1] - c[1]) < hh)
+    # Mesh obstacles: exact closed-mesh containment (no shell to shrink, so
+    # ``frac`` is ignored — any contained particle is genuine penetration).
+    for o in obs:
+        if o.get("type") == "mesh" and id(o) in _MESH_CACHE:
+            try:
+                mask |= _MESH_CACHE[id(o)].contains(P)
+            except Exception:
+                pass
     return mask
 
 
