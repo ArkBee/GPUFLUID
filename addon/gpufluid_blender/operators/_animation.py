@@ -127,6 +127,14 @@ def _matrix_world_at_frame(obj, frame):
         cur = cur.parent
     m = mathutils.Matrix.Identity(4)
     for o in reversed(chain):
+        # audit-2026-06-14r2 #10: Blender's rule is
+        #   matrix_world = parent.matrix_world @ matrix_parent_inverse @ basis
+        # The parent inverse (set at Ctrl+P time, generally non-identity, and
+        # NOT animatable so it's read directly) was omitted, so a parented
+        # inflow's emit region landed at the wrong world position then got
+        # normalised into [0,1] and emitted there.
+        if o.parent is not None:
+            m = m @ o.matrix_parent_inverse
         m = m @ _local_matrix(o)
     return m
 

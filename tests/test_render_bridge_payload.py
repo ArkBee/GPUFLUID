@@ -75,6 +75,7 @@ def _addon_argv(cache: str, scene: str, out: str, *,
                 label: str = "Water",
                 color=(0.20, 0.50, 0.70),
                 samples: int = 16,
+                fps: int = 24,
                 blender: str = "") -> list[str]:
     """Reproduce OT_render.execute's argv construction (without bpy).
 
@@ -88,6 +89,7 @@ def _addon_argv(cache: str, scene: str, out: str, *,
         "--label", label,
         "--color", f"{color[0]:.4f}", f"{color[1]:.4f}", f"{color[2]:.4f}",
         "--samples", str(int(samples)),
+        "--fps", str(int(fps)),   # audit-2026-06-14r2 #9
     ]
     if blender:
         argv += ["--blender", blender]

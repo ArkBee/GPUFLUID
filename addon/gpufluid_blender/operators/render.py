@@ -244,6 +244,19 @@ class GPUFLUID_OT_render(bpy.types.Operator):
                     f"may overcount.")
         self._out_dir = str(out_dir)
 
+        # audit-2026-06-14r2 #9: forward the bake's fps. The CLI render
+        # subparser defaults --fps to 60 and the headless renderer uses it for
+        # sc.render.fps + the sim-time overlay (frame/fps). Omitting it made
+        # every addon-driven render run at 60 regardless of the Domain's fps
+        # (default 24) — overlay sim-time and any PNG-sequence encode came out
+        # ~2.5x off. The correct fps is in the cache's scene.toml.
+        render_fps = 24
+        try:
+            import tomllib
+            render_fps = int(tomllib.loads(
+                Path(scene_toml).read_text(encoding="utf-8"))["simulation"]["fps"])
+        except Exception:
+            pass
         argv = [
             interp, "-m", "gpufluid.cli", "render",
             str(cache_dir), str(scene_toml),
@@ -251,6 +264,7 @@ class GPUFLUID_OT_render(bpy.types.Operator):
             "--label", self.label,
             "--color", f"{self.color[0]:.4f}", f"{self.color[1]:.4f}", f"{self.color[2]:.4f}",
             "--samples", str(int(self.samples)),
+            "--fps", str(render_fps),
         ]
         blender = self.blender_path.strip()
         if blender:
