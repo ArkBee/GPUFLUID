@@ -24,6 +24,25 @@ addon/solver/surface — см. коммиты `audit 2026-06-14`). Один от
   box-стенки бассейна (как в `demo30_stairs.toml`). Готово когда: меш-домен держит
   столб ≥0.3 без протечки + тест на сцене.
 
+- 📝 **FU-037** — **layer-gate ранжирует W7 по числовому суффиксу, скрывая реальный
+  W7→I6 импорт** (audit-2026-06-15 r9 #2, HIGH-by-finder, отложен как
+  архитектурный). `blocks/check.py:_layer_rank` берёт ранг из числа в id (`W7`→7),
+  но DESIGN.md §2/§11.5 говорит, что W7 (whitewater) сидит **между D4 и M5** в
+  порядке зависимостей (число 7 — историческое). Из-за этого `_check_cross_layer_imports`
+  (флагит при `imported_rank > importer_rank`) НЕ ловит `sim/mpm/solver.py:36
+  from ...io.ply import write_points_ply` (W7=7 → I6=6, 6>7 ложь). С верным рангом
+  (W7≈4.5 < I6=6) это нарушение. **Почему отложено:** фикс `_layer_rank` (явный
+  топо-порядок `[G1,S2,F3,D4,W7,M5,I6,C7,A8]`) обнажит W7→I6, и `test_check_4`
+  (ассертит ноль cross-layer errors) **упадёт**. Закрыть нарушение — архитектурное
+  решение **для продакта**: либо (a) рефактор `MpmSolver` чтобы дамп PLY гнал
+  вызывающий слой (C7/I6), а не солвер (1 call-site, solver.py:808, но меняет API
+  дампа), либо (b) формально задокументировать исключение W7→I6 (DESIGN.md exit-plan
+  + `_KNOWN_LAYER_EXCEPTIONS`), что ломает инвариант «whitelist пуст»
+  (test_no_layer_exceptions, F3.6.C3). Также фикс закроет другие инверсии (W7↔C7
+  collision на ранге 7, W7→M5/A8). Готово когда: `_layer_rank` топологичен +
+  W7→I6 закрыт (рефактор ИЛИ задокументированное исключение) + контракт-тест
+  `_layer_rank('W7') < _layer_rank('M5') < _layer_rank('I6')`.
+
 ---
 
 ## demo30 rescope 2026-06-13 (branch feat/demo30-rescope)

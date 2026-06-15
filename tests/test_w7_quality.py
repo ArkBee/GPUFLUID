@@ -39,11 +39,15 @@ def test_emit_classifies_three_kinds():
     d = _synthetic_density_grid(N)
     ws = WhitewaterSystem(WhitewaterConfig(speed_threshold=0.1))
     # Three particles: deep (bubble), at surface (foam), above (spray).
-    # Round-23: Z-up — z=0.10 deep, z=0.50 surface, z=0.80 air.
+    # Round-23: Z-up. audit-2026-06-15r9 #3: the density grid is CELL-CENTRED
+    # (k_density_scatter uses i = floor(p/dx - 0.5)), so the classifier reads it
+    # the same way; cell index = floor(z/dx - 0.5). The surface particle sits at
+    # z=0.55 (→ cell 8, the d=0.5 band) — z=0.50 reads cell 7 (deep fluid, the
+    # node-centred convention this test used to assume).
     pos = np.array([
-        [0.5, 0.5, 0.10],   # z=0.10 → cell 1  → density 1.0 → bubble
-        [0.5, 0.5, 0.50],   # z=0.50 → cell 8  → density 0.5 → foam
-        [0.5, 0.5, 0.80],   # z=0.80 → cell 12 → density 0.0 → spray
+        [0.5, 0.5, 0.10],   # z/dx=1.6 → cell floor(1.1)=1  → density 1.0 → bubble
+        [0.5, 0.5, 0.55],   # z/dx=8.8 → cell floor(8.3)=8  → density 0.5 → foam
+        [0.5, 0.5, 0.80],   # z/dx=12.8 → cell floor(12.3)=12 → density 0.0 → spray
     ], dtype=np.float32)
     vel = np.ones_like(pos) * np.array([1.0, 0.0, 0.0])  # all moving fast
     ws.emit_from_fluid(pos, vel, density=d, dx=dx)

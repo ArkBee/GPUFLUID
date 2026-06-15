@@ -64,6 +64,24 @@ class WhitewaterConfig:
     lifetime_sec: float = 1.5
 
 
+def _world_to_cell(pos: np.ndarray, dx: float, shape):
+    """World positions -> CELL-CENTRED grid indices, matching the density grid.
+
+    audit-2026-06-15r9 #3: extractor.dens (mesh_method='trilinear') is filled by
+    k_density_scatter with the cell-centred convention `i = floor(p/dx - 0.5)`
+    (index i <-> world (i+0.5)*dx; same as the MC vertex fix audit-2026-06-14
+    #12). The classifier + bubble-pop read this grid, so they MUST use the same
+    `- 0.5`. The old `floor(p/dx)` was node-centred — a systematic +half-cell
+    sampling bias on every axis that flips foam/spray/bubble thresholds in the
+    steep surface band. One helper so the two read-sites can't drift again (§9.6).
+    """
+    nx, ny, nz = shape
+    i = np.clip(np.floor(pos[:, 0] / dx - 0.5).astype(np.int32), 0, nx - 1)
+    j = np.clip(np.floor(pos[:, 1] / dx - 0.5).astype(np.int32), 0, ny - 1)
+    k = np.clip(np.floor(pos[:, 2] / dx - 0.5).astype(np.int32), 0, nz - 1)
+    return i, j, k
+
+
 # [BLK W7.1]
 @block("W7.1", "Whitewater state container + per-frame update (foam/spray/bubble)")
 class WhitewaterSystem:
@@ -104,10 +122,7 @@ class WhitewaterSystem:
         if density is None or n == 0:
             return np.zeros(n, dtype=np.int32)
         sample_pos = pos if vel is None else pos + vel * float(lookahead_dt)
-        nx, ny, nz = density.shape
-        i = np.clip((sample_pos[:, 0] / dx).astype(np.int32), 0, nx - 1)
-        j = np.clip((sample_pos[:, 1] / dx).astype(np.int32), 0, ny - 1)
-        k = np.clip((sample_pos[:, 2] / dx).astype(np.int32), 0, nz - 1)
+        i, j, k = _world_to_cell(sample_pos, dx, density.shape)
         d_at = density[i, j, k]
         kind = np.full(n, KIND_FOAM, dtype=np.int32)
         kind[d_at < self.cfg.density_above_surface] = KIND_SPRAY
@@ -241,10 +256,7 @@ class WhitewaterSystem:
         # emit and the scene shows almost only one class (whichever the
         # emit-projection happened to favour).
         if density is not None and dx is not None:
-            nx, ny, nz = density.shape
-            i = np.clip((self.pos[:, 0] / dx).astype(np.int32), 0, nx - 1)
-            j = np.clip((self.pos[:, 1] / dx).astype(np.int32), 0, ny - 1)
-            k = np.clip((self.pos[:, 2] / dx).astype(np.int32), 0, nz - 1)
+            i, j, k = _world_to_cell(self.pos, dx, density.shape)
             d_at = density[i, j, k]
             # spray landed in water → foam (density crossed above_surface)
             became_foam = (self.kind == KIND_SPRAY) & (d_at > self.cfg.density_above_surface)

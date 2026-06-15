@@ -251,8 +251,16 @@ class MeshExtractor:
         -------
         ``(N, 3) uint8`` — RGB ready for the PLY writer.
         """
-        if self._sdf_grid is None:
-            self._build_sdf_hashgrid(pos, search_radius_world)
+        # audit-2026-06-15r9 #1: rebuild the hashgrid for THIS frame's particles
+        # on EVERY call. The old `if self._sdf_grid is None` guard built it once
+        # (frame 0) and then k_vertex_color_knn queried stale frame-0 spatial
+        # bins for every later frame — vertex colours blended against where the
+        # particles WERE, drifting as the cloud moved (and pos is reassigned to
+        # new arrays on reseed/compaction). For mesh_method='sdf' extract()
+        # already rebuilt every frame; the trilinear/cubic colour paths did not.
+        # _build_sdf_hashgrid reuses the grid object and just re-runs .build()
+        # (~1ms), so the unconditional rebuild is cheap. §9.8 stale-GPU-state.
+        self._build_sdf_hashgrid(pos, search_radius_world)
         n_v = verts_world.shape[0]
         verts_wp = wp.array(verts_world, dtype=wp.vec3, device=self.device)
         out = wp.zeros(n_v, dtype=wp.vec3, device=self.device)
