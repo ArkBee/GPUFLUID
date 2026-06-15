@@ -34,7 +34,14 @@ def _synthetic_density_grid(N: int = 16):
 
 
 def test_emit_classifies_three_kinds():
-    """Fast particles seeded at different y must get distinct kinds."""
+    """Fast particles seeded at different y must get distinct kinds.
+
+    Note (audit-2026-06-15 r10 self-review): this is an all-classes-present
+    smoke test — the three z-values happen to map to the same cells (1, 8, 12)
+    under BOTH the node- and cell-centred conventions, so it does NOT guard the
+    r9 #3 off-by-one. The discriminating convention guard lives in
+    tests/test_audit_20260615r9.py (test_r9_3_world_to_cell_is_cell_centred).
+    """
     N = 16; dx = 1.0 / N
     d = _synthetic_density_grid(N)
     ws = WhitewaterSystem(WhitewaterConfig(speed_threshold=0.1))
