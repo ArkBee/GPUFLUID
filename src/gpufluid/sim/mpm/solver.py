@@ -424,10 +424,16 @@ class MpmSolver:
             self.attr_temperature = wp.from_numpy(
                 self._temps_np, dtype=float, device=cfg.device
             )
-        # Floor as slip plane (uses warp-mpm's built-in patched collider)
+        # Floor as slip plane (uses warp-mpm's built-in patched collider).
+        # audit-2026-06-15r11 (§9.6 mirror of the obstacle colliders below):
+        # pass end_time=1.0e9 so the floor matches their effectively-unbounded
+        # lifetime. Without it the floor inherits warp-mpm's default end_time=
+        # 999.0, so a bake whose simulated time exceeds 999 s (a long
+        # continuous-inflow render, ~frames/fps seconds) would silently lose the
+        # floor and particles would fall through for the rest of the bake.
         self.mpm.add_surface_collider(
             (0.0, 0.0, cfg.walls.floor_z), (0.0, 0.0, 1.0),
-            surface="slip", friction=0.0,
+            surface="slip", friction=0.0, end_time=1.0e9,
         )
         # Cube colliders — register our SDF box kernel + a Dirichlet_collider
         # struct per cube to carry the box geometry into the kernel.

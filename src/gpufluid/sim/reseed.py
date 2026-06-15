@@ -127,6 +127,17 @@ def reseed_particles(
             for p in picks:
                 keep_mask[order[s + p]] = False
 
+    # audit-2026-06-15r11 (§9.6 mirror of the GPU k_mark_keep_by_rank
+    # `if marker==2: alive=0` drop): also remove any particle whose host cell is
+    # SOLID, regardless of capacity. A fast particle can penetrate one cell into
+    # an interior obstacle before boundary handling stops it; the GPU reseed
+    # purges those, the CPU path did not — so below RESEED_GPU_THRESHOLD they
+    # accumulated inside solids (the iso-surface then bleeds into the obstacle).
+    # This also makes the code honour the docstring's "no particles end up in
+    # solids" promise.
+    if len(pos) > 0:
+        keep_mask &= ~solid_mask[ix, iy, iz]
+
     new_pos = pos[keep_mask]
     new_vel = vel[keep_mask]
     if n_emitted > 0:
