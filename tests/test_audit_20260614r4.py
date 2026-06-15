@@ -51,6 +51,11 @@ def test_r4_2_both_mesh_obstacle_branches_emit_scale_and_translate():
         "r4 #2: both MESH-obstacle branches must set scale=avg_inv"
     assert code.count("-origin.x * avg_inv, -origin.y * avg_inv,") == 2, \
         "r4 #2: both MESH-obstacle branches must set the origin translate"
+    # audit-2026-06-15r14 (§9.6): both mesh-emitting branches share the uniform-
+    # scale defect, so both must emit the non-cubic anisotropy warning — the
+    # explicit-MESH branch had it; the auto-promote branch did not.
+    assert code.count("squashed on the short domain axis") == 2, \
+        "r14: both MESH-obstacle branches must warn on a non-cubic domain"
 
 
 # ── #3 a bad Blender executable surfaces as a clean BlockError ──────────────

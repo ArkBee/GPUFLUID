@@ -363,6 +363,20 @@ def collect_scene(context, domain_obj):
                     cache_dir,
                     f"obstacle_{_safe_obj_name(o.name)}.obj")
                 _export_obj(o, mesh_path)
+                # audit-2026-06-15r14 (§9.6 mirror of the explicit MESH branch's
+                # FU-019 warning below): this auto-promoted mesh obstacle uses the
+                # SAME uniform scalar scale=avg_inv, so it has the SAME non-cubic
+                # squash defect — warn here too, else the mis-scaling is loud via
+                # the explicit-MESH path but silent via auto-promote (the r4 #2
+                # patch mirrored scale/translate but forgot this diagnostic).
+                if max(inv_size) / min(inv_size) > 1.05:
+                    warnings.append(
+                        f"obstacle '{o.name}' auto-promoted to MESH on a "
+                        f"non-cubic domain — the mesh is scaled uniformly "
+                        f"(single-scalar limitation), so the collider is "
+                        f"squashed on the short domain axis and won't match the "
+                        f"visible mesh. Make the domain cubic for an exact fit "
+                        f"(per-axis mesh scaling is a known follow-up).")
                 obstacles.append({
                     "type": "mesh",
                     # round-55: key name must match the original MESH
