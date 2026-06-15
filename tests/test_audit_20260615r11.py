@@ -50,11 +50,17 @@ def test_r11_reseed_drops_solid_trapped_particle():
     vel = np.zeros((2, 3), dtype=np.float32)
     cfg = ReseedConfig(min_per_cell=0, max_per_cell=1000)  # no emit, no cull
     rng = np.random.default_rng(0)
-    new_pos, new_vel, *_ = reseed_particles(pos, vel, marker, dx, cfg, rng)
+    new_pos, new_vel, n_emitted, n_culled = reseed_particles(
+        pos, vel, marker, dx, cfg, rng)
     assert len(new_pos) == 1, \
         f"solid-trapped particle must be dropped (got {len(new_pos)} survivors)"
     assert np.allclose(new_pos[0], [0.125, 0.125, 0.125]), \
         "the fluid-cell particle must survive"
+    # closing-review: the solid drop MUST show up in the returned cull count —
+    # this is no emit + no capacity cull, so without it the CLI commit guard
+    # (`n_emit>0 or n_cull>0`) would discard the result and the fix is inert.
+    assert n_emitted == 0 and n_culled == 1, \
+        f"solid drop must be counted in n_culled (got emit={n_emitted}, cull={n_culled})"
 
 
 def test_r11_reseed_solid_drop_contract():

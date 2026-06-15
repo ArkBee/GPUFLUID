@@ -136,7 +136,18 @@ def reseed_particles(
     # This also makes the code honour the docstring's "no particles end up in
     # solids" promise.
     if len(pos) > 0:
+        _before = int(keep_mask.sum())
         keep_mask &= ~solid_mask[ix, iy, iz]
+        # audit-2026-06-15 closing-review: fold the solid drops into the
+        # returned cull count. Without this the r11 fix was a HALF-FIX: (a) the
+        # sole consumer (cli/commands.py) only commits the shortened arrays when
+        # `n_emit > 0 or n_cull > 0`, so a settled scene where a solid drop is
+        # the ONLY change (n_emit==0, n_cull==0) discarded the result and the
+        # particle stayed in the solid — inert in exactly the case it targets;
+        # and (b) the GPU sibling counts solid drops in its `n - n_alive`, so
+        # the CPU return diverged from the GPU (the §9.6 metric this very patch
+        # claims to reconcile).
+        n_to_cull += _before - int(keep_mask.sum())
 
     new_pos = pos[keep_mask]
     new_vel = vel[keep_mask]
