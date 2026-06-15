@@ -66,7 +66,9 @@ additionally has at least one `test_*` matching the block ID slug;
 | S2.17.1.SPH | SDF sphere grid collider (non-box obstacles were ghosts — water fell through; goal 2026-06-14) | S2 | `src/gpufluid/sim/mpm/colliders.py` | impl |
 | S2.17.1.CYL | SDF cylinder-Y grid collider (axis +Y) | S2 | `src/gpufluid/sim/mpm/colliders.py` | impl |
 | S2.17.2 | Particle pushback inside cube body: snap to nearest face, zero inward normal velocity, reset F/F_trial/C | S2 | `?` | impl |
+| S2.17.2.CYL | Particle pushback out of a Y-axis cylinder obstacle (radial + axial select; FU-038 sibling of the cylinder grid collider) | S2 | `src/gpufluid/sim/mpm/pushback.py` | impl |
 | S2.17.2.MESH | Particle pushback out of a MESH obstacle via precomputed SDF grid + gradient normal (mesh obstacles were ghosts) | S2 | `src/gpufluid/sim/mpm/pushback.py` | impl |
+| S2.17.2.SPH | Particle pushback out of a sphere obstacle (analytic SDF; FU-038 sibling of the sphere grid collider) | S2 | `src/gpufluid/sim/mpm/pushback.py` | impl |
 | S2.17.3 | Particle pushback at domain walls: slip-clamp to [lo, hi]³, zero normal velocity, preserve tangential, reset F/C | S2 | `?` | impl |
 | S2.17.4 | Tap-zone terminal velocity cap (downward only): mimics air drag on a laminar stream | S2 | `?` | impl |
 | S2.17.5 | Above-obstacle anti-splash \|v_z\| clamp: caps stress-launched upward outliers at a physical hydraulic-jump bound | S2 | `?` | impl |

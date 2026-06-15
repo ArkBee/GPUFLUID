@@ -144,6 +144,97 @@ def k_wall_pushback(
     state.particle_C[p] = Z
 
 
+@block("S2.17.2.SPH",
+       "Particle pushback out of a sphere obstacle (analytic SDF |p-c|-r). "
+       "FU-038: sphere had a grid collider but no particle pushback twin, so a "
+       "fast particle could tunnel inside between substeps.")
+@wp.kernel
+def k_sphere_pushback(
+    state: MPMStateStruct,
+    cx: float, cy: float, cz: float,
+    radius: float,
+    snap_eps: float,
+):
+    """Push any particle inside a sphere back out to its surface, mirroring
+    :func:`k_cube_pushback`: outward normal = unit radial, snap to
+    ``|p-c| = radius + snap_eps``, remove inward-normal velocity, reset
+    F/F_trial/C (deformation history at a rigid contact is ill-defined)."""
+    p = wp.tid()
+    if state.particle_selection[p] == 1:
+        return  # held inflow particle
+    pos = state.particle_x[p]
+    rel = wp.vec3(pos[0] - cx, pos[1] - cy, pos[2] - cz)
+    dist = wp.length(rel)
+    d = dist - radius  # signed distance to the surface (negative inside)
+    if d >= snap_eps:
+        return  # outside the solid
+    n = wp.vec3(0.0, 0.0, 1.0)  # fallback for a particle exactly at the centre
+    if dist > 1.0e-8:
+        n = rel / dist
+    state.particle_x[p] = pos + n * (snap_eps - d)
+    v = state.particle_v[p]
+    vn = wp.dot(v, n)
+    if vn < 0.0:
+        state.particle_v[p] = v - vn * n
+    I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    Z = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    state.particle_F[p] = I
+    state.particle_F_trial[p] = I
+    state.particle_C[p] = Z
+
+
+@block("S2.17.2.CYL",
+       "Particle pushback out of a Y-axis cylinder obstacle (radial X-Z + "
+       "axial Y, nearest-surface select like the cube). FU-038 sibling of the "
+       "grid collider.")
+@wp.kernel
+def k_cylinder_pushback(
+    state: MPMStateStruct,
+    cx: float, cy: float, cz: float,
+    radius: float, half_h: float,
+    snap_eps: float,
+):
+    """Push any particle inside a Y-axis cylinder back out, mirroring
+    :func:`k_cube_pushback`'s nearest-face select but on the cylinder's
+    radial side / axial caps. Same SDF split as ``k_sdf_cylinder_collide``."""
+    p = wp.tid()
+    if state.particle_selection[p] == 1:
+        return
+    pos = state.particle_x[p]
+    rx = pos[0] - cx
+    ry = pos[1] - cy
+    rz = pos[2] - cz
+    radial = wp.sqrt(rx * rx + rz * rz)
+    dr = radial - radius
+    dy = wp.abs(ry) - half_h
+    d_out = wp.sqrt(wp.max(dr, 0.0) * wp.max(dr, 0.0)
+                    + wp.max(dy, 0.0) * wp.max(dy, 0.0))
+    d_in = wp.min(wp.max(dr, dy), 0.0)
+    d = d_out + d_in
+    if d >= snap_eps:
+        return  # outside the solid
+    # nearest surface: radial side vs axial cap (same test as the collider).
+    n = wp.vec3(0.0, 0.0, 1.0)
+    if dr >= dy:
+        if radial > 1.0e-8:
+            n = wp.vec3(rx / radial, 0.0, rz / radial)
+    else:
+        if ry > 0.0:
+            n = wp.vec3(0.0, 1.0, 0.0)
+        else:
+            n = wp.vec3(0.0, -1.0, 0.0)
+    state.particle_x[p] = pos + n * (snap_eps - d)
+    v = state.particle_v[p]
+    vn = wp.dot(v, n)
+    if vn < 0.0:
+        state.particle_v[p] = v - vn * n
+    I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    Z = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    state.particle_F[p] = I
+    state.particle_F_trial[p] = I
+    state.particle_C[p] = Z
+
+
 @block("S2.17.2.MESH",
        "Particle pushback out of a MESH obstacle via its precomputed signed-"
        "distance grid + gradient normal. Goal 2026-06-14: mesh obstacles were "

@@ -43,8 +43,15 @@ addon/solver/surface — см. коммиты `audit 2026-06-14`). Один от
   W7→I6 закрыт (рефактор ИЛИ задокументированное исключение) + контракт-тест
   `_layer_rank('W7') < _layer_rank('M5') < _layer_rank('I6')`.
 
-- 📝 **FU-038** — **MPM sphere/cylinder obstacles lack the particle-pushback
-  second-layer** (audit-2026-06-15 r12 #4, MED, deferred — new GPU kernels).
+- ✅ **FU-038** — **DONE 2026-06-15**: added `k_sphere_pushback` (analytic SDF
+  |p-c|-r) + `k_cylinder_pushback` (radial X-Z + axial Y nearest-surface select)
+  in pushback.py, mirroring `k_cube_pushback`, wired into BOTH `_post_step` and
+  `_apply_pushback` (the §9.6 pair) + `_sphere_params`/`_cylinder_params`.
+  GPU-validated: a column seeded INSIDE a sphere/cylinder is ejected (0% deep
+  inside) within 4 steps — the pushback, not gravity. Tests
+  test_fu038_pushback.py (contracts + 2 GPU ejection tests). Closes the
+  asymmetry below.
+  ~~MED, deferred — new GPU kernels.~~ (original analysis kept for context:)
   box + mesh obstacles have a TWO-layer defense: grid-velocity projection
   (`k_sdf_box_collide` / mesh SDF) PLUS per-particle pushback
   (`k_cube_pushback` / `k_mesh_sdf_pushback`, pushback.py) that catches

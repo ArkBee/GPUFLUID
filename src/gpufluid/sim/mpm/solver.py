@@ -80,7 +80,8 @@ from .colliders import (
 )
 from .inflow import MpmInflow, k_inflow_gate, seed_inflow_particles
 from .outflow import MpmOutflow, k_outflow_despawn
-from .pushback import k_cube_pushback, k_wall_pushback, k_mesh_sdf_pushback
+from .pushback import (k_cube_pushback, k_wall_pushback, k_mesh_sdf_pushback,
+                       k_sphere_pushback, k_cylinder_pushback)
 from .velcaps import k_anti_splash_vz, k_tap_terminal_velocity
 
 
@@ -537,6 +538,20 @@ class MpmSolver:
                 _snap_eps,
                 R,
             ))
+        # FU-038: sphere/cylinder particle-pushback params (mirror _cube_params).
+        # The grid colliders above are the primary defense; these catch a fast
+        # particle that tunnels inside between substeps, exactly as
+        # k_cube_pushback / k_mesh_sdf_pushback do for box/mesh.
+        self._sphere_params = [
+            (sph.centre[0], sph.centre[1], sph.centre[2],
+             float(sph.radius), _snap_eps)
+            for sph in cfg.spheres
+        ]
+        self._cylinder_params = [
+            (cyl.centre[0], cyl.centre[1], cyl.centre[2],
+             float(cyl.radius), float(cyl.half_height), _snap_eps)
+            for cyl in cfg.cylinders
+        ]
         self._wall_lo = cfg.walls.lo
         self._wall_hi = cfg.walls.hi
         # Mesh obstacle colliders (goal 2026-06-14): upload each precomputed
@@ -609,6 +624,14 @@ class MpmSolver:
             wp.launch(k_cube_pushback, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state, *cube],
                       device=cfg.device)
+        for sph in self._sphere_params:   # FU-038
+            wp.launch(k_sphere_pushback, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, *sph],
+                      device=cfg.device)
+        for cyl in self._cylinder_params:  # FU-038
+            wp.launch(k_cylinder_pushback, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, *cyl],
+                      device=cfg.device)
         for ms in self._mesh_sdfs:
             wp.launch(k_mesh_sdf_pushback, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state, *ms],
@@ -639,6 +662,14 @@ class MpmSolver:
         for cube in self._cube_params:
             wp.launch(k_cube_pushback, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state, *cube],
+                      device=cfg.device)
+        for sph in self._sphere_params:   # FU-038
+            wp.launch(k_sphere_pushback, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, *sph],
+                      device=cfg.device)
+        for cyl in self._cylinder_params:  # FU-038
+            wp.launch(k_cylinder_pushback, dim=self.n_particles,
+                      inputs=[self.mpm.mpm_state, *cyl],
                       device=cfg.device)
         for ms in self._mesh_sdfs:
             wp.launch(k_mesh_sdf_pushback, dim=self.n_particles,
