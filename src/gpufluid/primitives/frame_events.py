@@ -1,19 +1,22 @@
 """[Layer G1] Per-frame event queue for D4 -> F3 communication.
 
-Spec: DESIGN.md §3.2.4.2 (F3.6.C1 phase).
+Spec: DESIGN.md §3.2.4.2 (F3.6.C1 + C2).
 
-The queue is the architectural fix for the F3<->D4 layer inversion.
-Today the solver (F3) pulls per-frame work from `domain/regions.py`
-(D4) — that's the wrong direction by the §2 layer rule. The fix is
-event-driven: D4 region helpers PUBLISH `FluidEmitEvent` /
-`FluidOutflowEvent` instances into a queue at `prepare_frame` start,
-and the solver DRAINS the queue. F3 stops importing from D4.
+The queue is the architectural fix for the F3<->D4 layer inversion: the
+solver (F3) used to PULL per-frame work from `domain/regions.py` (D4),
+the wrong direction by the §2 layer rule. The fix is event-driven: D4
+region helpers PUBLISH `FluidEmitEvent` / `FluidOutflowEvent` instances
+into this queue at `prepare_frame` start, and the solver DRAINS the
+queue. F3 no longer imports from D4.
 
-This module ships the queue + event dataclasses but does NOT yet
-change the solver (that's F3.6.C2). Until then the queue runs
-side-by-side with the legacy `apply_inflows` / `apply_outflows` host
-helpers, so callers can adopt at their own pace and we can land C1
-without behavioural change.
+As of F3.6.C2 (2026-05-17) this queue is the LIVE path, not a parallel
+spike: `FlipSolver3D.prepare_frame` (solvers/solver3d.py) calls
+`self._frame_events.clear()`, then `inflow.publish_for_frame` /
+`outflow.publish_for_frame`, then `drain_outflows()` + `drain_emits()`
+and applies them. solver3d.py dropped its `from ..domain.regions import
+apply_inflows, apply_outflows` entirely — those legacy host helpers are
+no longer called from the solver (the queue replaced them). The G1<->F3
+parity is pinned by tests/test_g1_17_frame_events.py.
 
 Block IDs:
 
@@ -21,7 +24,7 @@ Block IDs:
   G1.18  FluidOutflowEvent    — one cull request for the current frame
   G1.19  FrameEventQueue      — push/drain sink, one-shot per frame
 
-Lifecycle (designed but not yet enforced in solver code, see C2):
+Lifecycle (now enforced in solver code, see C2 above):
 
   prepare_frame_start:
       queue.clear()

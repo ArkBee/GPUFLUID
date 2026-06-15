@@ -148,10 +148,21 @@ class _MeshCache:
         verts = triangles_np.reshape(-1, 3).astype(np.float32)  # (3*n_tris, 3)
         indices = np.arange(verts.shape[0], dtype=np.int32)
 
+        # 2026-06-15: build with support_winding_number=True. Warp's
+        # `mesh_query_point_sign_winding_number` (k3_mesh_to_solid_bvh) docstring
+        # states the wp.Mesh "must be constructed with support_winding_number=
+        # True for this method to return correct results"; the constructor
+        # default is False. Empirically Warp 1.13 still returns correct signs
+        # for watertight cube/icosphere meshes WITHOUT the flag (the bug is
+        # latent here), but relying on that is fragile — the flag is the
+        # documented contract and guards against a future Warp build (or the
+        # `accuracy` Barnes-Hut approximation engaging) silently returning wrong
+        # inside/outside signs, which would let fluid pass through mesh solids.
         if cache_key is None:
             pts = wp.array(verts, dtype=wp.vec3, device=device)
             idx = wp.array(indices, dtype=wp.int32, device=device)
-            return wp.Mesh(points=pts, indices=idx)
+            return wp.Mesh(points=pts, indices=idx,
+                           support_winding_number=True)
 
         entry = self._entries.get(cache_key)
         if entry is not None and entry["n_tris"] == n_tris and entry["device"] == device:
@@ -161,7 +172,7 @@ class _MeshCache:
 
         pts = wp.array(verts, dtype=wp.vec3, device=device)
         idx = wp.array(indices, dtype=wp.int32, device=device)
-        mesh = wp.Mesh(points=pts, indices=idx)
+        mesh = wp.Mesh(points=pts, indices=idx, support_winding_number=True)
         if len(self._entries) >= self.max_entries:
             self._entries.pop(next(iter(self._entries)))
         self._entries[cache_key] = {"mesh": mesh, "n_tris": n_tris, "device": device}

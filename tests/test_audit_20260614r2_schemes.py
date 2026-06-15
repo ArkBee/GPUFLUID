@@ -24,6 +24,26 @@ def test_bvh_launch_uses_domain_spanning_max_dist_not_literal_2():
         "audit #8: max_dist must be derived from the mesh extent (cover interior)"
 
 
+# ---- 2026-06-15: wp.Mesh must enable winding-number support ----------------
+
+def test_wp_mesh_built_with_support_winding_number():
+    """k3_mesh_to_solid_bvh queries mesh_query_point_sign_winding_number, which
+    Warp documents as requiring the wp.Mesh be built with
+    support_winding_number=True (ctor default is False). Empirically Warp 1.13
+    returns correct signs without it for watertight meshes, but that is
+    undocumented — every wp.Mesh ctor in mesh_marker must set the flag so a
+    future Warp build can't silently return wrong inside/outside signs (fluid
+    leaking through mesh solids)."""
+    code = "\n".join(l for l in MARKER.read_text(encoding="utf-8").splitlines()
+                     if not l.lstrip().startswith("#"))
+    n_ctor = code.count("wp.Mesh(points=")
+    n_flag = code.count("support_winding_number=True")
+    assert n_ctor >= 2, "expected >=2 wp.Mesh constructions in mesh_marker"
+    assert n_flag == n_ctor, (
+        f"every wp.Mesh must pass support_winding_number=True "
+        f"({n_ctor} ctors but {n_flag} flagged)")
+
+
 @pytest.mark.skipif(not HAS_CUDA, reason="no CUDA device")
 def test_bvh_marks_deep_interior_of_large_mesh():
     """A cell deep inside a large mesh (nearest face > 2 world units away) must

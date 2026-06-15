@@ -509,9 +509,16 @@ re-applying the two patches, not merging a fork.
 ### 5.4 D4.3.GPU.BVH — BVH-accelerated mesh-inside test
 
 Replaces the O(cells × tris) brute-force ray-cast (`D4.3.GPU`) with a
-single `wp.mesh_query_point_sign_winding_number(mesh.id, p, accuracy)`
-per cell. Uses Warp's built-in `wp.Mesh` spatial structure (LBVH built
-on construction) — no hand-rolled BVH builder. Tradeoff: we depend on
+single `wp.mesh_query_point_sign_winding_number(mesh.id, p, max_dist)`
+per cell. NB the 3rd positional arg is **`max_dist`** (the closest-point
+search bound), NOT `accuracy` — `accuracy` is the 4th arg and keeps its
+2.0 default (audit-2026-06-14r2 #8; the literal 2.0 used to cap the
+search radius and leave deep interior cells of a >2-unit obstacle
+unmarked). `max_dist` is sized to the mesh bbox diagonal + one cell.
+The `wp.Mesh` is built with **`support_winding_number=True`** (the Warp
+docs require it for the winding query to return correct signs; the ctor
+default is False — 2026-06-15). Uses Warp's built-in `wp.Mesh` spatial
+structure (LBVH built on construction) — no hand-rolled BVH builder. Tradeoff: we depend on
 Warp's mesh primitive remaining stable across versions; in return the
 acceleration is battle-tested, builds in O(N log N), and traverses on
 GPU without manual stack management. Triangle threshold for auto-engage
