@@ -152,3 +152,14 @@ def test_r8_5_inflow_frame_start_clamped():
         "r8 #5: frame_start must be clamped to sim.frames (mirror frame_end)"
     assert "it starts at/after the" in code, \
         "r8 #5: an inflow starting past the sim end must warn, not silently crash"
+
+
+def test_r10_outflow_frame_start_clamped():
+    # §9.6 mirror of #5: the MpmOutflow twin had the same frame_start
+    # asymmetry (r10 self-review flagged it). Clamp + warn there too, else a
+    # too-large frame_start silently makes the outflow a no-op drain.
+    code = _code(REPO / "src" / "gpufluid" / "cli" / "commands.py")
+    assert "frame_start=int(min(out.frame_start, sim.frames))" in code, \
+        "r10: outflow frame_start must be clamped like the inflow twin"
+    assert "it never drains" in code, \
+        "r10: an outflow starting past the sim end must warn"

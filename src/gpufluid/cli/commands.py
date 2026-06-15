@@ -314,10 +314,20 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     # particles until the domain filled. Now each [[outflow]] becomes an
     # MpmOutflow that despawns particles entering it. frame_end clamps to
     # sim.frames so the default 1_000_000 means "drain for the whole bake".
+    # audit-2026-06-15r10 (§9.6 mirror of the inflow frame_start fix r8 #5):
+    # clamp frame_start to sim.frames too. frame_end is clamped below, so an
+    # un-clamped frame_start > sim.frames would give a reversed active window
+    # and the outflow would silently never despawn anything (a no-op drain — the
+    # user set an [[outflow]] expecting it to remove particles). Warn + clamp.
+    for _i, _out in enumerate(scene.outflow):
+        if int(_out.frame_start) >= sim.frames:
+            print(f"[mpm] WARN: outflow[{_i}].frame_start={_out.frame_start} "
+                  f">= simulation.frames={sim.frames} — it starts at/after the "
+                  f"sim ends, so it never drains.", file=sys.stderr)
     outflows = tuple(
         MpmOutflow(
             lo=tuple(out.lo), hi=tuple(out.hi),
-            frame_start=int(out.frame_start),
+            frame_start=int(min(out.frame_start, sim.frames)),
             frame_end=int(min(out.frame_end, sim.frames)),
         )
         for out in scene.outflow
