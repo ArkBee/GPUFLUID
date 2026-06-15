@@ -43,6 +43,26 @@ addon/solver/surface — см. коммиты `audit 2026-06-14`). Один от
   W7→I6 закрыт (рефактор ИЛИ задокументированное исключение) + контракт-тест
   `_layer_rank('W7') < _layer_rank('M5') < _layer_rank('I6')`.
 
+- 📝 **FU-038** — **MPM sphere/cylinder obstacles lack the particle-pushback
+  second-layer** (audit-2026-06-15 r12 #4, MED, deferred — new GPU kernels).
+  box + mesh obstacles have a TWO-layer defense: grid-velocity projection
+  (`k_sdf_box_collide` / mesh SDF) PLUS per-particle pushback
+  (`k_cube_pushback` / `k_mesh_sdf_pushback`, pushback.py) that catches
+  particles that tunnel past the grid between substeps. sphere/cylinder got the
+  grid collider (`k_sdf_sphere_collide`/`k_sdf_cylinder_collide`, 2026-06-14)
+  but NOT the pushback sibling (solver.py `_apply_pushback` launches only
+  `_cube_params` + `_mesh_sdfs`). So a fast particle can tunnel into a sphere/
+  cylinder obstacle. **Severity tempered:** the grid collider IS the primary
+  defense (collision works); pushback is the belt-and-suspenders backstop, so
+  this is edge-case (fast tunnelling), not "water falls through". **Deferred
+  because:** needs new Warp kernels `k_sphere_pushback` (analytic SDF |p-c|-r,
+  outward normal (p-c)/|p-c|) + `k_cylinder_pushback` (radial X-Z + axial Y
+  face-select, like the cube's nearest-face logic) mirroring `k_cube_pushback`,
+  + `_sphere_params`/`_cylinder_params` buffers + `_apply_pushback` wiring + GPU
+  validation on a fast-fluid-into-sphere scene — better done deliberately with
+  review than autonomously. Готово когда: both kernels added + wired + a GPU
+  test asserts a fast particle aimed at a sphere centre ends up outside it.
+
 ---
 
 ## demo30 rescope 2026-06-13 (branch feat/demo30-rescope)

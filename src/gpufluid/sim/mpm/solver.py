@@ -253,10 +253,13 @@ def build_attribute_arrays(
     sidecar emission entirely (zero-overhead path).
 
     Defaults applied to "silent" sources when at least one other source
-    sets the attribute: ``(1, 1, 1)`` white for colour, ``20.0`` for
-    temperature. These are chosen to be visually / physically neutral
-    rather than zero, which would otherwise read as "black water" or
-    "absolute zero" downstream.
+    sets the attribute: ``(0, 0, 0)`` black for colour, ``20.0`` for
+    temperature. audit-2026-06-15r12 #3: black matches the project-wide
+    convention the 2026-06-14 r2/r3 audit standardized on for every emit /
+    reseed / seed colour pad (solvers/solver3d.py:2850,2930; sim/reseed.py:
+    397,306 — each with an explicit "white was a §9.6 mirror-drift" comment).
+    This MPM seed was the lone holdout still padding white, so the same
+    multi-source scene flipped colour between the FLIP and MPM solvers.
     """
     has_color = cfg.initial_color is not None or any(
         inf.color is not None for inf in cfg.inflows
@@ -267,7 +270,8 @@ def build_attribute_arrays(
     colors_np: np.ndarray | None = None
     temps_np: np.ndarray | None = None
     if n_particles > 0 and has_color:
-        colors_np = np.full((n_particles, 3), 1.0, dtype=np.float32)
+        # black (0,0,0) — the standardized silent-source colour pad (r12 #3).
+        colors_np = np.zeros((n_particles, 3), dtype=np.float32)
         if cfg.initial_color is not None:
             ic = np.asarray(cfg.initial_color, dtype=np.float32)
             if ic.shape != (n_initial, 3):

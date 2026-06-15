@@ -2759,7 +2759,7 @@ class FlipSolver3D:
 
     # ------------------------------------------------------- D4.5.2 mesh seeder
     @block("D4.5.2", "Mesh volumetric seeder (fill arbitrary triangle mesh with particles)")
-    def seed_mesh(self, mesh_path, ppc: int = 8, scale: float = 1.0,
+    def seed_mesh(self, mesh_path, ppc: int = 8, scale=1.0,
                   translate=(0.0, 0.0, 0.0), rotate_deg=None, color=None,
                   temperature=None):
         """Fill the interior of a closed triangle mesh with particles.
@@ -2767,6 +2767,12 @@ class FlipSolver3D:
         Uses the same GPU ray-cast (D4.3.GPU) used for animated mesh
         obstacles to determine which cells are inside the mesh, then emits
         a jittered cube of particles per inside cell.
+
+        ``scale`` is a scalar (uniform) OR a per-axis (sx, sy, sz) vector —
+        FU-030: a non-cubic domain normalises per axis, so a fluid mesh source
+        needs an anisotropic scale. (audit-2026-06-15r12 #1: the MPM
+        seed_mesh twin handled the 3-vector; this FLIP path hard-cast
+        float(scale) and crashed on the list the schema/docs/CLI all accept.)
         """
         import trimesh
         from ..schemes.mesh_marker import mark_solid_from_mesh_gpu
@@ -2775,8 +2781,17 @@ class FlipSolver3D:
             from trimesh.transformations import euler_matrix
             rx, ry, rz = [float(a) * np.pi / 180.0 for a in rotate_deg]
             mesh.apply_transform(euler_matrix(rx, ry, rz, "sxyz"))
-        if float(scale) != 1.0:
-            mesh.apply_scale(float(scale))
+        sc = np.asarray(scale, dtype=np.float64).ravel()
+        if sc.size == 1:
+            if float(sc[0]) != 1.0:
+                mesh.apply_scale(float(sc[0]))
+        elif sc.size == 3:
+            if np.any(sc != 1.0):
+                mesh.apply_scale(sc)        # trimesh: (3,) vector = anisotropic
+        else:
+            raise ValueError(
+                f"seed_mesh: scale must be a scalar or 3-vector, got "
+                f"{scale!r} (FU-030)")
         if any(float(t) != 0.0 for t in translate):
             mesh.apply_translation(np.asarray(translate, dtype=np.float64))
         tris = np.asarray(mesh.triangles, dtype=np.float32)

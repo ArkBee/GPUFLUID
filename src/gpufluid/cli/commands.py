@@ -1018,14 +1018,36 @@ def cmd_simulate(args: argparse.Namespace) -> int:
             # audit-2026-06-14r6 #5: color_mix_mode="off" disables colour here
             # too (§9.6 mirror of the MPM path) — was silently ignored.
             if (verts is not None and verts.shape[0] > 0
-                    and solver.attr_color is not None
                     and solver.n_particles > 0
                     and str(scene.output.color_mix_mode) != "off"):
                 search_r_world = float(scene.output.sdf_search_radius_cells) * float(solver.dx)
-                cols_np = solver.attr_color.numpy().astype(np.float32)
-                if cols_np.shape[0] == int(solver.pos.shape[0]):
+                n_p = int(solver.pos.shape[0])
+                cols_np = None       # per-particle (N,3) RGB driving the blend
+                src_cols_wp = None   # wp.array form for compute_vertex_colors
+                # audit-2026-06-15r12 #2: honour [output] temperature_colormap on
+                # FLIP too (mirrors the MPM mesh pass B11.3). When set + the
+                # solver carries temperature, derive vertex RGB from the
+                # blackbody/colormap ramp — preferred over attr_color, exactly
+                # like MPM — else a FLIP lava/blackbody bake silently rendered
+                # uncoloured while the MPM twin coloured it.
+                _cmap_name = scene.output.temperature_colormap
+                if _cmap_name and solver.attr_temperature is not None:
+                    from ..meshing.colormap import get_colormap
+                    _cmap = get_colormap(_cmap_name)
+                    temps = solver.attr_temperature.numpy().astype(np.float32)
+                    if _cmap is not None and temps.shape[0] == n_p:
+                        t_min, t_max = scene.output.temperature_range
+                        cols_np = _cmap(temps, t_min, t_max).astype(np.float32)
+                        src_cols_wp = wp.array(cols_np, dtype=wp.vec3,
+                                               device=extractor.device)
+                if src_cols_wp is None and solver.attr_color is not None:
+                    _ac = solver.attr_color.numpy().astype(np.float32)
+                    if _ac.shape[0] == n_p:
+                        cols_np = _ac
+                        src_cols_wp = solver.attr_color
+                if src_cols_wp is not None:
                     vc_u8 = extractor.compute_vertex_colors(
-                        verts, solver.pos, solver.attr_color, search_r_world,
+                        verts, solver.pos, src_cols_wp, search_r_world,
                     )
                     if str(scene.output.color_mix_mode) == "mixbox":
                         from ..meshing.mixbox import remix_vertices_mixbox
