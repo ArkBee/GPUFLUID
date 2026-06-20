@@ -1,0 +1,75 @@
+# GOAL (2026-06-20): a 2-object CASCADE — a finite block of water is released
+# onto a tilted slab (object A), drains down-slope onto a lower tilted slab
+# (object B), then off B onto the FLOOR. Closed system (one released block, no
+# inflow) so mass is conserved: #particles created == #particles, and the test
+# is that ~ALL of them end up in the FLOOR pool (z below both objects) — i.e.
+# everything drains down, nothing is left stranded on A or B.
+#
+# Both slabs are tilted 20° about sim-Y so their tops slope toward +X (flat
+# tops RETAIN a collider-edge pool; sloped tops DRAIN — project finding, see
+# memory project-mpm-scene-authoring). Z-up, gravity -Z, floor slip-plane z=0.10.
+
+[domain]
+resolution = [96, 96, 96]
+size_world = [2.0, 2.0, 2.0]
+
+# object A (top step) — Ry(30°): columns are box-local axes in world; local +Z
+# (top normal) leans toward +X, so water drains off the +X (low) edge. Steep
+# (30°) + pure-slip top (cube_friction=1.0 below) so the dumped block slides
+# right off instead of pooling (tangential_friction is the KEEP-fraction of
+# down-slope velocity: 1.0 = slip, low = sticky — a low value strands water).
+[[obstacle]]
+type = "box"
+center = [0.30, 0.50, 0.62]
+half_size = [0.14, 0.24, 0.025]
+rotation = [[0.86603, 0.0, 0.5], [0.0, 1.0, 0.0], [-0.5, 0.0, 0.86603]]
+
+# object B (lower step) — same tilt, shifted +X and down so it catches A's
+# runoff and sheds it off its own +X edge onto the floor.
+[[obstacle]]
+type = "box"
+center = [0.60, 0.50, 0.38]
+half_size = [0.14, 0.24, 0.025]
+rotation = [[0.86603, 0.0, 0.5], [0.0, 1.0, 0.0], [-0.5, 0.0, 0.86603]]
+
+# the released "bucket": a finite water block above A's high (−X) side. Falls
+# under gravity, runs down A → B → floor.
+[[fluids]]
+type = "box"
+lo = [0.12, 0.28, 0.78]
+hi = [0.40, 0.72, 0.93]
+ppc = 8
+color = [0.10, 0.45, 0.85]
+
+[simulation]
+solver = "mpm"
+dt = 0.004
+cfl = true
+cfl_factor = 0.4
+cfl_max_substeps = 24
+gravity = -9.81
+frames = 180
+fps = 30
+
+[simulation.mpm]
+bulk_modulus = 900.0
+cube_friction = 1.0       # 1.0 = pure slip on the slab tops → water drains, no pooling
+rpic_damping = 0.15
+grid_v_damping = 0.998
+initial_velocity = -0.2
+
+[output]
+cache_dir = "tmp/demo_cascade2"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.0
+sdf_search_radius_cells = 6.0
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+decimate_ratio = 1.0
+wall_margin_cells = 2
+particles = true
+usd = false
+color_mix_mode = "off"
