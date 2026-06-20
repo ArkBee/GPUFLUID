@@ -1268,6 +1268,10 @@ def cmd_render(args: argparse.Namespace) -> int:
         # FU-032: optional — absent/None means "legacy label inference"
         # downstream; the headless wrapper only forwards it when set.
         "material": args.material,
+        # Goal 2026-06-20: optional camera azimuth (None ⇒ renderer default 0°);
+        # build_renderer_argv forwards it only when set, so old caches/payloads
+        # round-trip byte-identically.
+        "cam_angle": args.cam_angle,
     })
     cmd = [blender, "--background", "--python", str(driver), "--", payload]
     print(f"[render] launching: {' '.join(cmd[:3])} ... ({len(payload)} bytes config)")
@@ -1435,6 +1439,12 @@ def main(argv=None) -> int:
         help="number of frames to render; 0 = read from cache.json")
     p_render.add_argument("--blender", default=None,
         help="path to Blender executable; falls back to 'blender' on $PATH")
+    # Goal 2026-06-20: expose the camera azimuth so the 4-side validation
+    # views (0/90/180/270 from the same elevation) are reproducible through
+    # the supported CLI, not only by calling the example renderer directly.
+    p_render.add_argument("--cam-angle", type=float, default=None,
+        help="camera azimuth in degrees around the scene (0/90/180/270 give "
+             "the 4 validation sides from the same elevation). Default: 0 (front).")
     p_render.set_defaults(func=cmd_render)
 
     p_bench = sub.add_parser("bench", help="solver throughput benchmark")

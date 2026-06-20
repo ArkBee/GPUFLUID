@@ -216,6 +216,48 @@ def test_material_omitted_when_unset():
     assert "--material" not in argv
 
 
+# ─── Goal 2026-06-20: camera azimuth passthrough (4-side validation) ───────
+
+def test_cam_angle_passed_through_when_set():
+    """A payload cam_angle must reach the renderer as --cam-angle so the
+    CLI can drive the 0/90/180/270 four-side validation views."""
+    argv = _headless_render.build_renderer_argv(_base_payload(cam_angle=90.0))
+    assert "--cam-angle" in argv
+    assert argv[argv.index("--cam-angle") + 1] == "90.0"
+
+
+def test_cam_angle_zero_is_forwarded():
+    """Unlike frames/samples (where 0 means 'unset'), cam_angle=0 is a real
+    value (the front view) and must round-trip — only None means 'default'."""
+    argv = _headless_render.build_renderer_argv(_base_payload(cam_angle=0.0))
+    assert "--cam-angle" in argv
+    assert argv[argv.index("--cam-angle") + 1] == "0.0"
+
+
+def test_cam_angle_omitted_when_unset():
+    """Absent/None cam_angle = renderer default (0°). The flag must NOT be
+    emitted, so pre-2026-06-20 payloads stay byte-identical."""
+    assert "--cam-angle" not in _headless_render.build_renderer_argv(
+        _base_payload())
+    assert "--cam-angle" not in _headless_render.build_renderer_argv(
+        _base_payload(cam_angle=None))
+
+
+def test_cli_render_exposes_cam_angle_and_threads_to_payload():
+    """§9.12: the `gpufluid render` parser must own a --cam-angle arg and the
+    payload dict must carry it through to the headless driver."""
+    import ast
+    path = (Path(__file__).resolve().parents[1] / "src" / "gpufluid"
+            / "cli" / "commands.py")
+    text = path.read_text(encoding="utf-8")
+    code = "\n".join(l for l in text.splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert '"--cam-angle"' in code, (
+        "gpufluid render must expose --cam-angle for 4-side validation")
+    assert '"cam_angle": args.cam_angle' in code, (
+        "cmd_render must thread args.cam_angle into the render payload")
+
+
 # ─── FU-032: renderer-side contracts (§9.12 — comment/docstring stripped) ──
 
 def _renderer_code() -> str:

@@ -64,7 +64,7 @@ def _render_args(cache: Path, scene: Path, out: Path, blender: str):
     return argparse.Namespace(
         cache=str(cache), scene=str(scene), out=str(out),
         label="Water", color=[0.2, 0.5, 0.7], samples=16, fps=24,
-        frames=0, blender=blender, material=None)
+        frames=0, blender=blender, material=None, cam_angle=None)
 
 
 def test_r4_3_missing_blender_raises_blockerror(tmp_path):

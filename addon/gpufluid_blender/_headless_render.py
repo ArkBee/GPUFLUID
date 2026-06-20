@@ -65,6 +65,14 @@ def build_renderer_argv(payload: dict) -> list[str]:
     material = payload.get("material")
     if material:
         argv += ["--material", str(material)]
+    # Goal 2026-06-20: forward the camera azimuth so the official CLI can
+    # produce the 4-side validation views (0/90/180/270). Optional — like
+    # `material`, an absent/None key means "0° (front), the renderer default",
+    # so old payloads stay byte-identical. Always forward when present (incl.
+    # 0.0) so an explicit --cam-angle 0 still round-trips.
+    cam_angle = payload.get("cam_angle")
+    if cam_angle is not None:
+        argv += ["--cam-angle", str(float(cam_angle))]
     return argv
 
 
