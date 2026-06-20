@@ -115,6 +115,38 @@ def _obb_rows_to_quat(rows):
         return mathutils.Quaternion()
 
 
+def _mesh_rotate_deg_to_quat(rotate_deg):
+    """Goal 2026-06-20: convert a mesh-obstacle ``rotate_deg`` Euler triple
+    (degrees) to a quaternion so a TILTED mesh obstacle RENDERS at the same
+    orientation the solver collided with.
+
+    The bake (``cli/commands.py`` + ``domain/mesh_sdf.py``) rotates the mesh
+    verts with ``trimesh.euler_matrix(rx, ry, rz, "sxyz")`` BEFORE building the
+    obstacle SDF. That static-XYZ matrix is exactly ``Rz · Ry · Rx`` (verified
+    numerically). The pre-2026-06-20 render path applied only scale + translate
+    to the imported OBJ — so a CLI scene with an obstacle ``rotate_deg`` drew the
+    mesh axis-aligned while the collider was tilted (§9.6 render↔solver drift,
+    the box-OBB twin already honoured ``rotation``). We build the Rz·Ry·Rx rows
+    explicitly and reuse :func:`_obb_rows_to_quat` (already unit-tested) so the
+    conversion needs only ``math`` + mathutils and stays CPU-testable.
+
+    Returns identity for a falsy ``rotate_deg`` (the axis-aligned default).
+    """
+    if not rotate_deg:
+        return mathutils.Quaternion()
+    rx, ry, rz = (math.radians(float(a)) for a in rotate_deg)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    # Rz @ Ry @ Rx (extrinsic XYZ == trimesh "sxyz"), rows in row-major.
+    rows = [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy,     cy * sx,                cy * cx],
+    ]
+    return _obb_rows_to_quat(rows)
+
+
 def _import_obstacle_obj(path: Path, idx: int):
     """FU-033: import a mesh-obstacle OBJ, tolerant of the operator rename.
 
@@ -590,16 +622,25 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             ob.location = tuple(obs.get("center", (0, 0, 0)))
             _finish_obstacle(ob, idx)
         elif otype == "cylinder_y":
-            # FU-033 cylinder-axis resolution: primitive_cylinder_add builds
-            # the cylinder along its LOCAL Z. The solver's cylinder_y axis is
-            # sim-Y. The counter-rotation (-90° about X) ALONE already maps
-            # local-Z → sim-Y, which the pivot (+90° about X) then maps to
-            # world-Z (vertical) — exactly what cylinder_y wants. So NO
-            # extra rotation is needed: the cylinder follows the same
-            # parent+counter pattern as the box/sphere. (Verified live: an
-            # added Z→Y rotation laid the cylinder on its side; plain
-            # counter-rotation stands it upright. Computed: counter@local-Z
-            # = sim-Y, pivot@sim-Y = world-Z.)
+            # cylinder-axis resolution: primitive_cylinder_add builds the
+            # cylinder along its LOCAL Z. The solver's cylinder_y collider axis
+            # is sim-Y (k_sdf_cylinder_collide: radial in X-Z, axial in Y) —
+            # this is fixed in SIM space, NOT the world up-axis. So the rendered
+            # cylinder must be mapped local-Z → sim-Y, which is a -90° rotation
+            # about X in the SIM (pivot-local) frame, applied DIRECTLY (not via
+            # the world-aligning `_counter`).
+            #
+            # Goal 2026-06-20 (§9.6 / §9.13): the pre-fix code reused
+            # `_finish_obstacle`'s `_counter`, which IS -90°X for the Y-up (FLIP)
+            # pivot — so it happened to do this mapping there (and was
+            # "verified live" on a Y-up scene). But for Z-up (MPM) `_counter` is
+            # IDENTITY, so the cylinder rendered along world-Z (a VERTICAL
+            # pillar) while the collider stayed a HORIZONTAL log along sim-Y.
+            # The particle dump proved it: 0 particles inside the log volume
+            # (the real collider, water perfectly excluded), hundreds inside the
+            # drawn pillar (water flowed straight through it). The explicit
+            # sim-frame -90°X below equals `_counter` for Y-up (byte-identical
+            # there) AND fixes Z-up.
             bpy.ops.mesh.primitive_cylinder_add(
                 radius=float(obs.get("radius", 0.05)),
                 depth=2.0 * float(obs.get("half_height", 0.1)),
@@ -607,6 +648,10 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             ob = bpy.context.active_object
             ob.location = tuple(obs.get("center", (0, 0, 0)))
             _finish_obstacle(ob, idx)
+            # Override the world-aligning counter: the cylinder axis follows the
+            # collider's sim-Y, so map mesh-local +Z → sim +Y (−90° about X).
+            ob.rotation_quaternion = mathutils.Euler(
+                (math.radians(-90.0), 0.0, 0.0)).to_quaternion()
         elif otype == "mesh":
             path = obs.get("path", "")
             if not path or not Path(path).exists():
@@ -624,16 +669,21 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
                       f"skipping: {path!r}")
                 continue
             # OBJ verts are in WORLD METRES (see addon _export_obj); the bake
-            # maps them to sim space via scale (scalar OR per-axis vec3) +
-            # translate. Apply the SAME map here so the drawn mesh lands
-            # where the solver sampled it.
+            # maps them to sim space via rotate_deg → scale (scalar OR per-axis
+            # vec3) → translate. Apply the SAME map here so the drawn mesh lands
+            # where the solver sampled it. (Goal 2026-06-20: rotate_deg was
+            # previously dropped here → a tilted mesh obstacle rendered axis-
+            # aligned while the collider was tilted — §9.6 render↔solver drift.
+            # Obstacle-mesh scale is scalar/uniform in the bake, which commutes
+            # with the rotation, so Blender's T@R@S order matches rotate→scale.)
             scale = obs.get("scale", 1.0)
             if isinstance(scale, (list, tuple)):
                 ob.scale = (float(scale[0]), float(scale[1]), float(scale[2]))
             else:
                 ob.scale = (float(scale),) * 3
             ob.location = tuple(obs.get("translate", (0, 0, 0)))
-            _finish_obstacle(ob, idx)
+            extra = _mesh_rotate_deg_to_quat(obs.get("rotate_deg"))
+            _finish_obstacle(ob, idx, extra_rot=extra)
         else:
             print(f"[warn] FU-033: unknown obstacle type {otype!r} "
                   f"(obstacle {idx}) — skipping")
