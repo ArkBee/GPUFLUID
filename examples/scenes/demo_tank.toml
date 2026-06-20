@@ -1,0 +1,79 @@
+# TEST SCENE A (2026-06-21): SEALED TANK — containment / zero-leak / mass test.
+# A finite water column (dam-break) is released inside a box made of 4 box-wall
+# obstacles. Box colliders are the grid-velocity-constraint kind that HOLD a
+# deep hydrostatic column (mesh colliders only do particle pushback and seep —
+# see memory project-mpm-scene-authoring). Strict pass criteria (verify script):
+#   1. mass conserved   — particle count identical every frame (closed system).
+#   2. ZERO leak        — 0 particles escape the tank outer footprint or sink
+#                          below the floor, on EVERY frame.
+#   3. deep + level pool — settles into a contained pool clearly deeper than the
+#                          slip-floor monolayer, with a roughly flat top surface.
+# Z-up, gravity -Z, floor slip-plane z=0.10. Inner tank x/y ∈ [0.27, 0.73].
+
+[domain]
+resolution = [96, 96, 96]
+size_world = [2.0, 2.0, 2.0]
+
+# 4 full-length box walls (overlap at the corners → no gap to leak through).
+[[obstacle]]            # -X wall
+type = "box"
+center = [0.25, 0.50, 0.36]
+half_size = [0.03, 0.25, 0.28]
+
+[[obstacle]]            # +X wall
+type = "box"
+center = [0.75, 0.50, 0.36]
+half_size = [0.03, 0.25, 0.28]
+
+[[obstacle]]            # -Y wall
+type = "box"
+center = [0.50, 0.25, 0.36]
+half_size = [0.25, 0.03, 0.28]
+
+[[obstacle]]            # +Y wall
+type = "box"
+center = [0.50, 0.75, 0.36]
+half_size = [0.25, 0.03, 0.28]
+
+# water column inside the tank. NOTE: the MPM box source is seeded as a SQUARE
+# column of side min(Δx,Δy) centred on the box (commands.py make_column), so we
+# author it square (0.36×0.36) to fill the tank interior.
+[[fluids]]
+type = "box"
+lo = [0.32, 0.32, 0.12]
+hi = [0.68, 0.68, 0.58]
+ppc = 8
+color = [0.12, 0.45, 0.85]
+
+[simulation]
+solver = "mpm"
+dt = 0.0008
+cfl = true
+cfl_factor = 0.5
+cfl_max_substeps = 64
+gravity = -9.81
+frames = 140
+fps = 30
+
+[simulation.mpm]
+# stiff EOS: a soft bulk_modulus (≈1000) lets the column COMPRESS into the
+# bottom cell on a slip floor → a thin film, no pool. 10000 keeps it ~incompres-
+# sible so a contained pool holds real depth. (Needs the smaller dt + more
+# substeps above for stability — stiffer EOS = higher sound speed.)
+bulk_modulus = 10000.0
+cube_friction = 0.6
+rpic_damping = 0.2
+grid_v_damping = 0.999
+
+[output]
+cache_dir = "tmp/demo_tank"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.0
+sdf_search_radius_cells = 6.0
+iso_level = 0.5
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+particles = true
+usd = false
+color_mix_mode = "off"

@@ -1,0 +1,57 @@
+# TEST SCENE B (2026-06-21): CENTERED SPHERE POUR — non-penetration + symmetry.
+# A water column is released directly above the centre of a sphere obstacle, so
+# it lands on the apex and sheets off symmetrically in all directions, then
+# drains to the floor. Strict pass criteria (verify script):
+#   1. NON-PENETRATION — 0 particles inside the sphere collider (|p-c| < r minus
+#                         one cell) on EVERY frame.
+#   2. SYMMETRY        — at peak shedding the water splits evenly: both
+#                         |N(+X)-N(-X)|/N and |N(+Y)-N(-Y)|/N are small (the pour
+#                         and gravity are X/Y-symmetric about the apex).
+#   3. drains          — water ends on the floor around the sphere, not stuck on it.
+# Z-up, gravity -Z, floor slip-plane z=0.10.
+
+[domain]
+resolution = [96, 96, 96]
+size_world = [2.0, 2.0, 2.0]
+
+# centred sphere — apex at z≈0.46, base at z≈0.14 (sits just above the floor).
+[[obstacle]]
+type = "sphere"
+center = [0.50, 0.50, 0.30]
+radius = 0.16
+
+# water column centred exactly over the sphere apex (X/Y symmetric).
+[[fluids]]
+type = "box"
+lo = [0.40, 0.40, 0.60]
+hi = [0.60, 0.60, 0.88]
+ppc = 8
+color = [0.12, 0.45, 0.85]
+
+[simulation]
+solver = "mpm"
+dt = 0.0015
+cfl = true
+cfl_factor = 0.5
+cfl_max_substeps = 24
+gravity = -9.81
+frames = 140
+fps = 30
+
+[simulation.mpm]
+bulk_modulus = 1000.0
+rpic_damping = 0.2
+grid_v_damping = 0.998
+
+[output]
+cache_dir = "tmp/demo_sphere_pour"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.0
+sdf_search_radius_cells = 6.0
+iso_level = 0.5
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+particles = true
+usd = false
+color_mix_mode = "off"
