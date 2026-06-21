@@ -13,7 +13,7 @@ from .. import __version__
 from ..blocks import block, BlockError, by_layer, get_registry
 from ..solvers.solver3d import FlipSolver3D
 from ..meshing.surface import MeshExtractor
-from ..io.ply import write_ply, write_particles_npy
+from ..io.ply import write_ply, write_particles_npy, read_ply
 from ..io.cache import CacheManifest, write_cache_manifest
 from ..io.usd import write_usd_mesh_sequence
 from ..primitives.sdf import (
@@ -156,6 +156,58 @@ def _clear_stale_frame_outputs(cache_dir: Path, subdirs, args) -> int:
                         break
                     time.sleep(0.05)
     return removed
+
+
+def _particles_per_cell(positions, dx) -> tuple:
+    """(mean, max, n_occupied_cells) particles per grid cell of size ``dx``.
+
+    A near-incompressible MPM fluid keeps close to its SEED packing (≈1/cell for
+    the box source); a large settled INCREASE means the weakly-compressible EOS
+    let the column collapse on impact (particles pile many-per-cell into a thin
+    film) — a SILENT failure: the bake still reports success and writes a
+    degenerate "pool". The MPM physics benchmark (2026-06-21) exposed 1→9
+    particles/cell at the solver defaults. Pure numpy, CPU-unit-testable.
+    """
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.size == 0:
+        return 0.0, 0, 0
+    cells = np.floor(pos / float(dx)).astype(np.int64)
+    counts = np.unique(cells, axis=0, return_counts=True)[1]
+    return float(counts.mean()), int(counts.max()), int(len(counts))
+
+
+def _bake_quality_warnings(manifest: dict) -> list:
+    """Human-readable warnings about a baked cache's physical quality, derived
+    from the diagnostics the MPM bake records in cache.json.
+
+    2026-06-21 (benchmark iter 3): those diagnostics (over-compression, CFL
+    sub-step saturation, divergence truncation) were WRITTEN to the manifest but
+    no downstream consumer read them — a user could `gpufluid render` a collapsed
+    or under-resolved bake with no hint it's degenerate. cmd_render now surfaces
+    these before spending render time. Pure (dict in, strings out) — unit-tested.
+    """
+    out = []
+    cr = manifest.get("compression_ratio")
+    if cr is not None and cr >= 3.0:
+        spc = manifest.get("settled_particles_per_cell", cr)
+        out.append(
+            f"fluid OVER-COMPRESSED in the bake ({spc} particles/cell, "
+            f"{cr}x seed ~= {100.0 / cr:.0f}% of its volume) — the rendered "
+            f"'pool' is a thin collapsed film. Re-bake with a higher "
+            f"[simulation.mpm].bulk_modulus + [simulation].cfl_max_substeps.")
+    sat = manifest.get("substeps_saturated_steps")
+    if sat:
+        out.append(
+            f"the bake UNDER-RESOLVED: the CFL substepper saturated its cap "
+            f"(substeps_max={manifest.get('substeps_max')}, "
+            f"cap={manifest.get('substeps_cap')}) on {sat} step(s) — physics may "
+            f"be coarse/divergence-prone. Raise cfl_max_substeps or lower dt.")
+    if manifest.get("truncation_reason"):
+        out.append(
+            f"the bake was TRUNCATED at frame "
+            f"{manifest.get('truncated_at_frame')} "
+            f"({manifest['truncation_reason']}) — frames past it are missing.")
+    return out
 
 
 # [BLK C7.2]
@@ -757,6 +809,44 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         "dx": scene.dx,
         "notes": f"sim={t_sim_total:.1f}s mesh={t_mesh_total:.1f}s",
     }
+    # 2026-06-21 (benchmark iter 1): over-compression self-diagnosis. A weakly-
+    # compressible MPM column can COLLAPSE on impact (particles pile many-per-cell
+    # into a thin film) while the bake still reports success — previously SILENT.
+    # Compare settled vs seed packing, record it in the manifest, and warn loudly
+    # so the user/renderer/verify tooling knows the "pool" is a degenerate film.
+    try:
+        _last_ply = sorted(particles_dir.glob("sim_*.ply"))
+        seed_mean, _seed_max, _seed_cells = _particles_per_cell(column, scene.dx)
+        if _last_ply:
+            _d = read_ply(_last_ply[-1])
+            _v = _d[0] if isinstance(_d, tuple) else _d
+            set_mean, set_max, _set_cells = _particles_per_cell(_v, scene.dx)
+        else:
+            set_mean, set_max = 0.0, 0
+        comp = (set_mean / seed_mean) if seed_mean > 0 else 0.0
+        manifest["seed_particles_per_cell"] = round(seed_mean, 3)
+        manifest["settled_particles_per_cell"] = round(set_mean, 3)
+        manifest["settled_max_particles_per_cell"] = set_max
+        manifest["compression_ratio"] = round(comp, 2)
+        if comp >= 3.0:  # settled denser than ~3× seed ⇒ collapsed to <~1/3 volume
+            print(f"[mpm] WARNING: fluid OVER-COMPRESSED - settled at "
+                  f"{set_mean:.1f} particles/cell vs {seed_mean:.1f} at seed "
+                  f"({comp:.0f}x denser, ~{100.0 / comp:.0f}% of its volume). The "
+                  f"weakly-compressible EOS could not hold the column on impact; "
+                  f"the result is a thin collapsed film, not a pool. Raise "
+                  f"[simulation.mpm].bulk_modulus + [simulation].cfl_max_substeps, "
+                  f"or lower the release height / grid_v_damping.")
+    except Exception as _e:  # never let a diagnostic kill a good bake
+        print(f"[mpm] (over-compression self-check skipped: {_e})")
+    # 2026-06-21 (benchmark iter 2): persist adaptive-CFL integration quality so
+    # downstream tooling can see if the substepper UNDER-resolved (saturated the
+    # cap = silently coarse / divergence-prone). The solver's own warning is
+    # one-shot + stderr-only; these manifest fields make it durable + queryable.
+    manifest["substeps_max"] = int(getattr(solver, "substeps_max", 1))
+    manifest["substeps_saturated_steps"] = int(
+        getattr(solver, "substeps_saturated_frames", 0))
+    manifest["substeps_cap"] = (int(cfg.adaptive_max_substeps)
+                                if cfg.adaptive_substep else 1)
     if truncated_at is not None:
         # Round-20: surface the divergence point so the addon's
         # _runner.py can give a specific ERROR message instead of the
@@ -1298,6 +1388,14 @@ def cmd_render(args: argparse.Namespace) -> int:
     cache_json = cache_dir / "cache.json"
     if not cache_json.exists():
         raise BlockError("A8.12", f"cache.json not found in {cache_dir}")
+    # iter 3: surface bake-quality diagnostics (over-compression / CFL
+    # saturation / truncation) BEFORE spending render time — they were recorded
+    # in cache.json by the bake but no consumer read them.
+    try:
+        for _w in _bake_quality_warnings(_json.loads(cache_json.read_text())):
+            print(f"[render] bake-quality WARNING: {_w}", file=sys.stderr)
+    except Exception:
+        pass
     blender = args.blender or "blender"
     # Locate the bundled render driver script
     driver = Path(__file__).resolve().parents[3] / "addon" / "gpufluid_blender" / "_headless_render.py"

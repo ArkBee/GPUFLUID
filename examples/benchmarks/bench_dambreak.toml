@@ -1,0 +1,54 @@
+# MPM PHYSICS BENCHMARK scene (2026-06-21): closed-box dam break.
+# A square water column is released in a corner of a sealed 4-wall tank, collapses,
+# sloshes, and settles. The harness mpm_physics_bench.py measures fundamental
+# physical invariants (mass / energy-non-injection / settling / incompressibility
+# / containment / no-divergence) — each a strict pass/fail that reveals a real
+# solver weakness. Physics knobs are LEFT AT THE SOLVER DEFAULTS on purpose
+# (no [simulation.mpm] block) so the benchmark probes the system out of the box.
+# Only geometry + substepping (cfl, the standard stable dispatch) are set here.
+
+[domain]
+resolution = [80, 80, 80]
+size_world = [2.0, 2.0, 2.0]
+
+# sealed tank — 4 full-length walls (overlap at corners). Inner x/y ∈ [0.30,0.70].
+[[obstacle]]
+type = "box"
+center = [0.27, 0.50, 0.33]
+half_size = [0.03, 0.23, 0.25]
+[[obstacle]]
+type = "box"
+center = [0.73, 0.50, 0.33]
+half_size = [0.03, 0.23, 0.25]
+[[obstacle]]
+type = "box"
+center = [0.50, 0.27, 0.33]
+half_size = [0.23, 0.03, 0.25]
+[[obstacle]]
+type = "box"
+center = [0.50, 0.73, 0.33]
+half_size = [0.23, 0.03, 0.25]
+
+# dam column in the -X-Y corner (square footprint — MPM seeds min(Δx,Δy)).
+[[fluids]]
+type = "box"
+lo = [0.31, 0.31, 0.12]
+hi = [0.51, 0.51, 0.58]
+ppc = 8
+color = [0.12, 0.45, 0.85]
+
+[simulation]
+solver = "mpm"
+dt = 0.001
+cfl = true
+cfl_factor = 0.5
+cfl_max_substeps = 24
+gravity = -9.81
+frames = 160
+fps = 30
+
+[output]
+cache_dir = "../scenes/tmp/bench_dambreak"
+mesh = false
+particles = true
+usd = false

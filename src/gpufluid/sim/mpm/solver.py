@@ -594,6 +594,13 @@ class MpmSolver:
         # (knob shared with FLIP whose slider allows 2.0; >1.0 silently
         # under-substeps the MPM stress-wave bound).
         self._cfl_factor_warned = False
+        # 2026-06-21 (benchmark iter 2): integration-quality record. The
+        # CFL-saturation WARNING above is one-shot + stderr-only, so downstream
+        # tooling (renderer / verify / addon / manifest) cannot tell that a bake
+        # under-resolved. Accumulate the peak sub-step count and how many frames
+        # hit the cap so the bake can record them in cache.json.
+        self.substeps_max = 1
+        self.substeps_saturated_frames = 0
         # S2.17.8: per-particle "drained" flag (1 = removed by an outflow,
         # never to be re-released by the inflow gate). Always allocated; stays
         # all-zero when there are no outflows, so the inflow gate behaves
@@ -784,6 +791,16 @@ class MpmSolver:
         cfg = self.cfg
         if cfg.adaptive_substep:
             n_sub, saturated = self._cfl_substeps()
+            # iter 2: record integration quality for the manifest (the warning
+            # below is one-shot + stderr; these counters persist the signal).
+            # getattr-defensive: the step path is exercised by tests that build a
+            # partial solver via object.__new__ (no __init__), so don't assume
+            # the counters were initialised.
+            if n_sub > getattr(self, "substeps_max", 0):
+                self.substeps_max = n_sub
+            if saturated:
+                self.substeps_saturated_frames = (
+                    getattr(self, "substeps_saturated_frames", 0) + 1)
             if saturated and not self._cfl_warned:
                 self._cfl_warned = True
                 print(f"[mpm] WARN: CFL demands more than "
