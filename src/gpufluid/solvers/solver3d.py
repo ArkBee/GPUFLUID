@@ -4225,6 +4225,15 @@ class FlipSolver3D:
         attr_temperature = (self.attr_temperature.numpy()
                             if self.attr_temperature is not None
                             else np.zeros((0,), dtype=np.float32))
+        # 2026-06-21 (reviewer-checkpoint): persist the RNG state so a resumed
+        # bake's rng-driven inflow placement (regions.py) CONTINUES instead of
+        # resetting to seed-0 (non-deterministic continuation for inflow scenes).
+        # load uses allow_pickle=False, so serialise the PCG64 state dict as a
+        # JSON string array (its 128-bit ints round-trip through json — verified).
+        import json as _json
+        _rng = getattr(self, "_rng", None)
+        rng_state = np.array(_json.dumps(_rng.bit_generator.state)
+                             if _rng is not None else "")
         np.savez_compressed(
             str(path),
             pos=pos, vel=vel, affine_C=affine, marker=marker,
@@ -4232,7 +4241,7 @@ class FlipSolver3D:
             nx=self.nx, ny=self.ny, nz=self.nz, dx=self.dx,
             gravity=self.gravity, flip_blend=self.flip_blend, rho=self.rho,
             viscosity=self.viscosity, transfer_mode=str(self.transfer_mode),
-            surface_tension=self.surface_tension,
+            surface_tension=self.surface_tension, rng_state=rng_state,
         )
 
     @block("F3.5", "Load checkpoint into a fresh solver (state-only; topology must match)")
@@ -4307,6 +4316,18 @@ class FlipSolver3D:
                 if len(at) else None)
         except KeyError:
             pass
+        # 2026-06-21 (reviewer-checkpoint): restore the RNG state so inflow
+        # placement continues deterministically. Back-compat: pre-2026-06-21
+        # .npz has no rng_state (KeyError) or an empty string -> keep the
+        # default-seeded rng. A corrupt/legacy state is swallowed (keep default).
+        if "rng_state" in data.files and getattr(self, "_rng", None) is not None:
+            _rs = str(data["rng_state"].item())
+            if _rs:
+                import json as _json
+                try:
+                    self._rng.bit_generator.state = _json.loads(_rs)
+                except Exception:
+                    pass
         # Round-40: same as seed_box. Pointer rebind silently
         # invalidates any captured graph; cache key matching identical
         # topology (the intended resume-checkpoint case) would replay

@@ -39,3 +39,22 @@ def test_f3_5_checkpoint_resume_matches_uninterrupted(tmp_path: Path):
     assert pos_resumed.shape == pos_cont.shape
     rms = float(np.sqrt(((pos_resumed - pos_cont) ** 2).sum(1).mean()))
     assert rms < 1e-3, f"resume mismatch: rms={rms:.5f}"
+
+
+def test_checkpoint_persists_rng_state(tmp_path: Path):
+    """2026-06-21 (reviewer-checkpoint): the RNG drives inflow particle
+    placement (regions.py). Pre-fix it reset to seed-0 on resume -> inflow
+    diverged. save/load_checkpoint must now persist + restore the RNG state."""
+    s = FlipSolver3D(nx=8, ny=8, nz=8, dx=1 / 8)
+    s.seed_box(lo=(0.2, 0.2, 0.2), hi=(0.5, 0.5, 0.5), ppc=4)
+    s._rng.random(17)                       # advance off the seed
+    saved = s._rng.bit_generator.state
+    ck = tmp_path / "rng.npz"
+    s.save_checkpoint(ck)
+
+    s2 = FlipSolver3D(nx=8, ny=8, nz=8, dx=1 / 8)   # fresh: _rng is seed-0
+    s2.load_checkpoint(ck)
+    assert s2._rng.bit_generator.state == saved, "RNG state not restored on resume"
+    ref = np.random.default_rng(); ref.bit_generator.state = saved
+    assert np.allclose(s2._rng.random(5), ref.random(5)), (
+        "resumed RNG draws diverge from the saved stream")
