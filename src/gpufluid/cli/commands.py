@@ -221,6 +221,15 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     minimal ``cache.json`` so the addon's Attach Cache (A8.6) and the
     `gpufluid render` command (A8.12) can find the result.
     """
+    # 2026-06-21 prod-hardening (reviewer-checkpoint): the MpmSolver has NO
+    # checkpoint support, and this path never reads --resume/--start-frame, so a
+    # user "resuming" an MPM bake previously RESTARTED from frame 0 SILENTLY
+    # (wasting the run + leaving a stale tail). Fail loud instead of lying.
+    if getattr(args, "resume", None) or int(getattr(args, "start_frame", 0) or 0) > 0:
+        raise BlockError(
+            "F3.7", "checkpoint/resume (--resume / --start-frame) is FLIP-only — "
+            "the MPM solver has no checkpoint support, so this would silently "
+            "restart from frame 0. Re-run the MPM bake without those flags.")
     import json
     from ..sim.mpm import MpmSolver
     from ..sim.mpm.solver import (
@@ -1053,6 +1062,20 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
     start_frame = int(getattr(args, "start_frame", 0))
     checkpoint_every = int(getattr(args, "checkpoint_every", 0))
+    # 2026-06-21 prod-hardening (reviewer-checkpoint): couple --start-frame and
+    # --resume. start-frame>0 WITHOUT resume starts a fresh solver mid-range so
+    # frames 0..N-1 are never written (an on-disk GAP while cache.json still
+    # claims the full count); resume WITHOUT start-frame re-writes from frame 0
+    # using mid-sim state (duplicate/inconsistent early frames). Guard both.
+    if start_frame > 0 and not getattr(args, "resume", None):
+        raise BlockError(
+            "F3.5", f"--start-frame {start_frame} requires --resume <checkpoint> "
+            f"— without it frames 0..{start_frame - 1} are never written (a gap).")
+    if getattr(args, "resume", None) and start_frame == 0:
+        print("[gpufluid] WARNING: --resume without --start-frame re-writes frames "
+              "from 0 using the resumed mid-sim state (duplicate/inconsistent "
+              "early frames). Pass --start-frame matching the checkpoint's frame.",
+              file=sys.stderr)
     # Round-32: FLIP divergence trap (mirror of MPM round-20).
     # FlipSolver3D had NO NaN guard pre-round-32 — divergent pressure
     # oscillation produced NaN particle velocities, propagated, and
