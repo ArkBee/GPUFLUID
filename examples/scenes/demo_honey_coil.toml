@@ -1,0 +1,77 @@
+# HONEY ROPE-COILING (2026-06-22) — "the thin honey stream winds up as it lands".
+#
+# SOLUTION: the weakly-compressible FLUID material cannot coil (a viscous fluid
+# rope deposits as an axisymmetric heap at every setting — swept exhaustively,
+# see project memory). Real honey/clay coiling is an ELASTIC BUCKLING of a
+# coherent rope, so this uses S2.17.9 `material = "viscoelastic"` — warp-mpm's
+# viscoplastic StVK + von-Mises material (a stiff elastic rope that yields and
+# flows above `yield_stress`). It BUCKLES: the contact point traces loops and
+# the pile folds (emergent — `velocity_jitter` only seeds the direction; nothing
+# prescribes the rotation). verify_honey_coil.py quantifies it (off-axis,
+# winding contact = coiling, vs the fluid's dead-centred heap).
+#
+# Recipe that makes it coil (all needed):
+#   * material=viscoelastic, stiff E (a coherent rope that buckles, doesn't slump)
+#   * a STICKY no-slip plate (cube_friction=0) — coiling needs a no-slip contact
+#     (the default MPM floor is a frictionless slip plane → ropes just spread)
+#   * a TOOTHPASTE regime: close nozzle + slow extrusion, so the rope buckles in
+#     the gap instead of accelerating into a central drill-in (a tall fast fall
+#     never coils — the rope lands dead-centre)
+#   * coherent velocity_jitter to seed the buckling direction
+# Z-up, gravity -Z; normalized [0,1] coords, size_world=1 so normalized==world.
+# This 128^3 scene is the fast, harness-verified test (verify_honey_coil.py
+# PASSES: deposition ~1.3 cells off-axis, ~0.9 winding turns). The bundled hero
+# video out/videos/demo_honey_coil.mp4 is the SAME viscoelastic-toothpaste regime
+# rendered at 192^3 / 96 Eevee samples (slightly softer E=2.5e5 for cleaner
+# loops) — bump `resolution` to [192,192,192] here to reproduce it (~40 min bake).
+[domain]
+resolution = [128, 128, 128]
+size_world = [1.0, 1.0, 1.0]
+
+[[obstacle]]
+type = "box"
+center = [0.5, 0.5, 0.13]
+half_size = [0.30, 0.30, 0.03]   # sticky no-slip plate, top face z=0.16
+
+[[inflow]]
+lo = [0.48, 0.48, 0.27]
+hi = [0.52, 0.52, 0.32]          # CLOSE nozzle: ~0.11 gap above the plate
+velocity = [0.0, 0.0, -0.15]     # SLOW extrusion (toothpaste), not a fast pour
+velocity_jitter = 0.04           # coherent buckling seed (S2.17.7.JITTER)
+rate_per_sec = 14000
+frame_start = 0
+frame_end = 320
+color = [0.95, 0.66, 0.10]
+
+[simulation]
+solver = "mpm"
+dt = 0.001
+cfl = true
+cfl_factor = 0.5
+cfl_max_substeps = 360
+gravity = -9.81
+frames = 320
+fps = 60
+
+[simulation.mpm]
+material = "viscoelastic"        # S2.17.9 — the material that can rope-coil
+young_modulus = 350000.0         # stiff: a coherent rope that buckles
+poisson = 0.35
+yield_stress = 1200.0            # von-Mises yield (flows above it, holds below)
+viscosity = 40.0                 # plastic_viscosity (flow rate above yield)
+cube_friction = 0.0              # plate top is NO-SLIP (anchors the coil)
+rpic_damping = 0.05              # low damping — don't kill the buckling
+grid_v_damping = 0.999
+
+[output]
+cache_dir = "tmp/demo_honey_coil"
+mesh = true
+mesh_method = "sdf"
+sdf_particle_radius_cells = 3.0
+sdf_search_radius_cells = 6.0
+iso_level = 0.5
+smooth_passes = 2
+mesh_smooth_passes = 3
+mesh_smooth_method = "taubin"
+particles = true
+usd = false

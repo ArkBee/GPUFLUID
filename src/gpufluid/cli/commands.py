@@ -381,6 +381,9 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
             frame_start=int(min(inf.frame_start, sim.frames)),
             frame_end=int(min(inf.frame_end, sim.frames)),
             keyframes=tuple(tuple(row) for row in getattr(inf, "keyframes", ()) or ()),
+            # S2.17.7.JITTER — forward the buckling seed verbatim (normalised
+            # units/s, same convention as velocity); 0 ⇒ deterministic release.
+            velocity_jitter=float(getattr(inf, "velocity_jitter", 0.0)),
             # B18 — forward per-source attributes (None ⇒ source contributes
             # no colour/temperature; if any other source carries one, this
             # inflow's particles get the default white / 20 °C).
@@ -605,6 +608,12 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     cfg.fluid.viscosity = sim.mpm_viscosity   # S2.17.PATCH.VISC: Newtonian μ
     cfg.fluid.rpic_damping = sim.mpm_rpic_damping
     cfg.fluid.grid_v_damping_scale = sim.mpm_grid_v_damping
+    # S2.17.9 viscoelastic (viscoplastic) material — honey/clay that can coil.
+    cfg.fluid.material = sim.mpm_material
+    cfg.fluid.young_modulus = sim.mpm_young_modulus
+    cfg.fluid.poisson = sim.mpm_poisson
+    cfg.fluid.yield_stress = sim.mpm_yield_stress
+    cfg.walls.floor_friction = sim.mpm_floor_friction  # S2.17.10 sticky floor
     cache_dir = _resolve_cache_dir(scene)  # audit-r6 #2: scene-dir relative, not CWD
     # 2026-06-21: strip stale per-frame files from a prior bake into this same
     # cache_dir before writing (else sub-step-named particle dumps accumulate +

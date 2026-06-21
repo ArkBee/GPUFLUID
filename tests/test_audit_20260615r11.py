@@ -74,6 +74,8 @@ def test_r11_reseed_solid_drop_contract():
 def test_r11_floor_collider_has_unbounded_end_time():
     code = _code("src/gpufluid/sim/mpm/solver.py")
     # the floor add_surface_collider call must pass end_time (else it expires at
-    # warp-mpm's 999.0 default while obstacles persist at 1.0e9).
-    assert "surface=\"slip\", friction=0.0, end_time=1.0e9" in code, \
-        "r11 #2: the floor slip-plane collider must set end_time=1.0e9 like obstacles"
+    # warp-mpm's 999.0 default while obstacles persist at 1.0e9). S2.17.10 made
+    # surface/friction variables (sticky-floor support), so assert the invariant
+    # that survives: the floor collider call carries end_time=1.0e9.
+    assert "surface=_floor_surface, friction=_floor_fric, end_time=1.0e9" in code, \
+        "r11 #2: the floor collider must still set end_time=1.0e9 like obstacles"

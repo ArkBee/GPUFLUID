@@ -47,6 +47,17 @@ class MpmInflow:
     frame_start: int = 0
     frame_end: int = 240
     keyframes: tuple = ()   # tuple of (frame:int, lo3, hi3) rows
+    # S2.17.7.JITTER — isotropic horizontal velocity noise (normalised
+    # units/s) added per-particle AT RELEASE. 0 = byte-identical to the
+    # pre-jitter release. A small value (a few % of |velocity|) seeds the
+    # liquid-rope-coiling buckling instability of a thin viscous thread:
+    # a perfectly axisymmetric, near-deterministic MPM rope lands dead-
+    # centre and slumps into a non-coiling heap; real nozzles/threads carry
+    # this noise. NOT a forced spiral — it prescribes no rotation direction
+    # or rate (cf. the rejected orbiting-source `keyframes` trick); the
+    # instability itself picks them. Only the XY plane is perturbed so the
+    # fall speed (and thus the coiling regime) is untouched.
+    velocity_jitter: float = 0.0
     # B18 — per-source per-particle attributes. When set, every particle
     # spawned from this inflow inherits the same RGB / scalar value; the
     # solver concatenates them in lockstep with positions during init.
@@ -65,6 +76,7 @@ def k_inflow_gate(
     spawn_step: wp.array(dtype=int),
     hold_pos: wp.array(dtype=wp.vec3),
     vx: float, vy: float, vz: float,
+    vjit: wp.array(dtype=wp.vec3),
     despawned: wp.array(dtype=int),
 ):
     p = wp.tid()
@@ -94,7 +106,11 @@ def k_inflow_gate(
         # Same hazard for any future substepping / resume-from-checkpoint
         # where step_index could skip an integer. Idempotent guard
         # (only release if still held) keeps the velocity-set one-shot.
-        state.particle_v[idx] = wp.vec3(vx, vy, vz)
+        # S2.17.7.JITTER: add the per-particle isotropic XY seed. vjit is all-
+        # zero for jitter=0 scenes, so this stays byte-identical there; a
+        # non-zero seed breaks the rotational symmetry that otherwise pins a
+        # centred viscous rope into a non-coiling heap (see MpmInflow docstring).
+        state.particle_v[idx] = wp.vec3(vx, vy, vz) + vjit[p]
         state.particle_selection[idx] = 0
 
 
@@ -172,3 +188,65 @@ def seed_inflow_particles(
         hi = np.asarray(inflow.hi, dtype=np.float32)
         positions = rng.uniform(lo, hi, size=(n, 3)).astype(np.float32)
     return positions, spawn_steps
+
+
+def make_velocity_jitter(
+    spawn_steps: np.ndarray,
+    magnitude: float,
+    rng: np.random.Generator | None = None,
+    coherence_steps: int = 16,
+) -> np.ndarray:
+    """Temporally-coherent lateral velocity seed (S2.17.7.JITTER).
+
+    Returns ``(N, 3)`` float32, one row per inflow particle (aligned with
+    ``spawn_steps``). ``magnitude <= 0`` (or empty) ⇒ all zeros, so the release
+    stays byte-identical to the pre-jitter path.
+
+    The kick is **coherent in time, zero in Z**: particles released within
+    ``coherence_steps`` of each other share nearly the same horizontal velocity,
+    so the whole *thread cross-section* wanders together. That coherence is what
+    seeds the liquid-rope-coiling buckling instability — independent per-particle
+    noise averages to ~0 over the cross-section, leaving the thread centroid on
+    axis (verified: a centred viscous rope just heaps, no coil). The shared kick
+    follows a smooth, zero-mean, bounded meander over time (low-pass random),
+    so it injects **no prescribed rotation sense or rate** (unlike orbiting the
+    source, which literally draws the spiral); the physical instability sets the
+    coil's direction, radius and frequency. Honesty check: the *same* seed at low
+    viscosity produces no coil — see ``examples/scenes/verify_honey_coil.py``.
+
+    Parameters
+    ----------
+    spawn_steps : (N,) int — each particle's release step (from
+        :func:`seed_inflow_particles`).
+    magnitude : peak lateral speed in normalised units/s.
+    coherence_steps : temporal correlation length in solver steps (a few frames
+        is typical; the solver passes ``dump_every`` = one output frame).
+    """
+    spawn = np.asarray(spawn_steps).reshape(-1)
+    n = spawn.shape[0]
+    out = np.zeros((n, 3), dtype=np.float32)
+    if magnitude <= 0.0 or n == 0:
+        return out
+    if rng is None:
+        rng = np.random.default_rng(42)
+    coherence_steps = max(1, int(coherence_steps))
+    smin, smax = int(spawn.min()), int(spawn.max())
+    nb = (smax - smin) // coherence_steps + 1
+    # Low-pass random walk: IID gaussian per time-bucket, smoothed over a few
+    # buckets → a slow, zero-mean meander (not a circle, not a one-way drift).
+    raw = rng.normal(size=(nb + 8, 2))
+    w = max(1, min(5, nb))
+    kern = np.ones(w) / w
+    sx = np.convolve(raw[:, 0], kern, mode="same")[:nb]
+    sy = np.convolve(raw[:, 1], kern, mode="same")[:nb]
+    # Remove any residual mean so the thread meanders about the axis (no lean).
+    sx = sx - sx.mean()
+    sy = sy - sy.mean()
+    peak = max(float(np.hypot(sx, sy).max()), 1e-9)
+    scale = float(magnitude) / peak
+    sx *= scale
+    sy *= scale
+    b = np.clip((spawn - smin) // coherence_steps, 0, nb - 1)
+    out[:, 0] = sx[b].astype(np.float32)
+    out[:, 1] = sy[b].astype(np.float32)
+    return out

@@ -78,7 +78,12 @@ from .colliders import (
     k_sdf_sphere_collide,
     k_sdf_cylinder_collide,
 )
-from .inflow import MpmInflow, k_inflow_gate, seed_inflow_particles
+from .inflow import (
+    MpmInflow,
+    k_inflow_gate,
+    make_velocity_jitter,
+    seed_inflow_particles,
+)
 from .outflow import MpmOutflow, k_outflow_despawn
 from .pushback import (k_cube_pushback, k_wall_pushback, k_mesh_sdf_pushback,
                        k_sphere_pushback, k_cylinder_pushback)
@@ -106,6 +111,20 @@ class MpmFluidParams:
     # stress via S2.17.PATCH.VISC (passed as warp-mpm's `plastic_viscosity`,
     # which the fluid material does not otherwise use). Oil ~ small, honey large.
     viscosity: float = 0.0
+    # ── S2.17.9 material model selector ──────────────────────────────────
+    # "fluid" (default, unchanged): weakly-compressible water/honey — uses
+    #   bulk_modulus + viscosity (the S2.17.PATCH.VISC Newtonian term).
+    # "viscoelastic": warp-mpm's viscoplastic StVK + von-Mises material (id 3,
+    #   selected via warp's "foam" name). A coherent elastic rope that yields and
+    #   flows above `yield_stress` at a rate set by `viscosity` (here it is the
+    #   real plastic_viscosity, not the fluid hack). Unlike the fluid material,
+    #   this CAN buckle / rope-coil (honey, clay, toothpaste). Uses
+    #   young_modulus (E), poisson (ν), yield_stress, viscosity; bulk_modulus is
+    #   IGNORED (the solver derives mu/lam/bulk from E/ν via finalize_mu_lam_bulk).
+    material: str = "fluid"
+    young_modulus: float = 5.0e4    # E — elastic stiffness (viscoelastic only)
+    poisson: float = 0.3            # ν — Poisson ratio (viscoelastic only)
+    yield_stress: float = 500.0     # von-Mises yield τ_y (viscoelastic only)
 
 
 @dataclass
@@ -167,6 +186,12 @@ class MpmDomainWalls:
     lo: tuple[float, float, float] = (0.05, 0.05, 0.105)
     hi: tuple[float, float, float] = (0.95, 0.95, 0.95)
     floor_z: float = 0.10  # slip plane height for warp-mpm's add_surface_collider
+    # S2.17.10 floor stickiness. 0.0 (default) = frictionless SLIP plane
+    # (byte-identical to pre-S2.17.10 — a settled pool spreads to a monolayer).
+    # >=1.0 = STICKY no-slip (grid_v zeroed at the floor) — anchors a viscous
+    # rope so it can rope-coil instead of sliding out (see demo_honey_coil).
+    # 0<f<1 = Coulomb frictional floor with that coefficient.
+    floor_friction: float = 0.0
 
 
 @dataclass
@@ -360,10 +385,18 @@ class MpmSolver:
             )
             n_i = pos_i.shape[0]
             inflow_chunks.append(pos_i)
+            # S2.17.7.JITTER — per-particle isotropic XY release seed (zeros
+            # when velocity_jitter==0, so determinism is preserved). Drawn from
+            # the same rng so the whole seeding is reproducible under cfg.seed.
+            vjit_i = make_velocity_jitter(
+                spawn_i, float(getattr(inf, "velocity_jitter", 0.0)),
+                rng=rng, coherence_steps=cfg.dump_every,
+            )
             self._inflow_gates.append({
                 "base": running_base, "n": n_i,
                 "hold_np": pos_i,    # keep numpy ref for re-upload after init
                 "spawn_np": spawn_i,
+                "vjit_np": vjit_i,
                 "velocity": tuple(inf.velocity),
             })
             running_base += n_i
@@ -397,18 +430,42 @@ class MpmSolver:
         self.mpm = MPM_Simulator_WARP(10)
         self.mpm.load_from_sampling(self._tmp_h5, n_grid=cfg.n_grid,
                                     grid_lim=cfg.grid_lim, device=cfg.device)
-        self.mpm.set_parameters_dict({
-            "bulk_modulus":   cfg.fluid.bulk_modulus,
-            "material":       "fluid",
+        # S2.17.9 material selector. "fluid" → warp id 6 (weakly-compressible,
+        # bulk_modulus-driven). "viscoelastic" → warp's "foam" = id 3, the
+        # viscoplastic StVK + von-Mises material that can buckle/rope-coil.
+        _WARP_MATERIAL = {"fluid": "fluid", "viscoelastic": "foam"}
+        mat = getattr(cfg.fluid, "material", "fluid")
+        if mat not in _WARP_MATERIAL:
+            raise ValueError(
+                f"MpmFluidParams.material={mat!r} not supported; expected one "
+                f"of {sorted(_WARP_MATERIAL)}")
+        warp_mat = _WARP_MATERIAL[mat]
+        params = {
+            "material":       warp_mat,
             "friction_angle": 35,
             "g":              list(cfg.gravity),
             "density":        cfg.fluid.density,
             "rpic_damping":         cfg.fluid.rpic_damping,
             "grid_v_damping_scale": cfg.fluid.grid_v_damping_scale,
-            # S2.17.PATCH.VISC repurposes warp-mpm's `plastic_viscosity` (unused
-            # by the fluid material) as the Newtonian dynamic viscosity μ.
+            # For "fluid": S2.17.PATCH.VISC repurposes `plastic_viscosity` as the
+            # Newtonian μ. For "viscoelastic": it IS warp's real plastic_viscosity
+            # (flow rate above yield) — same field, both honest.
             "plastic_viscosity":    cfg.fluid.viscosity,
-        })
+        }
+        if warp_mat == "fluid":
+            params["bulk_modulus"] = cfg.fluid.bulk_modulus
+        else:
+            # viscoelastic: warp derives mu/lam/bulk from E, ν (finalize below);
+            # bulk_modulus is ignored. yield_stress gates plastic flow.
+            params["E"] = cfg.fluid.young_modulus
+            params["nu"] = cfg.fluid.poisson
+            params["yield_stress"] = cfg.fluid.yield_stress
+        self.mpm.set_parameters_dict(params)
+        if warp_mat != "fluid":
+            # CRITICAL: the fluid path never needs this (bulk is set directly and
+            # the water EOS ignores mu/lam), but every elastoplastic material
+            # reads mu/lam/bulk, which stay ZERO unless derived from E/ν here.
+            self.mpm.finalize_mu_lam_bulk(device=cfg.device)
         # Initial column gets the prescribed downward velocity; inflow
         # particles stay at v=0 — the gate kernel injects their velocity
         # at their individual spawn_step.
@@ -431,6 +488,9 @@ class MpmSolver:
                 g["spawn_wp"] = wp.from_numpy(
                     g["spawn_np"], dtype=int, device=cfg.device
                 )
+                g["vjit_wp"] = wp.from_numpy(
+                    g["vjit_np"], dtype=wp.vec3, device=cfg.device
+                )
             self.mpm.mpm_state.particle_selection = wp.from_numpy(
                 sel, dtype=int, device=cfg.device
             )
@@ -451,9 +511,19 @@ class MpmSolver:
         # 999.0, so a bake whose simulated time exceeds 999 s (a long
         # continuous-inflow render, ~frames/fps seconds) would silently lose the
         # floor and particles would fall through for the rest of the bake.
+        # S2.17.10: floor stickiness. Default 0 → "slip" (frictionless,
+        # byte-identical). >=1 → "sticky" (no-slip, grid_v=0) so a viscous rope
+        # anchors and rope-coils. 0<f<1 → Coulomb-frictional floor.
+        _ff = float(getattr(cfg.walls, "floor_friction", 0.0))
+        if _ff <= 0.0:
+            _floor_surface, _floor_fric = "slip", 0.0
+        elif _ff >= 1.0:
+            _floor_surface, _floor_fric = "sticky", 0.0  # warp: friction must be 0
+        else:
+            _floor_surface, _floor_fric = "frictional", _ff
         self.mpm.add_surface_collider(
             (0.0, 0.0, cfg.walls.floor_z), (0.0, 0.0, 1.0),
-            surface="slip", friction=0.0, end_time=1.0e9,
+            surface=_floor_surface, friction=_floor_fric, end_time=1.0e9,
         )
         # Cube colliders — register our SDF box kernel + a Dirichlet_collider
         # struct per cube to carry the box geometry into the kernel.
@@ -638,6 +708,7 @@ class MpmSolver:
                     int(step_index), int(g["base"]),
                     g["spawn_wp"], g["hold_wp"],
                     float(vx), float(vy), float(vz),
+                    g["vjit_wp"],
                     self._despawned,
                 ],
                 device=cfg.device,
@@ -783,8 +854,18 @@ class MpmSolver:
                   f"cfl_factor to <= 1.0 to fix. (FU-029: this knob is "
                   f"shared with FLIP, whose slider allows up to 2.0.)",
                   file=sys.stderr)
-        c_sound = math.sqrt(max(cfg.fluid.bulk_modulus, 0.0)
-                            / max(cfg.fluid.density, 1e-9))
+        # Stress-wave speed. Fluid: c=sqrt(K/ρ) from the EOS bulk modulus.
+        # Viscoelastic (S2.17.9): the elastic P-wave is stiffer than the bulk —
+        # use M = E(1-ν)/((1+ν)(1-2ν)) (the constrained/oedometer modulus) so a
+        # stiff E auto-substeps instead of diverging.
+        rho_c = max(cfg.fluid.density, 1e-9)
+        if getattr(cfg.fluid, "material", "fluid") == "viscoelastic":
+            E = max(cfg.fluid.young_modulus, 0.0)
+            nu = min(max(cfg.fluid.poisson, 0.0), 0.49)
+            stiffness = E * (1.0 - nu) / ((1.0 + nu) * (1.0 - 2.0 * nu))
+        else:
+            stiffness = max(cfg.fluid.bulk_modulus, 0.0)
+        c_sound = math.sqrt(stiffness / rho_c)
         vel = self.mpm.mpm_state.particle_v.numpy()
         v_max = float(np.abs(vel).max()) if vel.size else 0.0
         denom = max(cfg.adaptive_cfl * cfg.dx(), 1e-12)

@@ -184,6 +184,10 @@ class InflowCfg:
     # supersedes the static lo/hi above (those become the keyframe at
     # frame_start for backward compat). Ignored by FLIP solver.
     keyframes: List[List[float]] = field(default_factory=list)
+    # S2.17.7.JITTER — isotropic horizontal velocity noise (normalised units/s)
+    # added per-particle at release. 0 = off. A few % of |velocity| seeds the
+    # liquid-rope-coiling buckling instability (MPM only; see MpmInflow).
+    velocity_jitter: float = 0.0
     # B18 — per-source per-particle attributes. Each particle emitted by
     # this inflow inherits the same colour / temperature. Consumed by the
     # MPM path (FlipSolver3D inflows currently emit white; FLIP-side wire-
@@ -232,6 +236,15 @@ class SimulationCfg:
     mpm_viscosity: float = 0.0   # Newtonian dynamic viscosity μ (0 = inviscid water; raise for oil/honey)
     mpm_rpic_damping: float = 0.15
     mpm_grid_v_damping: float = 0.998
+    # S2.17.9 material model. "fluid" (default) = weakly-compressible water/honey.
+    # "viscoelastic" = warp-mpm viscoplastic StVK+von-Mises (can buckle/rope-coil):
+    # uses young_modulus/poisson/yield_stress + viscosity (as plastic_viscosity).
+    mpm_material: str = "fluid"
+    mpm_young_modulus: float = 5.0e4
+    mpm_poisson: float = 0.3
+    mpm_yield_stress: float = 500.0
+    # S2.17.10 floor stickiness: 0=slip (default), >=1=sticky no-slip, 0<f<1=frictional.
+    mpm_floor_friction: float = 0.0
     mpm_cube_friction: float = 0.6
     mpm_v_terminal: float = -1.0
     mpm_vz_max_splash: float = 0.3
@@ -388,6 +401,7 @@ def _parse_inflow(d: dict) -> InflowCfg:
             [float(v) for v in row]
             for row in d.get("keyframes", [])
         ],
+        velocity_jitter=float(d.get("velocity_jitter", 0.0)),
         color=_tuple(d["color"], 3, "inflow.color") if "color" in d else None,
         temperature=float(d["temperature"]) if "temperature" in d else None,
     )
@@ -598,6 +612,11 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         mpm_viscosity=float(mpm_sub.get("viscosity", 0.0)),
         mpm_rpic_damping=float(mpm_sub.get("rpic_damping", 0.15)),
         mpm_grid_v_damping=float(mpm_sub.get("grid_v_damping", 0.998)),
+        mpm_material=str(mpm_sub.get("material", "fluid")),
+        mpm_young_modulus=float(mpm_sub.get("young_modulus", 5.0e4)),
+        mpm_poisson=float(mpm_sub.get("poisson", 0.3)),
+        mpm_yield_stress=float(mpm_sub.get("yield_stress", 500.0)),
+        mpm_floor_friction=float(mpm_sub.get("floor_friction", 0.0)),
         mpm_cube_friction=float(mpm_sub.get("cube_friction", 0.6)),
         mpm_v_terminal=float(mpm_sub.get("v_terminal", -1.0)),
         mpm_vz_max_splash=float(mpm_sub.get("vz_max_splash", 0.3)),
