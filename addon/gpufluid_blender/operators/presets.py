@@ -69,9 +69,9 @@ PRESETS = {
              "mpm_viscosity": 30.0,
              "_inflow": {"velocity_z": -0.12, "velocity_jitter": 0.04}},
     "slime": {**_VE, "resolution": 96, "dt": 0.0015, "cfl_factor": 0.5,
-              "cfl_max_substeps": 200, "mpm_young_modulus": 80000.0,
-              "mpm_poisson": 0.4, "mpm_yield_stress": 250.0,
-              "mpm_viscosity": 80.0, "mpm_floor_friction": 0.5,
+              "cfl_max_substeps": 220, "mpm_young_modulus": 140000.0,
+              "mpm_poisson": 0.4, "mpm_yield_stress": 400.0,
+              "mpm_viscosity": 80.0,  # _VE floor_friction=1.0 (sticky) → coils
               "_inflow": {"velocity_z": -0.2, "velocity_jitter": 0.05}},
     "chocolate": {**_VE, "resolution": 128, "dt": 0.0012, "cfl_factor": 0.5,
                   "cfl_max_substeps": 300, "mpm_young_modulus": 120000.0,
