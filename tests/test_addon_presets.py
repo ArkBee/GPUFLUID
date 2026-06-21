@@ -55,8 +55,12 @@ PRESETS_MOD = _load_presets()
 
 # ── preset data ────────────────────────────────────────────────────────────
 
-def test_four_presets_exist():
-    assert set(PRESETS_MOD.PRESETS) == {"water", "splash", "viscous", "draft"}
+_FLUID_PRESETS = {"water", "splash", "honey_slump", "draft"}
+_VE_PRESETS = {"honey_coil", "clay", "slime", "chocolate", "caramel", "gel"}
+
+
+def test_material_library_presets_exist():
+    assert set(PRESETS_MOD.PRESETS) == _FLUID_PRESETS | _VE_PRESETS
 
 
 def test_every_preset_enables_cfl_and_uses_mpm():
@@ -65,8 +69,32 @@ def test_every_preset_enables_cfl_and_uses_mpm():
         assert vals["use_cfl"] is True, f"preset {key} must enable CFL substepping"
         assert vals["solver"] == "mpm", f"preset {key} should target MPM"
         assert 8 <= vals["resolution"] <= 512
-        assert 100.0 <= vals["mpm_bulk_modulus"] <= 10000.0
         assert 1e-5 <= vals["dt"] <= 0.1
+        assert vals["mpm_material"] in ("fluid", "viscoelastic")
+        if vals["mpm_material"] == "fluid":
+            assert 100.0 <= vals["mpm_bulk_modulus"] <= 10000.0
+        else:
+            assert 100.0 <= vals["mpm_young_modulus"] <= 2_000_000.0
+            assert vals["mpm_yield_stress"] >= 0.0
+
+
+def test_viscoelastic_presets_coil_setup():
+    """Every coiling material must turn the floor sticky AND set a slow,
+    wobbling pour on inflows (the geometry coiling needs) — else it won't coil."""
+    for key in _VE_PRESETS:
+        v = PRESETS_MOD.PRESETS[key]
+        assert v["mpm_material"] == "viscoelastic"
+        assert v["mpm_floor_friction"] > 0.0, f"{key}: needs a (semi-)sticky floor"
+        inflow = v.get("_inflow")
+        assert inflow is not None, f"{key}: must set a coiling pour on inflows"
+        assert inflow["velocity_z"] < 0.0, f"{key}: pour must be downward"
+        assert "velocity_jitter" in inflow, f"{key}: must seed the coil"
+
+
+def test_fluid_presets_have_no_inflow_override():
+    # Plain fluids leave the user's inflow velocity alone.
+    for key in _FLUID_PRESETS:
+        assert "_inflow" not in PRESETS_MOD.PRESETS[key]
 
 
 def test_preset_enum_items_match_preset_keys():

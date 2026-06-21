@@ -288,9 +288,16 @@ def build_toml(scene_dict: SceneDict) -> str:
     if solver == "mpm":
         lines.append("")
         lines.append("[simulation.mpm]")
-        for key in ("bulk_modulus", "rpic_damping", "grid_v_damping",
-                    "cube_friction", "v_terminal", "vz_max_splash",
-                    "initial_velocity"):
+        # S2.17.9 — material selector is a STRING (quoted); emit first.
+        mat = str(sim.get("mpm_material", "fluid"))
+        if mat and mat != "fluid":
+            lines.append(f'material = "{mat}"')
+        for key in ("bulk_modulus", "viscosity", "rpic_damping",
+                    "grid_v_damping", "cube_friction", "v_terminal",
+                    "vz_max_splash", "initial_velocity",
+                    # S2.17.9/.10 viscoelastic + sticky-floor knobs
+                    "young_modulus", "poisson", "yield_stress",
+                    "floor_friction"):
             full_key = f"mpm_{key}"
             if full_key in sim:
                 lines.append(f"{key} = {float(sim[full_key]):g}")

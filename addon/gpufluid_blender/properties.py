@@ -155,8 +155,10 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
                     "waves — the elastic wave speed exceeds the advection "
                     "CFL, so the bake may diverge or alias at rigid "
                     "contacts; keep <= 1.0 for MPM (0.5 default is safe)")
-    cfl_max_substeps: bpy.props.IntProperty(name="Max Substeps / Frame", default=16, min=1, max=128,
-                                            soft_min=8, soft_max=48)
+    cfl_max_substeps: bpy.props.IntProperty(name="Max Substeps / Frame", default=16, min=1, max=512,
+                                            soft_min=8, soft_max=48,
+                                            description="Cap on CFL sub-steps per frame. Water needs ~16-32; "
+                                                        "stiff viscoelastic (clay/caramel coil) needs 300-460.")
 
     # meshing
     iso_level: bpy.props.FloatProperty(name="Iso Level", default=0.6, min=0.01, max=10.0)
@@ -214,6 +216,12 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
     mpm_rpic_damping: bpy.props.FloatProperty(
         name="Viscosity (RPIC)", default=0.15, min=0.0, max=1.0, soft_max=0.5,
         description="APIC rotational-mode damping. 0 = pure APIC (lively swirly water). 0.15 = subtle viscosity. 0.3+ = syrupy.")
+    mpm_viscosity: bpy.props.FloatProperty(
+        name="Newtonian Viscosity (μ)", default=0.0, min=0.0, max=2000.0,
+        soft_max=600.0,
+        description="Fluid material only: true Newtonian viscosity. 0 = water. "
+                    "~80 = soft honey, ~180 = thick honey that slumps and holds "
+                    "its shape. (Separate from RPIC damping.)")
     mpm_grid_v_damping: bpy.props.FloatProperty(
         name="Global Damping", default=0.998, min=0.9, max=1.0, precision=4,
         description="Per-step grid velocity damping. 1.0 = none. 0.995 = mild. 0.99 = noticeable.")
@@ -231,6 +239,39 @@ class GpufluidDomainProps(bpy.types.PropertyGroup):
         description="Starting vertical velocity for inflow column, in m/s. "
                     "Normalised by domain size at bake time. "
                     "-0.3 = gentle pour; 0.0 = drop from rest (more splash).")
+    # ── S2.17.9 material model (Pro knobs; presets set these for you) ──────
+    mpm_material: bpy.props.EnumProperty(
+        name="Material", default="fluid",
+        items=[
+            ("fluid", "Жидкость / Fluid",
+             "Слабо-сжимаемая вода/мёд (bulk + вязкость). Не завивается. / "
+             "Weakly-compressible water/honey. Cannot rope-coil."),
+            ("viscoelastic", "Вязкоупругий / Viscoelastic",
+             "Упругий жгут, текущий выше предела текучести — МОЖЕТ завиваться "
+             "(мёд/глина/карамель). / Elastic rope that yields & flows — CAN "
+             "rope-coil (honey/clay/caramel)."),
+        ],
+        description="MPM constitutive model. Use a preset if unsure.")
+    mpm_young_modulus: bpy.props.FloatProperty(
+        name="Stiffness (E)", default=50000.0, min=100.0, max=2000000.0,
+        soft_min=20000.0, soft_max=400000.0,
+        description="Viscoelastic only: elastic stiffness. Higher = firmer, "
+                    "more coherent rope that buckles cleanly (clay); lower = "
+                    "softer, slumpy (slime).")
+    mpm_poisson: bpy.props.FloatProperty(
+        name="Poisson (ν)", default=0.3, min=0.0, max=0.49, soft_max=0.45,
+        description="Viscoelastic only: compressibility. 0.3-0.4 typical; "
+                    "higher = more volume-preserving.")
+    mpm_yield_stress: bpy.props.FloatProperty(
+        name="Yield Stress", default=500.0, min=0.0, max=20000.0,
+        soft_max=4000.0,
+        description="Viscoelastic only: stress to start flowing. Low = oozy "
+                    "(flows easily); high = holds shape (stiff clay/gel).")
+    mpm_floor_friction: bpy.props.FloatProperty(
+        name="Floor Stickiness", default=0.0, min=0.0, max=1.0,
+        description="0 = slip floor (water spreads). 1 = sticky no-slip floor "
+                    "(anchors a viscous rope so it can rope-COIL instead of "
+                    "sliding out). Presets set this for coiling materials.")
     # Phase 1 escape-hatch: raw TOML merged on top of the generated config in
     # config_builder.build_toml. Parsed via stdlib tomllib; deep-merged into
     # the final dict before serialization. Errors propagate to the bake
@@ -356,6 +397,16 @@ class GpufluidInflowProps(bpy.types.PropertyGroup):
     rate_per_sec: bpy.props.FloatProperty(name="Particles/sec", default=10000.0, min=0.0)
     frame_start: bpy.props.IntProperty(name="Frame Start", default=0, min=0)
     frame_end: bpy.props.IntProperty(name="Frame End", default=10000, min=0)
+    # S2.17.7.JITTER — coherent lateral nozzle noise that SEEDS rope-coiling
+    # buckling (a perfectly steady viscous rope lands dead-centre and won't
+    # coil). Default 0 = none. Coiling presets set ~0.04.
+    velocity_jitter: bpy.props.FloatProperty(
+        name="Nozzle Wobble (coil seed)", default=0.0, min=0.0, max=0.5,
+        soft_max=0.1,
+        description="Small random sideways wobble of the stream (m/s), "
+                    "coherent in time. Seeds the buckling that makes a viscous "
+                    "rope COIL. 0 = perfectly steady (won't coil). ~0.04 for "
+                    "honey/clay coiling.")
     # B18 — per-source attributes (mirrors GpufluidFluidProps)
     use_color: bpy.props.BoolProperty(
         name="Tint Particles (B18)", default=False,

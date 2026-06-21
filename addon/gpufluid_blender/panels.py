@@ -51,12 +51,32 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         d = context.active_object.gpufluid_domain
-        # ── One-click presets (2026-06-15) ── the fastest path for anyone who
-        # doesn't want to reason about bulk modulus / dt / CFL by hand.
+        # UI mode (lazy import for the stub-test load path). "cook" = 2-button
+        # mode (pick a material → bake); "pro" = every knob visible.
+        try:
+            from . import preferences
+            pro = getattr(preferences.get_prefs(context), "ui_mode", "cook") == "pro"
+        except Exception:
+            pro = False
+
+        # ── Material presets — the Cook path: one dropdown sets EVERYTHING ──
         pbox = layout.box()
-        pbox.label(text="Пресеты / Presets", icon="PRESET")
+        pbox.label(text="Материал / Material", icon="PRESET")
         pbox.operator_menu_enum("gpufluid.apply_preset", "preset",
-                                text="Выбрать пресет / Pick preset")
+                                text="Выбрать жижу / Pick a fluid")
+
+        if not pro:
+            # Cook mode: only length + cache, then Bake (in the Bake panel).
+            col = layout.column()
+            col.prop(d, "frames")
+            col.prop(d, "fps")
+            col.prop(d, "cache_dir")
+            tip = layout.box()
+            tip.label(text="«Кухарка»: выбрал жижу → Bake.", icon="INFO")
+            tip.label(text="Все ручки — режим Pro (настройки аддона).")
+            return
+
+        # ── Pro mode: every knob ──
         col = layout.column()
         col.prop(d, "resolution")
         col.prop(d, "cache_dir")
@@ -68,7 +88,18 @@ class GPUFLUID_PT_domain(bpy.types.Panel):
         sbox.prop(d, "solver", expand=True)
         if d.solver == "mpm":
             sbox.label(text="MPM Settings (F3.7 / S2.17.*)", icon="MOD_FLUIDSIM")
-            sbox.prop(d, "mpm_bulk_modulus")
+            sbox.prop(d, "mpm_material")
+            if d.mpm_material == "viscoelastic":
+                # Rope-coiling material — stiffness/yield instead of bulk.
+                sbox.prop(d, "mpm_young_modulus")
+                sbox.prop(d, "mpm_poisson")
+                sbox.prop(d, "mpm_yield_stress")
+                sbox.prop(d, "mpm_viscosity")
+                sbox.prop(d, "mpm_floor_friction")
+            else:
+                sbox.prop(d, "mpm_bulk_modulus")
+                sbox.prop(d, "mpm_viscosity")
+                sbox.prop(d, "mpm_floor_friction")
             sbox.prop(d, "mpm_rpic_damping")
             sbox.prop(d, "mpm_grid_v_damping")
             sbox.prop(d, "mpm_cube_friction")
@@ -212,9 +243,17 @@ class GPUFLUID_PT_inflow(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         i = context.active_object.gpufluid_inflow
+        try:
+            from . import preferences
+            pro = getattr(preferences.get_prefs(context), "ui_mode", "cook") == "pro"
+        except Exception:
+            pro = False
         layout.prop(i, "is_inflow")
         layout.prop(i, "rate_per_sec")
         layout.prop(i, "velocity")
+        # S2.17.7.JITTER — coil seed; in Cook mode the material preset sets it.
+        if pro:
+            layout.prop(i, "velocity_jitter")
         row = layout.row(align=True)
         row.prop(i, "frame_start"); row.prop(i, "frame_end")
         # B18 — per-inflow colour + temperature (mirrors Fluid panel)

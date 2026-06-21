@@ -507,6 +507,10 @@ def collect_scene(context, domain_obj):
             # the TOML stays minimal and the zero-overhead path in MpmSolver
             # engages for scenes that don't use colour/temperature).
             iprops = o.gpufluid_inflow
+            # S2.17.7.JITTER — coil seed (only emit when set, so the zero-
+            # overhead release path stays byte-identical for normal scenes).
+            if getattr(iprops, "velocity_jitter", 0.0) > 0.0:
+                entry["velocity_jitter"] = float(iprops.velocity_jitter)
             if getattr(iprops, "use_color", False):
                 entry["color"] = tuple(float(c) for c in iprops.color)
             if getattr(iprops, "use_temperature", False):
@@ -604,6 +608,13 @@ def collect_scene(context, domain_obj):
             # axis pre-multiply. Now: ship UNSCALED, let the CLI do
             # the single correct Z scaling once.
             "mpm_initial_velocity": float(dprops.mpm_initial_velocity),
+            # S2.17.9/.10 — material model + viscoelastic knobs + sticky floor.
+            "mpm_material": str(getattr(dprops, "mpm_material", "fluid")),
+            "mpm_viscosity": float(getattr(dprops, "mpm_viscosity", 0.0)),
+            "mpm_young_modulus": float(getattr(dprops, "mpm_young_modulus", 5.0e4)),
+            "mpm_poisson": float(getattr(dprops, "mpm_poisson", 0.3)),
+            "mpm_yield_stress": float(getattr(dprops, "mpm_yield_stress", 500.0)),
+            "mpm_floor_friction": float(getattr(dprops, "mpm_floor_friction", 0.0)),
         },
         "output": _output_dict(dprops),
         # Phase 1 escape-hatch: raw TOML string deep-merged in config_builder.

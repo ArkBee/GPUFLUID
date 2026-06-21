@@ -187,6 +187,19 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         default="ru",
         description="Language of the help text shown in the Domain panel",
     )
+    ui_mode: bpy.props.EnumProperty(
+        name="Interface / Интерфейс",
+        items=[
+            ("cook", "Кухарка (2 кнопки) / Cook (2 buttons)",
+             "Только: выбрать жижу → Bake. Все ручки скрыты. / "
+             "Just pick a fluid → Bake. All knobs hidden."),
+            ("pro", "Pro (все ручки) / Pro (all knobs)",
+             "Полный контроль над физикой. / Full control over the physics."),
+        ],
+        default="cook",
+        description="Cook mode = pick a material preset and bake. Pro mode = "
+                    "every physics knob is visible.",
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -206,6 +219,7 @@ class GpufluidPreferences(bpy.types.AddonPreferences):
         col.prop(self, "preload_cap")
         col.prop(self, "preload_max_frames")
         col.separator()
+        col.prop(self, "ui_mode")
         col.prop(self, "hint_language")
 
 
@@ -222,6 +236,7 @@ class _FallbackPrefs:
     """
     interpreter_path: str = ""
     hint_language: str = "ru"
+    ui_mode: str = "cook"
 
 
 _FALLBACK_PREFS = _FallbackPrefs()
