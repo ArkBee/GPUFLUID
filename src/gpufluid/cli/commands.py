@@ -13,7 +13,7 @@ from .. import __version__
 from ..blocks import block, BlockError, by_layer, get_registry
 from ..solvers.solver3d import FlipSolver3D
 from ..meshing.surface import MeshExtractor
-from ..io.ply import write_ply, write_particles_npy, read_ply
+from ..io.ply import write_ply, write_particles_npy
 from ..io.cache import CacheManifest, write_cache_manifest
 from ..io.usd import write_usd_mesh_sequence
 from ..primitives.sdf import (
@@ -815,11 +815,14 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     # Compare settled vs seed packing, record it in the manifest, and warn loudly
     # so the user/renderer/verify tooling knows the "pool" is a degenerate film.
     try:
+        from ..io.ply import read_points_ply
         _last_ply = sorted(particles_dir.glob("sim_*.ply"))
         seed_mean, _seed_max, _seed_cells = _particles_per_cell(column, scene.dx)
         if _last_ply:
-            _d = read_ply(_last_ply[-1])
-            _v = _d[0] if isinstance(_d, tuple) else _d
+            # read_points_ply is the matching reader for these point dumps
+            # (written by write_points_ply) — same reader the mesh loop uses
+            # above; the generic read_ply (mesh) only happened to tolerate them.
+            _v = read_points_ply(_last_ply[-1])
             set_mean, set_max, _set_cells = _particles_per_cell(_v, scene.dx)
         else:
             set_mean, set_max = 0.0, 0
