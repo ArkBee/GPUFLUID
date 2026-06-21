@@ -76,6 +76,7 @@ additionally has at least one `test_*` matching the block ID slug;
 | S2.17.8 | MPM outflow despawn kernel: live particles inside an active drain AABB marked selection=1 (excluded from dumps + all kernels) + dedicated despawned flag so the inflow gate can't re-release them; bounds particle count for continuous-flow scenes | S2 | `src/gpufluid/sim/mpm/outflow.py` | impl,test |
 | S2.17.PATCH.EOS | Overlay: clamp J in kirchoff_stress_water to bound pressure spike at rigid contact | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl |
 | S2.17.PATCH.SLIP | Overlay fix: write projected v in slip-surface branch instead of zero | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl |
+| S2.17.PATCH.VISC | Overlay: add Newtonian viscous stress J·mu·(C+Cᵀ) to the fluid material | S2 | `src/gpufluid/sim/mpm/_patches.py` | impl,test |
 | S2.18 | Per-particle scalar attribute: P2G → normalize → G2P (B11) | S2 | `src/gpufluid/solvers/solver3d.py` | impl,test |
 | S2.18.1 | P2G scatter of per-particle scalar onto grid | S2 | `?` | impl |
 | S2.18.2 | Normalize grid scalar by deposited weight | S2 | `?` | impl |

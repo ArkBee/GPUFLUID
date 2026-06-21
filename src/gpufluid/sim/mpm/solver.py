@@ -87,6 +87,13 @@ from .velcaps import k_anti_splash_vz, k_tap_terminal_velocity
 
 # ─── config dataclasses ────────────────────────────────────────────────
 
+# S2.17.PATCH.VISC: empirical multiplier in the viscous-diffusion CFL bound
+# (see _cfl_substeps). Textbook explicit 3D diffusion is stable at k=2·dim=6,
+# but the MLS affine-stress coupling is stiffer, so this is tuned higher from
+# the observed blow-up threshold.
+_VISC_CFL_K = 24.0
+
+
 @dataclass
 class MpmFluidParams:
     """Fluid material — defaults model water with mild viscosity."""
@@ -94,6 +101,11 @@ class MpmFluidParams:
     density: float = 1000.0
     rpic_damping: float = 0.15
     grid_v_damping_scale: float = 0.998
+    # Newtonian dynamic viscosity μ (Pa·s in sim units). 0 = inviscid water
+    # (byte-identical to pre-VISC). >0 adds tau_visc = J·μ·(C+Cᵀ) to the fluid
+    # stress via S2.17.PATCH.VISC (passed as warp-mpm's `plastic_viscosity`,
+    # which the fluid material does not otherwise use). Oil ~ small, honey large.
+    viscosity: float = 0.0
 
 
 @dataclass
@@ -393,6 +405,9 @@ class MpmSolver:
             "density":        cfg.fluid.density,
             "rpic_damping":         cfg.fluid.rpic_damping,
             "grid_v_damping_scale": cfg.fluid.grid_v_damping_scale,
+            # S2.17.PATCH.VISC repurposes warp-mpm's `plastic_viscosity` (unused
+            # by the fluid material) as the Newtonian dynamic viscosity μ.
+            "plastic_viscosity":    cfg.fluid.viscosity,
         })
         # Initial column gets the prescribed downward velocity; inflow
         # particles stay at v=0 — the gate kernel injects their velocity
@@ -774,6 +789,18 @@ class MpmSolver:
         v_max = float(np.abs(vel).max()) if vel.size else 0.0
         denom = max(cfg.adaptive_cfl * cfg.dx(), 1e-12)
         n_demand = int(math.ceil(cfg.dt * (c_sound + v_max) / denom))
+        # S2.17.PATCH.VISC: the explicit Newtonian viscous stress μ·(C+Cᵀ) is a
+        # stiff diffusion — its own CFL is dt_sub <= ρ·dx²/(k·μ), INDEPENDENT of
+        # the stress-wave bound above. Without this term, raising viscosity for
+        # honey silently under-substeps and the bake diverges (μ≈50 blew up at
+        # the sound-only substep count). k is empirical (the MLS affine coupling
+        # makes the effective stress stiffer than textbook 2·dim diffusion).
+        mu = getattr(cfg.fluid, "viscosity", 0.0)
+        if mu > 0.0:
+            rho = max(cfg.fluid.density, 1e-9)
+            dx2 = max(cfg.dx() * cfg.dx(), 1e-18)
+            n_visc = int(math.ceil(cfg.dt * mu / (rho * dx2) * _VISC_CFL_K))
+            n_demand = max(n_demand, n_visc)
         n_cap = int(cfg.adaptive_max_substeps)
         return max(1, min(n_demand, n_cap)), (n_demand > n_cap)
 

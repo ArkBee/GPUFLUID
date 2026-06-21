@@ -15,7 +15,17 @@ Two patches:
         that `J^{-1.1}` does not blow up to +∞ when a particle is
         numerically overcompressed at a rigid collider. `J_safe = max(J, 0.5)`.
 
-Both patches edit the kernel source files in-place before Warp's JIT
+    S2.17.PATCH.VISC — add a Newtonian viscous Kirchhoff stress to the
+        FLUID material branch (material==6) of
+        `mpm_utils.compute_stress_from_F_trial`. Upstream the fluid stress
+        is pure EOS pressure (inviscid). We add `tau_visc = J·mu·(C + Cᵀ)`
+        where `C = state.particle_C[p]` is the APIC affine velocity matrix
+        (≈ ∇v) and `mu = model.plastic_viscosity` (a struct field unused by
+        the fluid material upstream, so we repurpose it as the dynamic
+        viscosity). mu=0 → byte-identical to inviscid water; mu>0 → honey/
+        oil-grade slow, shear-resisting flow on the MPM solver.
+
+The patches edit the kernel source files in-place before Warp's JIT
 compiler reads them. Idempotent: running twice is a no-op (we detect
 the marker `# [S2.17.PATCH.*]` and skip).
 """
@@ -29,6 +39,7 @@ from ...blocks import block
 # Marker comments we insert after patching to make idempotent
 _SLIP_MARKER = "# [S2.17.PATCH.SLIP applied]"
 _EOS_MARKER = "# [S2.17.PATCH.EOS applied]"
+_VISC_MARKER = "# [S2.17.PATCH.VISC applied]"
 
 
 def _find_warp_mpm_root() -> Path | None:
@@ -131,6 +142,48 @@ def _patch_eos(utils_path: Path) -> bool:
     return True
 
 
+@block("S2.17.PATCH.VISC",
+       "Overlay: add Newtonian viscous stress J·mu·(C+Cᵀ) to the fluid material")
+def _patch_visc(utils_path: Path) -> bool:
+    src = utils_path.read_text(encoding="utf-8")
+    if _VISC_MARKER in src:
+        return False
+    # Anchor on the fluid (material==6) stress branch and append the viscous
+    # term. `state`, `model`, `J`, `p` are all in scope in
+    # compute_stress_from_F_trial; `state.particle_C[p]` is the APIC affine
+    # velocity matrix (≈ ∇v) and `model.plastic_viscosity` is the dynamic
+    # viscosity μ (unused by the fluid material upstream).
+    pattern = re.compile(
+        r"(if model\.material == 6: # fluid\s*\n"
+        r"\s*stress = kirchoff_stress_water\(\s*\n"
+        r"\s*J, model\.bulk\[p\]\s*\n"
+        r"\s*\))"
+    )
+    new_src, n = pattern.subn(
+        lambda m: m.group(1)
+        + "\n            visc_C = state.particle_C[p]  " + _VISC_MARKER
+        + "\n            stress = stress + J * model.plastic_viscosity"
+          " * (visc_C + wp.transpose(visc_C))",
+        src,
+    )
+    if n == 0:
+        raise RuntimeError(
+            "S2.17.PATCH.VISC: could not locate the material==6 fluid stress "
+            f"branch in {utils_path}. warp-mpm version may have changed."
+        )
+    # Same read-only tolerance as SLIP/EOS (round-38).
+    try:
+        utils_path.write_text(new_src, encoding="utf-8")
+    except OSError as exc:
+        import logging as _log
+        _log.getLogger("gpufluid.mpm.patches").warning(
+            "S2.17.PATCH.VISC: cannot write to %s (%s) — install is "
+            "read-only? Patch skipped; [simulation.mpm].viscosity will be "
+            "a no-op (inviscid water).", utils_path, exc)
+        return False
+    return True
+
+
 def apply_patches(warp_mpm_root: Path | str | None = None) -> dict:
     """Apply both upstream patches. Idempotent.
 
@@ -143,7 +196,7 @@ def apply_patches(warp_mpm_root: Path | str | None = None) -> dict:
     Returns
     -------
     dict
-        ``{"slip": applied_bool, "eos": applied_bool, "root": Path}`` —
+        ``{"slip": bool, "eos": bool, "visc": bool, "root": Path}`` —
         boolean ``True`` means the patch was applied now (False = was
         already in place).
     """
@@ -158,4 +211,5 @@ def apply_patches(warp_mpm_root: Path | str | None = None) -> dict:
         root = Path(warp_mpm_root)
     slip = _patch_slip(root / "mpm_solver_warp.py")
     eos = _patch_eos(root / "mpm_utils.py")
-    return {"slip": slip, "eos": eos, "root": root}
+    visc = _patch_visc(root / "mpm_utils.py")
+    return {"slip": slip, "eos": eos, "visc": visc, "root": root}

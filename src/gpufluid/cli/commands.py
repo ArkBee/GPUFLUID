@@ -602,6 +602,7 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         adaptive_max_substeps=int(sim.cfl_max_substeps),
     )
     cfg.fluid.bulk_modulus = sim.mpm_bulk_modulus
+    cfg.fluid.viscosity = sim.mpm_viscosity   # S2.17.PATCH.VISC: Newtonian μ
     cfg.fluid.rpic_damping = sim.mpm_rpic_damping
     cfg.fluid.grid_v_damping_scale = sim.mpm_grid_v_damping
     cache_dir = _resolve_cache_dir(scene)  # audit-r6 #2: scene-dir relative, not CWD

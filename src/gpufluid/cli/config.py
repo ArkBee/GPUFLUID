@@ -229,6 +229,7 @@ class SimulationCfg:
     fps: int = 24
     # MPM-specific knobs (consumed only when solver == "mpm")
     mpm_bulk_modulus: float = 1500.0
+    mpm_viscosity: float = 0.0   # Newtonian dynamic viscosity μ (0 = inviscid water; raise for oil/honey)
     mpm_rpic_damping: float = 0.15
     mpm_grid_v_damping: float = 0.998
     mpm_cube_friction: float = 0.6
@@ -594,6 +595,7 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         frames=int(sim.get("frames", 100)),
         fps=int(sim.get("fps", 24)),
         mpm_bulk_modulus=float(mpm_sub.get("bulk_modulus", 1500.0)),
+        mpm_viscosity=float(mpm_sub.get("viscosity", 0.0)),
         mpm_rpic_damping=float(mpm_sub.get("rpic_damping", 0.15)),
         mpm_grid_v_damping=float(mpm_sub.get("grid_v_damping", 0.998)),
         mpm_cube_friction=float(mpm_sub.get("cube_friction", 0.6)),
