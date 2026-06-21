@@ -119,37 +119,52 @@ def main():
     ok &= _report("settles to rest", s_ok,
                   f"mean tail speed = {mean_tail:.3f} sim/s (< {SETTLE_SPEED} required)")
 
-    # 5. self-diagnosis of over-compression (benchmark iter 1).
-    # Deep numerical incompressibility is a known limit of this weakly-
-    # compressible MPM (raising bulk_modulus alone does NOT hold the column —
-    # it collapses to a ~9-particle/cell film on impact). What the SYSTEM must
-    # not do is hide it: the bake now records seed-vs-settled packing in
-    # cache.json and warns. This checks the system is HONEST about the collapse.
-    seed_vox = {tuple(t) for t in np.floor(frames[0] / DX).astype(int)}
-    exp_depth = len(seed_vox) * DX ** 3 / INNER_AREA
-    p = frames[-1]
-    inside = ((p[:, 0] > 0.30) & (p[:, 0] < 0.70)
-              & (p[:, 1] > 0.30) & (p[:, 1] < 0.70))
-    meas_depth = float(np.percentile(p[inside, 2], 99) - FLOOR) if inside.any() else 0.0
-    collapsed = meas_depth < DEPTH_FRAC * exp_depth  # physics actually collapsed?
+    # 5. over-compression diagnostic CONSISTENCY (benchmark iter 1, hardened
+    # after reviewer-tests #1: a pure "ratio echoes the depth" check is vacuous
+    # because both come from the same settled positions). Deep incompressibility
+    # is a known warp-mpm limit (the column DOES collapse to a ~9/cell film); the
+    # system must (a) RECORD it, (b) the recorded value must MATCH an INDEPENDENT
+    # recompute from the dump (catches a stale / buggy / dishonest diagnostic),
+    # and (c) classify the measured collapse correctly. (a)+(b) is the non-vacuous
+    # part — it regression-guards the whole diagnostic pipeline, not just an echo.
     import json
     meta = {}
     try:
         meta = json.loads((CACHE / "cache.json").read_text())
     except Exception:
         pass
+    res = (meta.get("resolution") or [80])[0]
+    assert abs(DX - 1.0 / res) < 1e-9, (
+        f"benchmark DX={DX} does not match baked resolution {res} — "
+        f"update DX or re-bake bench_dambreak.toml at 80^3")
+
+    def _ppc(pos):  # independent recompute: mean particles per occupied cell
+        cells = np.floor(pos / DX).astype(np.int64)
+        return float(np.unique(cells, axis=0, return_counts=True)[1].mean())
+    seed_ppc, settled_ppc = _ppc(frames[0]), _ppc(frames[-1])
+    meas_ratio = settled_ppc / seed_ppc if seed_ppc > 0 else 0.0
+    # independent geometric view of the collapse (depth vs incompressible).
+    seed_vox = {tuple(t) for t in np.floor(frames[0] / DX).astype(int)}
+    exp_depth = len(seed_vox) * DX ** 3 / INNER_AREA
+    p = frames[-1]
+    inside = ((p[:, 0] > 0.30) & (p[:, 0] < 0.70)
+              & (p[:, 1] > 0.30) & (p[:, 1] < 0.70))
+    meas_depth = float(np.percentile(p[inside, 2], 99) - FLOOR) if inside.any() else 0.0
+    collapsed = meas_depth < DEPTH_FRAC * exp_depth
+
     cr = meta.get("compression_ratio")
     if cr is None:
         c_ok = False
-        detail = ("cache.json has NO compression diagnostic - the bake is SILENT "
+        detail = (f"cache.json has NO compression diagnostic - the bake is SILENT "
                   f"about a {meas_depth / max(exp_depth,1e-9):.0%}-of-volume collapse")
     else:
-        # honest = the recorded ratio agrees with the measured physics.
-        c_ok = (cr >= 3.0) if collapsed else (cr < 3.0)
-        detail = (f"system reports compression_ratio={cr} "
-                  f"(measured depth {meas_depth / max(exp_depth,1e-9):.0%} of incompressible; "
-                  f"collapsed={collapsed}) - diagnosis {'matches' if c_ok else 'WRONG'}")
-    ok &= _report("over-compression self-diagnosis", c_ok, detail)
+        agree = abs(cr - meas_ratio) <= 0.10 * max(meas_ratio, 1.0)  # manifest != stale/buggy
+        classifies = (cr >= 3.0) if collapsed else (cr < 3.0)        # value matches reality
+        c_ok = agree and classifies
+        detail = (f"manifest cr={cr} vs independent recompute {meas_ratio:.2f} "
+                  f"(agree={agree}); measured depth {meas_depth / max(exp_depth,1e-9):.0%} "
+                  f"collapsed={collapsed} classifies={classifies}")
+    ok &= _report("over-compression diagnostic consistency", c_ok, detail)
 
     # 5b. integration-quality recorded (benchmark iter 2). The adaptive-CFL
     # substepper can SATURATE its cap (silently under-resolving); the warning is

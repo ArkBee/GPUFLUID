@@ -89,13 +89,15 @@ def check_tank(cache_dir: Path) -> bool:
     x, y, z = p[:, 0], p[:, 1], p[:, 2]
     inside = (x > 0.27) & (x < 0.73) & (y > 0.27) & (y < 0.73)
     pin = p[inside]
-    depth = float(pin[:, 2].max() - 0.10)
+    # review-fix (reviewer-tests #4): use the 99th percentile, NOT max — a single
+    # splashed/stuck particle must not satisfy the depth gate for the bulk pool.
+    depth = float(np.percentile(pin[:, 2], 99) - 0.10) if len(pin) else 0.0
     # > 0.06 sim ≈ 6 cells: unambiguously a contained POOL, ~12× the ~0.5-cell
     # slip-floor film a soft EOS collapses to (this scene uses bulk_modulus=10000
-    # to stay ~incompressible; achieved depth ≈0.088).
+    # to stay ~incompressible; achieved depth ≈0.085 at p99).
     deep_ok = depth > 0.06
     ok &= _report("deep contained pool", deep_ok,
-                  f"settled depth = {depth:.3f} sim (> 0.06 required)")
+                  f"settled depth(p99) = {depth:.3f} sim (> 0.06 required)")
 
     # level: per-XY-column top-z spread should be small for a flat surface.
     ix = np.clip(((pin[:, 0] - 0.27) / 0.46 * 20).astype(int), 0, 19)
@@ -105,10 +107,20 @@ def check_tank(cache_dir: Path) -> bool:
         k = (cx, cy)
         tops[k] = max(tops.get(k, -1e9), cz)
     col_tops = np.array(list(tops.values()))
-    spread = float(col_tops.std()) if len(col_tops) > 4 else 0.0
-    level_ok = spread < 0.05
-    ok &= _report("level surface", level_ok,
-                  f"column-top std = {spread:.3f} sim (< 0.05 required)")
+    # review-fix (reviewer-tests #2,#3): a degenerate pool covers few columns —
+    # require a real footprint (>=30 of 400 cells), else this is NOT a level pool
+    # (the old `len>4 else 0.0` silently PASSED the degenerate case it should
+    # catch). Threshold tightened 0.05 -> 0.02 sim (~1.6 cells; achieved ~0.002)
+    # so a surface tilted more than a couple cells actually fails.
+    if len(col_tops) < 30:
+        level_ok = False
+        level_detail = (f"only {len(col_tops)} interior columns occupied "
+                        f"(>=30 required) — pool is degenerate, not a level sheet")
+    else:
+        spread = float(col_tops.std())
+        level_ok = spread < 0.02
+        level_detail = f"column-top std = {spread:.3f} sim (< 0.02 required)"
+    ok &= _report("level surface", level_ok, level_detail)
     return ok
 
 
@@ -147,12 +159,20 @@ def check_sphere(cache_dir: Path) -> bool:
     shell = p[(rad < 0.35) & (p[:, 2] > 0.15) & (p[:, 2] < 0.52)]
     nx_p = int((shell[:, 0] > 0.5).sum()); nx_m = int((shell[:, 0] < 0.5).sum())
     ny_p = int((shell[:, 1] > 0.5).sum()); ny_m = int((shell[:, 1] < 0.5).sum())
-    ax = abs(nx_p - nx_m) / max(1, nx_p + nx_m)
-    ay = abs(ny_p - ny_m) / max(1, ny_p + ny_m)
-    sym_ok = ax < 0.15 and ay < 0.15
-    ok &= _report("symmetric shedding", sym_ok,
-                  f"frame {best_f}: asym_X={ax:.2%}, asym_Y={ay:.2%} "
-                  f"(both < 15% required; n_shell={best_n})")
+    # review-fix (reviewer-tests #5): symmetry is meaningless on an empty/sparse
+    # shell (|L-R|/max(1,..)=0 would FALSE-PASS). Require a real population of
+    # shedding particles before judging symmetry.
+    if best_n < 200:
+        sym_ok = False
+        sym_detail = (f"peak shell only {best_n} particles (>=200 required) — "
+                      f"not enough water on the sphere to judge symmetry")
+    else:
+        ax = abs(nx_p - nx_m) / (nx_p + nx_m)
+        ay = abs(ny_p - ny_m) / (ny_p + ny_m)
+        sym_ok = ax < 0.15 and ay < 0.15
+        sym_detail = (f"frame {best_f}: asym_X={ax:.2%}, asym_Y={ay:.2%} "
+                      f"(both < 15% required; n_shell={best_n})")
+    ok &= _report("symmetric shedding", sym_ok, sym_detail)
 
     # DRAINAGE: final frame, almost everything reached the floor (z < 0.20).
     p = frames[-1]
