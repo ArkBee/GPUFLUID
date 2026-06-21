@@ -234,6 +234,14 @@ class SimulationCfg:
     mpm_cube_friction: float = 0.6
     mpm_v_terminal: float = -1.0
     mpm_vz_max_splash: float = 0.3
+    # 2026-06-21 prod-hardening: the tap (terminal-velocity) + anti-splash vz
+    # caps are FAUCET/splash heuristics, ON by default and active in the initial-
+    # column footprint / above the obstacle mid-height. For a released-block or
+    # dam-break scene they clamp legitimate bulk motion (independent review).
+    # `velocity_caps=false` disables BOTH so such scenes run uncapped. Default
+    # True keeps the tuned faucet/cascade demos byte-identical.
+    mpm_velocity_caps: bool = True
+    mpm_vz_min_splash: float = -2.0   # was hardcoded in commands.py; now tunable
     mpm_initial_velocity: float = -0.3
 
 
@@ -591,6 +599,8 @@ def load_scene(path: Union[str, Path]) -> SceneCfg:
         mpm_cube_friction=float(mpm_sub.get("cube_friction", 0.6)),
         mpm_v_terminal=float(mpm_sub.get("v_terminal", -1.0)),
         mpm_vz_max_splash=float(mpm_sub.get("vz_max_splash", 0.3)),
+        mpm_velocity_caps=bool(mpm_sub.get("velocity_caps", True)),
+        mpm_vz_min_splash=float(mpm_sub.get("vz_min_splash", -2.0)),
         mpm_initial_velocity=float(mpm_sub.get("initial_velocity", -0.3)),
     )
 

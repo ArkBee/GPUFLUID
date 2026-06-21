@@ -567,17 +567,23 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
         cylinders=tuple(cylinders),
         meshes=tuple(meshes),
         gravity=g_norm,
-        tap=MpmTap(
+        # 2026-06-21 prod-hardening: the tap (terminal-velocity) + anti-splash
+        # caps are faucet/splash heuristics that clamp legitimate bulk motion in
+        # a released-block / dam-break scene (independent review). `[simulation.
+        # mpm].velocity_caps = false` disables BOTH (the solver already guards
+        # `if cfg.tap/anti_splash is not None`). Default True -> tuned faucet/
+        # cascade demos stay byte-identical. vz_min is now a knob (was hardcoded).
+        tap=(MpmTap(
             lo_x=cx - half - 0.005, hi_x=cx + half + 0.005,
             lo_y=cy - half - 0.005, hi_y=cy + half + 0.005,
             z_min=tap_z_min,
             v_terminal=sim.mpm_v_terminal * inv_dom_z,
-        ),
-        anti_splash=MpmAntiSplash(
+        ) if sim.mpm_velocity_caps else None),
+        anti_splash=(MpmAntiSplash(
             z_threshold=anti_splash_z,
-            vz_min=-2.0 * inv_dom_z,
+            vz_min=sim.mpm_vz_min_splash * inv_dom_z,
             vz_max=sim.mpm_vz_max_splash * inv_dom_z,
-        ),
+        ) if sim.mpm_velocity_caps else None),
         dt=sim.dt,
         # S2.17.9 (FU-023): reuse the existing [simulation] cfl knobs (shared
         # with the FLIP CFL path) to drive MPM adaptive substepping. Off by
