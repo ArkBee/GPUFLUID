@@ -994,8 +994,13 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     # 2026-06-21: same stale-output strip as the MPM path (§9.6 twin) — a
     # shorter re-bake into this cache_dir would otherwise leave a stale frame
     # tail. No-op on resume/start-frame.
+    # 2026-06-21 (review wave): whitewater + whitewater_kinds also write
+    # fixed-name frame_{idx:04d}.npy per frame (lines ~1320/1325), so a
+    # shorter re-bake left a stale foam TAIL the renderer would mix with the
+    # new bake — the §9.6 twin of the mesh/particles tail this strip removes.
     _n_stale = _clear_stale_frame_outputs(
-        cache_dir, ("mesh", "particles", "colors", "temperatures"), args)
+        cache_dir, ("mesh", "particles", "colors", "temperatures",
+                    "whitewater", "whitewater_kinds"), args)
     if _n_stale:
         print(f"[flip] cleared {_n_stale} stale frame file(s) from a prior bake "
               f"in {cache_dir}")

@@ -76,6 +76,34 @@ def test_missing_subdirs_are_noop(tmp_path):
     assert _clear_stale_frame_outputs(cd, ("particles_raw", "mesh"), _args()) == 0
 
 
+def test_strip_clears_whitewater_subdirs(tmp_path):
+    """Review-wave bug (2026-06-21): the FLIP bake also writes per-frame
+    whitewater/ + whitewater_kinds/ frame_NNNN.npy. A shorter re-bake left a
+    stale foam tail the renderer mixed with the new bake — the §9.6 twin of
+    the mesh tail. The helper must clear those subdirs when listed."""
+    cd = tmp_path / "cache"
+    (cd / "whitewater").mkdir(parents=True)
+    (cd / "whitewater_kinds").mkdir()
+    for i in range(4):
+        (cd / "whitewater" / f"frame_{i:04d}.npy").write_text("x")
+        (cd / "whitewater_kinds" / f"frame_{i:04d}.npy").write_text("x")
+    n = _clear_stale_frame_outputs(
+        cd, ("mesh", "particles", "colors", "temperatures",
+             "whitewater", "whitewater_kinds"), _args())
+    assert n == 8, f"should clear 4+4 stale whitewater frame files, removed {n}"
+    assert list((cd / "whitewater").iterdir()) == []
+    assert list((cd / "whitewater_kinds").iterdir()) == []
+
+
+def test_flip_strip_includes_whitewater():
+    """§9.12: the FLIP strip tuple must list BOTH whitewater subdirs (the
+    review-wave gap). Without this the renderer reads a mixed-bake foam tail."""
+    code = "\n".join(l for l in COMMANDS.read_text(encoding="utf-8").splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert '"whitewater", "whitewater_kinds"' in code, (
+        "FLIP stale-strip must include whitewater + whitewater_kinds subdirs")
+
+
 def test_both_bake_paths_call_the_strip():
     """§9.12: MPM and FLIP bakes must both invoke the helper (the FLIP twin was
     the §9.6 mirror — easy to fix one path and forget the other)."""

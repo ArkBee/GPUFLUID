@@ -41,7 +41,7 @@ def test_f3_5_checkpoint_resume_matches_uninterrupted(tmp_path: Path):
     assert rms < 1e-3, f"resume mismatch: rms={rms:.5f}"
 
 
-def test_resume_adds_no_divergence_beyond_atomic_noise_floor():
+def test_resume_adds_no_divergence_beyond_atomic_noise_floor(tmp_path: Path):
     """2026-06-21 (FLIP-resume determinism): the resume-vs-continuous test
     above tolerates rms<1e-3, but the solver's actual run-to-run divergence
     is ~1e-9 (GPU atomic-add ordering in P2G scatter is non-deterministic).
@@ -68,8 +68,7 @@ def test_resume_adds_no_divergence_beyond_atomic_noise_floor():
     rms_floor = float(np.sqrt(((a - b) ** 2).sum(1).mean()))
 
     s = make(); bake(s, 10)
-    import tempfile, os
-    ck = os.path.join(tempfile.gettempdir(), "det_floor_ck.npz")
+    ck = tmp_path / "det_floor_ck.npz"   # tmp_path: no fixed-path collision under -n
     s.save_checkpoint(ck)
     s2 = FlipSolver3D(nx=16, ny=16, nz=16, dx=1 / 16); s2.load_checkpoint(ck)
     c = bake(s2, 10)
