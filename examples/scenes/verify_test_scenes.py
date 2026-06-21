@@ -16,11 +16,10 @@ Usage:
     python verify_test_scenes.py sphere
     python verify_test_scenes.py all      # both; exit 1 if ANY criterion fails
 
-Run AFTER baking each scene (`gpufluid simulate examples/scenes/demo_<name>.toml`)
-into a FRESH cache_dir — particle dumps are named by cumulative sub-step count,
-which differs between bakes, so re-baking into a reused dir leaves STALE files
-alongside the new ones (the mass-conservation check below catches this as a
-count drift). Delete tmp/demo_<name> before re-baking.
+Run AFTER baking each scene (`gpufluid simulate examples/scenes/demo_<name>.toml`).
+As of 2026-06-21 the bake STRIPS stale per-frame files from a reused cache_dir
+itself (cli/commands.py _clear_stale_frame_outputs), so re-baking is safe; the
+mass-conservation check below still guards against any stale-file mix.
 Exit code 0 = all checked criteria passed, 1 = at least one failed.
 """
 from __future__ import annotations

@@ -117,6 +117,47 @@ def _resolve_cache_dir(scene) -> Path:
     return cache_dir.resolve()
 
 
+def _clear_stale_frame_outputs(cache_dir: Path, subdirs, args) -> int:
+    """Root-cause fix (2026-06-21): a re-bake into a REUSED cache_dir used to
+    leave stale per-frame files from the previous run.
+
+    Two failure modes this removes:
+      * mesh frames use fixed ``frame_{idx:04d}`` names, so a SHORTER re-bake
+        left a stale TAIL (frames N..M of the old, longer bake) that inflates the
+        on-disk frame_count (the round-60 hazard the addon already strips for);
+      * MPM particle dumps are named by cumulative sub-step count
+        (``sim_{substeps:010d}.ply``) which differs EVERY bake (CFL varies
+        substeps/frame), so they ACCUMULATE without limit and any cache reader
+        (renderer, verify scripts) sees a MIX of two bakes.
+
+    Skipped on ``--resume`` / ``--start-frame > 0`` — those legitimately
+    continue a prior cache. Only the named per-frame SUBDIRS are touched;
+    ``cache.json`` and ``checkpoint_*.npz`` live in the cache_dir root and are
+    never removed. Windows-robust: retries a transiently-locked delete (WinError
+    32/145). Returns the number of files removed.
+    """
+    if getattr(args, "resume", None) or int(getattr(args, "start_frame", 0) or 0) > 0:
+        return 0
+    removed = 0
+    for name in subdirs:
+        d = cache_dir / name
+        if not d.is_dir():
+            continue
+        for f in list(d.iterdir()):
+            if not f.is_file():
+                continue
+            for attempt in range(3):  # dodge: transient Windows file lock
+                try:
+                    f.unlink()
+                    removed += 1
+                    break
+                except OSError:
+                    if attempt == 2:
+                        break
+                    time.sleep(0.05)
+    return removed
+
+
 # [BLK C7.2]
 @block("C7.2", "simulate command: run a scene and write a mesh cache")
 def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
@@ -497,6 +538,14 @@ def _cmd_simulate_mpm(args: argparse.Namespace, scene) -> int:
     cfg.fluid.rpic_damping = sim.mpm_rpic_damping
     cfg.fluid.grid_v_damping_scale = sim.mpm_grid_v_damping
     cache_dir = _resolve_cache_dir(scene)  # audit-r6 #2: scene-dir relative, not CWD
+    # 2026-06-21: strip stale per-frame files from a prior bake into this same
+    # cache_dir before writing (else sub-step-named particle dumps accumulate +
+    # a shorter re-bake leaves a stale mesh tail). No-op on resume/start-frame.
+    _n_stale = _clear_stale_frame_outputs(
+        cache_dir, ("particles_raw", "mesh", "colors", "temperatures"), args)
+    if _n_stale:
+        print(f"[mpm] cleared {_n_stale} stale frame file(s) from a prior bake "
+              f"in {cache_dir}")
     particles_dir = cache_dir / "particles_raw"  # raw MpmSolver dump location
     mesh_dir = cache_dir / "mesh"
     particles_dir.mkdir(parents=True, exist_ok=True)
@@ -834,6 +883,14 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
     cache_dir = _resolve_cache_dir(scene)  # audit-r6 #2: shared with the MPM path
     cache_dir.mkdir(parents=True, exist_ok=True)
+    # 2026-06-21: same stale-output strip as the MPM path (§9.6 twin) — a
+    # shorter re-bake into this cache_dir would otherwise leave a stale frame
+    # tail. No-op on resume/start-frame.
+    _n_stale = _clear_stale_frame_outputs(
+        cache_dir, ("mesh", "particles", "colors", "temperatures"), args)
+    if _n_stale:
+        print(f"[flip] cleared {_n_stale} stale frame file(s) from a prior bake "
+              f"in {cache_dir}")
     mesh_dir = cache_dir / "mesh"; mesh_dir.mkdir(exist_ok=True)
     parts_dir = cache_dir / "particles"
     if scene.output.particles:
