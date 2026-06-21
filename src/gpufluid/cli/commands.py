@@ -1269,20 +1269,23 @@ def cmd_simulate(args: argparse.Namespace) -> int:
             fpos, fvel = solver.get_particles()
             # W7.4 — share the M5 density grid so whitewater can classify
             # spray/foam/bubble at emit time and pop bubbles at the surface.
-            # audit-2026-06-14r2 #2/#5/#12: extractor.dens is only the calibrated
-            # [0,1] DENSITY field the classifier's 0.2/0.8 thresholds expect when
-            # mesh_method == 'trilinear'. For 'sdf' it is a signed distance
-            # (negative inside → spray/bubble INVERTED); for 'cubic' it is
-            # inflated >1 (almost everything → bubble); and on an empty-particle
-            # frame extract() returns (None,None) and leaves dens STALE from the
-            # previous frame. In all those cases pass None — the classifier then
-            # treats everything as foam (its documented no-grid fallback) instead
-            # of misclassifying against the wrong field.
+            # Only the 'trilinear' grid is usable: 'sdf' is a signed distance
+            # (negative inside → spray/bubble INVERTED), 'cubic' is inflated, and
+            # an empty-particle frame leaves dens STALE — pass None in those cases
+            # (the classifier then treats everything as foam, its documented
+            # no-grid fallback) (audit-2026-06-14r2 #2/#5/#12).
+            # audit-2026-06-21 (reviewer-whitewater H2): even the trilinear grid
+            # is the raw particle COUNT (~ppc per submerged cell), NOT the [0,1]
+            # field the 0.2/0.8 thresholds expect — so it MUST be calibrated, or
+            # every submerged sample reads >0.8 and is misclassified BUBBLE
+            # (foam vanishes). calibrate_density_field normalises by the bulk
+            # density (ppc/source-agnostic).
             ww_density = None
             if (extractor is not None
                     and scene.output.mesh_method == "trilinear"
                     and verts is not None and len(verts) > 0):
-                ww_density = extractor.dens.numpy()
+                from ..sim.whitewater import calibrate_density_field
+                ww_density = calibrate_density_field(extractor.dens.numpy())
             # B3.3 — optionally compute the W7.7 trapped-air potential and
             # pass it as the emit weight, so genuine turbulence pockets emit
             # whitewater rather than every fast-moving bulk particle.

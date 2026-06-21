@@ -82,6 +82,34 @@ def _world_to_cell(pos: np.ndarray, dx: float, shape):
     return i, j, k
 
 
+def calibrate_density_field(dens: np.ndarray) -> np.ndarray:
+    """Normalise a particle-count density grid to ~[0,1] for the classifier.
+
+    audit-2026-06-21 (reviewer-whitewater H2): the M5 trilinear density grid
+    (MeshExtractor.dens) holds the raw scattered particle COUNT per cell —
+    ``k_density_scatter`` deposits weight 1 per particle, so a fully-packed cell
+    reads ≈ ppc (≈8 by default), NOT the [0,1] field the classifier's 0.2/0.8
+    thresholds expect. Passed raw, every submerged sample read > 0.8 → everything
+    was misclassified BUBBLE and foam vanished (a prior comment wrongly called
+    the trilinear field "calibrated [0,1]").
+
+    Calibrate by the BULK density (90th percentile of occupied cells → 1.0). This
+    is self-calibrating: independent of ppc, the number of sources, and the
+    trilinear+box-blur smoothing, so submerged bulk → ~1 (bubble), the surface
+    band → 0.2–0.8 (foam), and isolated cells → < 0.2 (spray), as intended.
+    Returns the input unchanged if it is empty/all-zero.
+    """
+    if dens is None:
+        return dens
+    occupied = dens[dens > 1e-6]
+    if occupied.size == 0:
+        return dens
+    ref = float(np.percentile(occupied, 90))
+    if ref <= 1e-6:
+        return dens
+    return dens / ref
+
+
 # [BLK W7.1]
 @block("W7.1", "Whitewater state container + per-frame update (foam/spray/bubble)")
 class WhitewaterSystem:
