@@ -201,10 +201,35 @@ def read_points_ply(path: Union[str, Path]) -> np.ndarray:
         header = header_bytes.decode("ascii", errors="replace")
         if "format binary_little_endian" not in header:
             raise BlockError("I6.1.MESH", f"unsupported PLY format in {path}")
+        # 2026-06-21 (reviewer-io, §9.6 mirror of read_ply): validate the vertex
+        # layout. Pre-fix this read n_v*12 bytes assuming pure xyz; an xyz+rgb
+        # PLY (15 B/vertex) was silently misread as float coords (garbage), no
+        # error. Reject anything that isn't exactly 3 float props (x,y,z) and
+        # point the caller at read_ply (the writer only ever emits pure xyz, so
+        # the normal points pipeline is unaffected).
         n_v = 0
+        in_vertex = False
+        vert_props = []
         for line in header.splitlines():
-            if line.startswith("element vertex"):
-                n_v = int(line.split()[2])
+            toks = line.split()
+            if not toks:
+                continue
+            if toks[0] == "element":
+                in_vertex = len(toks) >= 2 and toks[1] == "vertex"
+                if in_vertex:
+                    n_v = int(toks[2])
+            elif toks[0] == "property" and in_vertex:
+                vert_props.append(tuple(toks[1:]))
+        names = [p[-1] for p in vert_props]
+        types = [p[0] for p in vert_props]
+        if names != ["x", "y", "z"] or any(t not in ("float", "float32")
+                                            for t in types):
+            raise BlockError(
+                "I6.1.MESH",
+                f"read_points_ply expects exactly 3 float vertex properties "
+                f"(x,y,z); got {vert_props} in {path}. Use read_ply for mesh / "
+                f"coloured PLYs (this guards against silently reading rgb bytes "
+                f"as coordinates).")
         if n_v == 0:
             return np.empty((0, 3), dtype=np.float32)
         return np.frombuffer(f.read(n_v * 12), dtype=np.float32).reshape(n_v, 3).copy()
