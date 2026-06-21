@@ -677,12 +677,31 @@ def build_scene(cache: Path, label: str, fluid_color: tuple,
             # Obstacle-mesh scale is scalar/uniform in the bake, which commutes
             # with the rotation, so Blender's T@R@S order matches rotate→scale.)
             scale = obs.get("scale", 1.0)
+            rot = obs.get("rotate_deg")
             if isinstance(scale, (list, tuple)):
-                ob.scale = (float(scale[0]), float(scale[1]), float(scale[2]))
+                sx, sy, sz = float(scale[0]), float(scale[1]), float(scale[2])
+                ob.scale = (sx, sy, sz)
+                # dodge: Blender's matrix_world is T@R@S but the bake maps verts
+                # rotate->scale->translate (T@S@R). Those agree ONLY when S
+                # commutes with R — true for a uniform scalar scale, FALSE for a
+                # non-uniform vec3 scale on a ROTATED mesh. The bake emits scalar
+                # mesh-obstacle scale today (so this branch is latent), but warn
+                # loudly if a non-uniform scale ever rides a rotation, else the
+                # render would silently tilt differently from the collider (§9.10
+                # review-wave-2: don't let a future vec3 scale hide a drift).
+                _uniform = abs(sx - sy) < 1e-6 and abs(sy - sz) < 1e-6
+                _rotated = bool(rot) and any(
+                    abs(float(a)) > 1e-6
+                    for a in (rot if isinstance(rot, (list, tuple)) else (rot,)))
+                if _rotated and not _uniform:
+                    print(f"[warn] obstacle {idx}: non-uniform scale "
+                          f"{(sx, sy, sz)} on a rotated mesh — rendered pose may "
+                          f"not match the collider (scale/rotation don't commute; "
+                          f"bake uses rotate->scale order).")
             else:
                 ob.scale = (float(scale),) * 3
             ob.location = tuple(obs.get("translate", (0, 0, 0)))
-            extra = _mesh_rotate_deg_to_quat(obs.get("rotate_deg"))
+            extra = _mesh_rotate_deg_to_quat(rot)
             _finish_obstacle(ob, idx, extra_rot=extra)
         else:
             print(f"[warn] FU-033: unknown obstacle type {otype!r} "

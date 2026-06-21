@@ -146,11 +146,17 @@ def test_none_and_empty_give_identity():
 
 def test_mesh_branch_applies_rotate_deg():
     code = _code_only()
-    assert "_mesh_rotate_deg_to_quat(obs.get(\"rotate_deg\"))" in code, (
+    # review-wave-2: the branch now binds `rot = obs.get("rotate_deg")` once
+    # (so the non-uniform-scale guard can inspect it) and feeds `rot` to the
+    # quat builder — semantically identical to the old inline form; the guard
+    # is that rotate_deg is NOT dropped before _finish_obstacle.
+    assert "rot = obs.get(\"rotate_deg\")" in code, (
+        "regressed: the mesh branch must read rotate_deg from the payload")
+    assert "_mesh_rotate_deg_to_quat(rot)" in code, (
         "regressed: the mesh obstacle render branch must convert rotate_deg "
         "to an extra rotation (else a tilted mesh renders axis-aligned)")
     # and it must be threaded into _finish_obstacle as extra_rot.
-    pos = code.find("_mesh_rotate_deg_to_quat(obs.get")
+    pos = code.find("extra = _mesh_rotate_deg_to_quat(rot)")
     window = code[pos:pos + 160]
     assert "extra_rot=extra" in window, (
         "the mesh rotate_deg quat must be passed to _finish_obstacle as "
