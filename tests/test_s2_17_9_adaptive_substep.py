@@ -108,6 +108,9 @@ def _spy_solver(adaptive, n_sub, saturated=False):
     s._post_step = lambda si: counts.__setitem__("post", counts["post"] + 1)
     s._apply_pushback = lambda: counts.__setitem__(
         "pushback", counts["pushback"] + 1)
+    # reviewer-velcaps H4: caps now run per sub-step too (sibling of pushback);
+    # stub so the spy no-ops on the cfg without tap/anti_splash attrs.
+    s._apply_velcaps = lambda: None
     s._cfl_substeps = lambda: (n_sub, saturated)
     return s, counts
 

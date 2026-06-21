@@ -646,6 +646,18 @@ class MpmSolver:
         wp.launch(k_wall_pushback, dim=self.n_particles,
                   inputs=[self.mpm.mpm_state, *self._wall_lo, *self._wall_hi],
                   device=cfg.device)
+        self._apply_velcaps()
+
+    def _apply_velcaps(self) -> None:
+        """Tap terminal-velocity + anti-splash vz caps (pre-P2G outlier removal).
+
+        2026-06-21 (reviewer-velcaps H4): these MUST run before EVERY p2g2p so a
+        sub-step can't seed corrupted F from a bad-velocity outlier. Pre-fix they
+        ran once in _pre_step while pushback was mirrored into the adaptive
+        sub-step loop (FU-028) — so under N-substep CFL the caps were ~Nx weaker
+        than intended (a §9.6 mirror gap). Now applied per sub-step too. Both
+        caps are None when [simulation.mpm].velocity_caps=false (the opt-out)."""
+        cfg = self.cfg
         if cfg.tap is not None:
             wp.launch(k_tap_terminal_velocity, dim=self.n_particles,
                       inputs=[self.mpm.mpm_state,
@@ -818,6 +830,12 @@ class MpmSolver:
                 # drain box BEFORE the next sub-step advects it out).
                 self._apply_pushback()
                 self._apply_outflows(step_index)
+                # 2026-06-21 (reviewer-velcaps H4): also re-apply the velocity
+                # caps each sub-step (mirror of the pushback above) so the next
+                # sub-step's P2G can't seed corrupted F from a bad-velocity
+                # outlier. Pre-fix they ran only once in _pre_step -> ~Nx weaker
+                # than intended under substepping. No-op when velocity_caps=false.
+                self._apply_velcaps()
             # No _post_step here: the loop tail already ran the identical
             # pushback+drain pair after the final sub-step. Re-running it
             # was the redundant idempotent double-launch flagged in

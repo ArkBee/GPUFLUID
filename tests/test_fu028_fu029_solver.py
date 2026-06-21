@@ -42,6 +42,7 @@ def _drain_spy(n_sub, drain_lo, drain_hi, z0, vz):
     s._outflow_params = []          # unused: _apply_outflows replaced below
     s._pre_step = lambda si: None
     s._apply_pushback = lambda: None
+    s._apply_velcaps = lambda: None   # per-substep sibling (reviewer-velcaps H4)
     s._cfl_substeps = lambda: (n_sub, False)
 
     def record_outflows(si):
